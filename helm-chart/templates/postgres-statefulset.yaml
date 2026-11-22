@@ -1,12 +1,11 @@
-{{- if and .Values.postgres.enabled (eq .Values.config.db.type "postgres") }}
-{{- if and .Release.IsInstall (not .Values.secrets.existingSecret) (not .Values.postgres.auth.password) }}
-{{- $pvcName := printf "data-%s-postgres-0" (include "greenkube.fullname" .) }}
-{{- $existingPvc := lookup "v1" "PersistentVolumeClaim" .Release.Namespace $pvcName }}
-{{- $existingSecret := lookup "v1" "Secret" .Release.Namespace (include "greenkube.secretName" .) }}
-{{- if and $existingPvc (not $existingSecret) }}
-{{- fail (printf "A PostgreSQL volume (%s) already exists in namespace %s but the chart-managed Secret no longer exists. A newly generated password cannot authenticate against the existing database. Delete the volume for a clean install (kubectl -n %s delete pvc %s), or provide the original password with postgres.auth.password or secrets.existingSecret." $pvcName .Release.Namespace .Release.Namespace $pvcName) }}
-{{- end }}
-{{- end }}
+{{- /* Validates the values first: a 0.3.x SQLite release fails with the migration commands (F17). */ -}}
+{{- $_ := include "greenkube.values" . }}
+{{- if include "greenkube.bundledPostgres" . }}
+{{- /*
+A retained PostgreSQL volume is protected at run time by the credentials
+bootstrap hook, which refuses to generate a new password for it. A
+render-time lookup cannot work under Argo CD (`helm template`), BUG-58.
+*/}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -24,9 +23,20 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "greenkube.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: postgres
+        {{- include "greenkube.podLabels" (dict "context" . "cfg" .Values.postgres "component" "postgres") | nindent 8 }}
+      {{- with .Values.postgres.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
+      {{- with include "greenkube.imagePullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with include "greenkube.podScheduling" (dict "context" . "cfg" .Values.postgres "component" "postgres" "replicas" 1) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      # Room for a clean shutdown checkpoint before SIGKILL.
+      terminationGracePeriodSeconds: {{ .Values.postgres.terminationGracePeriodSeconds | default 60 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 70
@@ -34,28 +44,12 @@ spec:
         fsGroup: 70
         seccompProfile:
           type: RuntimeDefault
-      initContainers:
-        # The official postgres entrypoint runs "chmod 2777 /var/run/postgresql"
-        # which fails when the container runs as non-root (UID 70).
-        # This init container pre-sets the correct permissions on the emptyDir.
-        - name: init-pgrun-perms
-          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
-          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
-          securityContext:
-            runAsUser: 0
-            runAsNonRoot: false
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-              add: ["CHOWN", "FOWNER"]
-          command: ["sh", "-c", "chmod 2777 /var/run/postgresql && chown 70:70 /var/run/postgresql"]
-          volumeMounts:
-            - name: pg-run
-              mountPath: /var/run/postgresql
+      # No root init container (N5, Pod Security "restricted"): fsGroup makes
+      # the /var/run/postgresql emptyDir group-writable for UID 70, and the
+      # official entrypoint ignores its own failed "chmod" on that directory.
       containers:
         - name: postgres
-          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          image: {{ include "greenkube.helperImage" .Values.postgres.image | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -75,7 +69,7 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "greenkube.secretName" . }}
+                  name: {{ include "greenkube.secretNameFor" (dict "context" . "key" "POSTGRES_PASSWORD") }}
                   key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database }}
@@ -118,6 +112,12 @@ spec:
               mountPath: /var/run/postgresql
             - name: pg-tmp
               mountPath: /tmp
+            {{- if .Values.postgres.shmSizeLimit }}
+            # Parallel query workers use POSIX shared memory; the runtime default
+            # /dev/shm (64Mi) makes large aggregations fail with "No space left on device".
+            - name: dshm
+              mountPath: /dev/shm
+            {{- end }}
       {{- if not .Values.postgres.persistence.enabled }}
       volumes:
         - name: data
@@ -128,6 +128,12 @@ spec:
         - name: pg-tmp
           emptyDir:
             sizeLimit: 64Mi
+        {{- if .Values.postgres.shmSizeLimit }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.postgres.shmSizeLimit }}
+        {{- end }}
       {{- else }}
       volumes:
         - name: pg-run
@@ -136,6 +142,12 @@ spec:
         - name: pg-tmp
           emptyDir:
             sizeLimit: 64Mi
+        {{- if .Values.postgres.shmSizeLimit }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.postgres.shmSizeLimit }}
+        {{- end }}
       {{- end }}
   {{- if .Values.postgres.persistence.enabled }}
   volumeClaimTemplates:

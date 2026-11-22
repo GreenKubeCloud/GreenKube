@@ -796,7 +796,8 @@ async def test_legacy_automation_state_backfill_and_quarantine_are_idempotent(tm
         await runner._execute_sql(connection, migration_sql)
         await runner._record_migration(connection, 34, "legacy_automation_state")
         await connection.commit()
-        assert await runner.run(connection) == 3
+        later_migrations = [version for version, _, _ in runner._discover_scripts() if version > 34]
+        assert await runner.run(connection) == len(later_migrations)
         assert await runner.run(connection) == 0
 
     with sqlite3.connect(db_file) as connection:
@@ -1235,7 +1236,8 @@ async def test_postgres_gitops_migrations_apply_to_empty_and_existing_schemas():
             "SELECT id, status, action_status FROM recommendation_history ORDER BY id"
         )
         assert [(row["id"], row["status"], row["action_status"]) for row in migrated_recommendations] == [
-            (101, "active", "pr_open"),
+            # 0061: a recommendation whose pull request is open is pr_open.
+            (101, "pr_open", "pr_open"),
             (102, "active", "none"),
         ]
         migrated_pr_rows = await connection.fetch(
@@ -1296,6 +1298,12 @@ async def test_postgres_gitops_migrations_apply_to_empty_and_existing_schemas():
             """
         )
         assert await connection.fetchval("SELECT COUNT(*) FROM repository_bindings WHERE status = 'stale'") == 1
+        # 0220 (F-10): user-cancelled plans and their status reason.
+        await connection.execute(
+            "INSERT INTO automation_plans (plan_id, status, status_reason) VALUES ('p-cancel', 'cancelled', 'r')"
+        )
+        with pytest.raises(asyncpg.CheckViolationError):
+            await connection.execute("INSERT INTO automation_plans (plan_id, status) VALUES ('p-bogus', 'bogus')")
     finally:
         try:
             await connection.execute("SET search_path TO public")
@@ -1303,3 +1311,49 @@ async def test_postgres_gitops_migrations_apply_to_empty_and_existing_schemas():
             await connection.execute(f'DROP SCHEMA IF EXISTS "{existing_schema}" CASCADE')
         finally:
             await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_plan_cancelled_status_migration_keeps_plans_and_their_children(tmp_path):
+    """F-10 (0220): the SQLite rebuild of automation_plans keeps every row and child row."""
+    db_file = str(tmp_path / "plan-cancelled.db")
+    await _create_database_at_migration(db_file, target_version=219)
+    columns = (
+        "plan_id, source_id, provider_id, source_snapshot, action_json, change_set_id, base_revision, "
+        "source_revision, renderer, diff, rendered_diff, digest, validation, warnings, policy_result, status, "
+        "expires_at, created_at, updated_at, rollback_of_plan_id, file_plan_summary, committed_on_revision, "
+        "delivery_mode"
+    )
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            "INSERT INTO automation_plans (plan_id, status, delivery_mode, digest) VALUES (?, ?, ?, ?)",
+            ("plan-old", "stale", "direct", "sha256:" + "a" * 64),
+        )
+        connection.execute(
+            "INSERT INTO automation_plan_files (plan_id, path, operation) VALUES (?, ?, ?)",
+            ("plan-old", "a.yaml", "update"),
+        )
+        before = connection.execute(f"SELECT {columns} FROM automation_plans ORDER BY plan_id").fetchall()
+
+    await _setup_sqlite_database(db_file)
+
+    with sqlite3.connect(db_file) as connection:
+        after = connection.execute(f"SELECT {columns} FROM automation_plans ORDER BY plan_id").fetchall()
+        files = connection.execute("SELECT plan_id, path FROM automation_plan_files").fetchall()
+        connection.execute(
+            "INSERT INTO automation_plans (plan_id, status, status_reason) VALUES (?, ?, ?)",
+            ("p2", "cancelled", "cancelled_by_user"),
+        )
+        indexes = {row[1] for row in connection.execute("PRAGMA index_list(automation_plans)").fetchall()}
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("INSERT INTO automation_plans (plan_id, status) VALUES (?, ?)", ("p3", "bogus"))
+
+    assert after == before
+    assert files == [("plan-old", "a.yaml")]
+    assert {
+        "idx_automation_plans_status_expiry",
+        "idx_automation_plans_rollback_of",
+        "idx_automation_plans_status_created",
+        "idx_automation_plans_source_created",
+        "idx_automation_plans_workload",
+    } <= indexes

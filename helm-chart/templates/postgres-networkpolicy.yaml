@@ -1,0 +1,51 @@
+{{- /*
+Ingress isolation of the bundled PostgreSQL (security hardening, on by default).
+
+Only GreenKube's own database clients in the release namespace reach port 5432:
+the api, controller and worker (and backup or copy Jobs that carry the
+greenkube.cloud/postgres-client: "true" label, or a backup component label).
+The renderer sandbox and every other pod of the cluster
+are refused. Ingress only: PostgreSQL itself makes no outbound connection, and
+an egress rule would need the cluster DNS layout. Clusters whose CNI does not
+enforce NetworkPolicy ignore it (see docs/security-model.md).
+*/ -}}
+{{- $policy := (.Values.postgres.networkPolicy | default dict) -}}
+{{- if and (include "greenkube.bundledPostgres" .) (ne $policy.enabled false) }}
+{{- $additional := $policy.additionalIngress | default (list) -}}
+{{- if not (kindIs "slice" $additional) -}}
+{{- fail "postgres.networkPolicy.additionalIngress must be a list of NetworkPolicy ingress peers" -}}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-postgres-netpol" (include "greenkube.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "greenkube.selectorLabels" . | nindent 14 }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: [api, controller, worker, backup, postgres-backup, db-backup, db-copy]
+        - podSelector:
+            matchLabels:
+              greenkube.cloud/postgres-client: "true"
+        {{- with $additional }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}

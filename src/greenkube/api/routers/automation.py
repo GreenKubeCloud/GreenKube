@@ -1,107 +1,36 @@
-"""Compatibility routes backed by the server-resolved GitOps plan workflow."""
+"""Automation status and pull-request read routes.
 
+The former compatibility routes ``/recommendations/{id}/apply-pr``, ``/apply-pr/eligibility`` and
+``/automation/operations/{id}`` were removed after their deprecation release (roadmap F5, M4):
+use ``/automation/plans`` and the recommendations' ``eligibility`` field.
+"""
+
+import json
 import os
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, List
-from urllib.parse import urlsplit
+from typing import Any, List, cast
+from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from greenkube.api.dependencies import (
     AutomationPlanApiService,
-    get_authenticated_actor,
     get_automation_plan_service,
     get_gitops_binding_repository,
     get_pull_request_repository,
     get_recommendation_repository,
 )
-from greenkube.api.routers.plans import _domain_error_response, _safe_repository_url
-from greenkube.automation.plans import AutomationPlanError
-from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus
-from greenkube.models.metrics import ApplyPrRequest, ApplyPrResponse, PullRequestRecord, PullRequestStatus
-from greenkube.storage.base_gitops_repository import GitOpsRepository
+from greenkube.automation.delivery import configured_delivery_mode
+from greenkube.automation.git.k8s_secret_resolver import MountedSecretFileResolver
+from greenkube.models.metrics import PullRequestRecord
+from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, GitOpsRepository
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
+from greenkube.utils.time import ensure_utc
 
 router = APIRouter()
 WORKER_STALE_AFTER = timedelta(seconds=120)
-
-
-@router.post("/recommendations/{rec_id}/apply-pr", response_model=None)
-async def apply_recommendation_pr(
-    rec_id: int,
-    response: Response,
-    http_request: Request,
-    request: ApplyPrRequest | None = None,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
-    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
-) -> ApplyPrResponse | dict[str, object] | JSONResponse:
-    """Keep the legacy request shape without requiring source annotations."""
-    if service is None:
-        return _service_unavailable()
-    audit_actor = get_authenticated_actor(http_request)
-    request = request or ApplyPrRequest()
-    try:
-        existing_pr: PullRequestRecord | None = None
-        if request.dry_run:
-            plan = await service.preview_plan([rec_id])
-        else:
-            open_prs = [
-                item for item in await pr_repo.get_open_pull_requests(rec_id) if item.status is PullRequestStatus.OPEN
-            ]
-            if len(open_prs) > 1:
-                raise AutomationPlanError(
-                    AutomationErrorCode.PLAN_STALE,
-                    "multiple open pull requests already exist for this recommendation",
-                )
-            if open_prs:
-                existing_pr = open_prs[0]
-                if not existing_pr.plan_id:
-                    raise AutomationPlanError(
-                        AutomationErrorCode.PLAN_STALE,
-                        "an open pull request exists without a linked automation plan",
-                    )
-                plan = await service.read_plan(existing_pr.plan_id)
-                if plan is None:
-                    raise AutomationPlanError(
-                        AutomationErrorCode.PLAN_STALE,
-                        "an open pull request exists but its automation plan is unavailable",
-                    )
-            else:
-                plan = await service.prepare_plan([rec_id], actor=audit_actor)
-        if request.base_branch and request.base_branch != plan.source.ref:
-            raise AutomationPlanError(
-                AutomationErrorCode.UNSUPPORTED_SOURCE,
-                "base_branch overrides are not accepted; use the GitOps-resolved source ref.",
-            )
-        if request.dry_run:
-            return _compatibility_preview(plan)
-        if existing_pr is not None:
-            return _compatibility_pull_request(plan, existing_pr)
-
-        existing_pr = await pr_repo.get_pull_request_by_plan_id(plan.plan_id)
-        if existing_pr is not None and existing_pr.status is PullRequestStatus.OPEN:
-            return _compatibility_pull_request(plan, existing_pr)
-
-        operation = await service.read_operation_for_plan(plan.plan_id)
-        if operation is None:
-            if plan.status not in {PlanStatus.VALIDATED, PlanStatus.APPROVED} or plan.digest is None:
-                raise AutomationPlanError(
-                    AutomationErrorCode.PLAN_STALE,
-                    f"plan cannot be queued from status {plan.status.value}",
-                )
-            plan = await service.approve_plan(plan.plan_id, plan.digest, actor=audit_actor)
-            operation = await service.read_operation_for_plan(plan.plan_id)
-        if operation is None:
-            return _service_unavailable(
-                "The plan was approved but no durable operation was created; inspect the plan worker configuration."
-            )
-        response.status_code = status.HTTP_202_ACCEPTED
-        return _compatibility_operation_response(plan, operation, rec_id, audit_actor)
-    except AutomationPlanError as error:
-        return _domain_error_response(error)
 
 
 @router.get("/recommendations/{rec_id}/pull-requests", response_model=List[PullRequestRecord])
@@ -114,37 +43,7 @@ async def list_recommendation_pull_requests(
     record = await reco_repo.get_recommendation_by_id(rec_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Recommendation {rec_id} not found.")
-    return await pr_repo.get_pull_requests_for_recommendation(rec_id)
-
-
-@router.get("/recommendations/{rec_id}/apply-pr/eligibility")
-async def recommendation_pr_eligibility(
-    rec_id: int,
-    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
-    pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
-):
-    """Check whether the GitOps plan service can prepare this recommendation."""
-    if service is None:
-        return {"eligible": False, "reason": "The GitOps plan service is not configured."}
-    try:
-        plan = await service.preview_plan([rec_id])
-    except AutomationPlanError as error:
-        result: dict[str, object] = {"eligible": False, "reason": error.detail, "code": error.code.value}
-        if error.policy_result is not None:
-            result["policy_result"] = error.policy_result
-        return result
-    if plan.status not in {PlanStatus.DRAFT, PlanStatus.VALIDATED}:
-        return {"eligible": False, "reason": f"An automation plan is already {plan.status.value}."}
-    if await pr_repo.get_open_pull_requests(rec_id):
-        return {"eligible": False, "reason": "A pull request is already open for this recommendation."}
-    return {
-        "eligible": True,
-        "plan_id": plan.plan_id,
-        "repo": _safe_repository_url(plan.source.repo_url),
-        "path": plan.source.path,
-        "branch": plan.source.ref,
-        "policy_result": plan.policy_result,
-    }
+    return _externalize_pull_request_urls(await pr_repo.get_pull_requests_for_recommendation(rec_id))
 
 
 @router.get("/automation/pull-requests", response_model=List[PullRequestRecord])
@@ -152,20 +51,69 @@ async def list_open_pull_requests(
     pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
 ):
     """Return pull requests that are still pending or open."""
-    return await pr_repo.get_open_pull_requests()
+    return _externalize_pull_request_urls(await pr_repo.get_open_pull_requests())
+
+
+def get_controller_heartbeats() -> Any:
+    """The persisted controller loop heartbeats (dependency, overridable in tests)."""
+    from greenkube.storage.controller_heartbeat_repository import get_controller_heartbeat_repository
+
+    return get_controller_heartbeat_repository()
+
+
+async def _controller_state(repository: Any, now: datetime) -> dict[str, Any]:
+    """Controller loop state from the heartbeats each controller replica persists (M8)."""
+    from greenkube.core.loops import HEARTBEAT_RETENTION, HEARTBEAT_STALE_AFTER_SECONDS
+
+    state: dict[str, Any] = {
+        "available": True,
+        "healthy": False,
+        "leader": None,
+        "stale_after_seconds": HEARTBEAT_STALE_AFTER_SECONDS,
+        "instances": [],
+    }
+    try:
+        heartbeats = await repository.list_since(now - HEARTBEAT_RETENTION)
+    except Exception:
+        state["available"] = False
+        return state
+    for heartbeat in heartbeats:
+        age = heartbeat.age_seconds(now)
+        stale = age > HEARTBEAT_STALE_AFTER_SECONDS
+        state["instances"].append(
+            {
+                "instance_id": heartbeat.instance_id,
+                "role": heartbeat.role,
+                "leader": heartbeat.leader,
+                "ready": heartbeat.ready and not stale,
+                "stale": stale,
+                "heartbeat_at": _iso_utc(heartbeat.heartbeat_at),
+                "heartbeat_age_seconds": age,
+                "started_at": _iso_utc(heartbeat.started_at),
+                "loops": heartbeat.loops,
+            }
+        )
+        if heartbeat.leader and not stale and state["leader"] is None:
+            state["leader"] = heartbeat.instance_id
+            state["healthy"] = heartbeat.ready
+    return state
 
 
 @router.get("/automation/status")
 async def automation_status(
+    http_request: Request,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
     repository: GitOpsRepository = Depends(get_gitops_binding_repository),
+    heartbeats: Any = Depends(get_controller_heartbeats),
 ):
     """Return secret-free automation readiness, worker health and queue depth."""
     from greenkube.core.config import get_config
 
     config = get_config()
     configured = service is not None
-    enabled = configured and bool(config.AUTOMATION_ENABLED) and config.AUTOMATION_MODE != "disabled"
+    # Automation is always on (F12): only automation.policy.pauseDelivery stops PR delivery.
+    paused = config.automation_delivery_paused
+    enabled = configured and not paused
     now = datetime.now(timezone.utc)
 
     backlog = None
@@ -186,18 +134,33 @@ async def automation_status(
         configured_providers = await repository.list_provider_configs()
     except Exception:
         configured_providers = []
+    token_configured = False
+    degraded: dict[str, dict[str, str]] = {}
+    lister = getattr(repository, "list_provider_feature_notes", None)
+    if callable(lister):
+        try:
+            for note in await cast(Callable[[], Awaitable[list[dict[str, Any]]]], lister)():
+                degraded.setdefault(note["provider_id"], {})[note["feature"]] = note["error_code"]
+        except Exception:
+            degraded = {}
     for provider in configured_providers:
         if provider.id == "unresolved":
             continue
+        provider_token_configured = await _provider_token_resolvable(provider)
+        token_configured = token_configured or (provider.enabled and provider_token_configured)
         providers.append(
             {
                 "id": provider.id,
                 "type": provider.provider_type,
                 "enabled": provider.enabled,
+                "token_configured": provider_token_configured,
                 "status": provider.status,
                 "capabilities": dict(provider.capabilities),
                 "last_checked_at": _iso_utc(provider.last_checked_at),
                 "last_error_code": provider.last_error_code,
+                # Best-effort features the token may not use (labels, comments, ...): the
+                # provider stays verified; these are notes, not errors.
+                "degraded_features": degraded.get(provider.id, {}),
                 "api_host": _safe_host(provider.api_base_url),
             }
         )
@@ -207,9 +170,15 @@ async def automation_status(
     if backlog is not None and backlog.latest_worker_heartbeat_timestamp > 0:
         latest_heartbeat = datetime.fromtimestamp(backlog.latest_worker_heartbeat_timestamp, tz=timezone.utc)
         worker_healthy = now - latest_heartbeat <= WORKER_STALE_AFTER
+    supervisor = getattr(http_request.app.state, "automation_loop_supervisor", None)
+    inline_loop = supervisor.health.snapshot(now) if supervisor is not None else None
+    if inline_loop is not None and not inline_loop["ready"]:
+        worker_healthy = False
+    # Controller loops run in the controller process: read their persisted heartbeats.
+    controller = await _controller_state(heartbeats, now)
     discovery_age = None
     if coverage is not None and coverage.last_refresh is not None:
-        discovery_age = max(0.0, (now - _aware_utc(coverage.last_refresh)).total_seconds())
+        discovery_age = max(0.0, (now - ensure_utc(coverage.last_refresh)).total_seconds())
 
     renderer_url = os.getenv("GITOPS_RENDERER_URL", "").strip()
     queue = (
@@ -227,16 +196,28 @@ async def automation_status(
     )
     return {
         "enabled": enabled,
-        "ready": enabled and (worker_healthy if config.AUTOMATION_MODE != "disabled" else False),
-        "token_configured": configured,
+        "ready": enabled and worker_healthy,
+        # True only when an enabled provider's credential Secret actually resolves (D12, BUG-56).
+        "token_configured": token_configured,
         "provider": "gitops" if configured else None,
-        "mode": config.AUTOMATION_MODE,
+        # "paused" (pauseDelivery) or "controller": the controller always executes plans,
+        # optionally helped by dedicated workers (worker.replicas).
+        "mode": "paused" if paused else "controller",
+        "delivery_paused": paused,
+        # Who opens the pull request of an approved plan (F4): direct, patch or ci.
+        "delivery_mode": configured_delivery_mode(config),
+        # Whether previews meeting automation.autoApprove skip the approval click (F5).
+        "auto_approve": bool(config.AUTOMATION_AUTO_APPROVE_ENABLED),
         "worker": {
             "healthy": worker_healthy,
             "heartbeat_at": latest_heartbeat,
             "count": backlog.worker_count if backlog is not None else None,
             "stale": backlog.stale_workers if backlog is not None else None,
+            # In-process loop supervision: state, heartbeat age, restarts, last error code (D9).
+            "inline_loop": inline_loop,
         },
+        # Controller loop state per replica: leader, readiness, per-loop heartbeat and errors (M8).
+        "controller": controller,
         "queue": queue,
         "plans": (
             {
@@ -268,16 +249,29 @@ async def automation_status(
     }
 
 
-def _aware_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+async def _provider_token_resolvable(provider: GitOpsProviderConfig) -> bool:
+    """Whether the provider's referenced Secret key resolves to a non-empty credential.
+
+    The value is read through the same mounted-Secret resolver the plan runtime uses and
+    is never returned or logged.
+    """
+    if not provider.secret_name or not provider.secret_key:
+        return False
+    try:
+        value = await MountedSecretFileResolver().resolve_secret(
+            namespace=provider.secret_namespace,
+            name=provider.secret_name,
+            key=provider.secret_key,
+        )
+    except Exception:
+        return False
+    return bool(value and value.strip())
 
 
 def _iso_utc(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return _aware_utc(value).isoformat().replace("+00:00", "Z")
+    return ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
 def _safe_host(value: str | None) -> str | None:
@@ -293,102 +287,107 @@ def _env_truthy(value: str | None) -> bool:
     return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-@router.get("/automation/operations/{operation_id}")
-async def get_automation_operation(
-    operation_id: str,
-    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
-    pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
-):
-    """Expose plan-operation state through the legacy operation endpoint."""
-    if service is None:
-        return _service_unavailable()
-    operation = await service.read_operation(operation_id)
-    if operation is None:
-        raise HTTPException(status_code=404, detail=f"Automation operation {operation_id} not found.")
-    plan = await service.read_plan(operation.plan_id)
-    if plan is None:
-        raise HTTPException(status_code=404, detail=f"Automation plan {operation.plan_id} not found.")
-    pull_request = await pr_repo.get_pull_request_by_plan_id(operation.plan_id)
-    return _operation_response(operation, plan, pull_request)
+def _configured_gitea_web_base_urls() -> dict[str, str]:
+    serialized = os.getenv("GITOPS_PROVIDERS_JSON", "").strip()
+    if not serialized:
+        return {}
+    payload = json.loads(serialized)
+    providers = payload.get("providers") if isinstance(payload, dict) else payload
+    if not isinstance(providers, list):
+        raise ValueError("GITOPS_PROVIDERS_JSON must contain a providers list.")
+
+    web_base_urls: dict[str, str] = {}
+    for provider in providers:
+        if not isinstance(provider, dict):
+            raise ValueError("GITOPS_PROVIDERS_JSON provider entries must be objects.")
+        if str(provider.get("type", "")).lower() != "gitea":
+            continue
+        web_base_url = provider.get("webBaseUrl")
+        if web_base_url is None or web_base_url == "":
+            continue
+        provider_id = provider.get("id")
+        if not isinstance(provider_id, str) or not provider_id:
+            raise ValueError("Gitea webBaseUrl requires a provider ID.")
+        if not isinstance(web_base_url, str):
+            raise ValueError("Gitea webBaseUrl must be a string.")
+        parsed_url = urlsplit(web_base_url)
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.path not in {"", "/"}
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            raise ValueError("Gitea webBaseUrl must be an HTTP(S) origin.")
+        web_base_urls[provider_id] = urlunsplit((parsed_url.scheme, parsed_url.netloc, "", "", ""))
+    return web_base_urls
 
 
-def _compatibility_preview(plan: Plan) -> ApplyPrResponse:
-    if plan.file_plan is None:
-        raise AutomationPlanError(
-            AutomationErrorCode.RENDER_VALIDATION_FAILED,
-            "the GitOps plan has no validated file diff",
+def external_pull_request_url(url: str | None) -> str | None:
+    """A stored pull-request URL on a Gitea API origin, rewritten to that provider's ``webBaseUrl``.
+
+    For records that carry no provider id (change records): the provider is
+    matched by the origin of its ``apiBaseUrl``. Other URLs are returned as they are.
+    """
+    if not url:
+        return url
+    serialized = os.getenv("GITOPS_PROVIDERS_JSON", "").strip()
+    if not serialized:
+        return url
+    try:
+        web_base_urls = _configured_gitea_web_base_urls()
+        payload = json.loads(serialized)
+    except ValueError:
+        return url
+    providers = payload.get("providers") if isinstance(payload, dict) else payload
+    parsed_url = urlsplit(url)
+    for provider in providers if isinstance(providers, list) else []:
+        if not isinstance(provider, dict):
+            continue
+        web_base_url = web_base_urls.get(str(provider.get("id") or ""))
+        api_base_url = provider.get("apiBaseUrl")
+        if not web_base_url or not isinstance(api_base_url, str):
+            continue
+        api = urlsplit(api_base_url)
+        if (api.scheme, api.netloc.lower()) == (parsed_url.scheme, parsed_url.netloc.lower()):
+            web = urlsplit(web_base_url)
+            return urlunsplit((web.scheme, web.netloc, parsed_url.path, "", ""))
+    return url
+
+
+def _externalize_pull_request_urls(records: list[PullRequestRecord]) -> list[PullRequestRecord]:
+    web_base_urls = _configured_gitea_web_base_urls()
+    externalized: list[PullRequestRecord] = []
+    for record in records:
+        web_base_url = web_base_urls.get(record.provider_id or "")
+        if not record.pr_url or not web_base_url:
+            externalized.append(record)
+            continue
+        parsed_url = urlsplit(record.pr_url)
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            raise ValueError("Stored pull-request URL is invalid.")
+        externalized.append(
+            record.model_copy(
+                update={
+                    "pr_url": urlunsplit(
+                        (
+                            urlsplit(web_base_url).scheme,
+                            urlsplit(web_base_url).netloc,
+                            parsed_url.path,
+                            "",
+                            "",
+                        )
+                    )
+                }
+            )
         )
-    return ApplyPrResponse(
-        status="dry_run",
-        policy_result=plan.policy_result,
-        provider=plan.source.provider_id,
-        repo=_safe_repository_url(plan.source.repo_url),
-        base_branch=plan.source.ref,
-        path=plan.source.path,
-        patch=plan.action.model_dump(mode="json"),
-        diff=plan.file_plan.diff,
-        message="Validated GitOps plan preview; no Git changes were made.",
-    )
-
-
-def _compatibility_pull_request(plan: Plan, pull_request: PullRequestRecord) -> ApplyPrResponse:
-    return _compatibility_preview(plan).model_copy(
-        update={
-            "status": "pr_open",
-            "head_branch": pull_request.head_branch,
-            "pr_url": pull_request.pr_url,
-            "message": "A pull request for this recommendation is already open.",
-            "pull_request": pull_request,
-        }
-    )
-
-
-def _compatibility_operation_response(
-    plan: Plan,
-    operation: Operation,
-    recommendation_id: int,
-    actor: str,
-) -> dict[str, object]:
-    return {
-        "status": operation.status.value,
-        "operation_id": operation.operation_id,
-        "plan_id": plan.plan_id,
-        "recommendation_id": recommendation_id,
-        "idempotency_key": operation.idempotency_key,
-        "fingerprint": plan.digest,
-        "actor": actor,
-        "policy_result": plan.policy_result,
-    }
-
-
-def _operation_response(
-    operation: Operation,
-    plan: Plan,
-    pull_request: PullRequestRecord | None,
-) -> dict[str, object]:
-    return {
-        "id": operation.operation_id,
-        "operation_id": operation.operation_id,
-        "plan_id": operation.plan_id,
-        "recommendation_id": plan.recommendation_ids[0],
-        "recommendation_ids": plan.recommendation_ids,
-        "status": operation.status.value,
-        "idempotency_key": operation.idempotency_key,
-        "fingerprint": plan.digest,
-        "preview_digest": plan.digest,
-        "commit_digest": operation.commit_sha,
-        "attempts": operation.attempts,
-        "error": operation.last_error,
-        "result": {"plan_status": plan.status.value},
-        "pr_url": pull_request.pr_url if pull_request is not None else None,
-        "policy_result": plan.policy_result,
-    }
-
-
-def _service_unavailable(
-    detail: str = "Server-side automation plan service is not configured.",
-) -> JSONResponse:
-    return JSONResponse(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={"code": "plan_service_unavailable", "detail": detail},
-    )
+    return externalized

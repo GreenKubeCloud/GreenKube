@@ -2,85 +2,61 @@
 
 from __future__ import annotations
 
-import copy
 import difflib
 import hashlib
 import io
 import json
-import re
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
-from fractions import Fraction
 from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import ValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.error import YAMLError
 
+from greenkube.automation.actions import (
+    ACTION_KINDS,
+    ActionKindError,
+    ActionKindSpec,
+    PrimitiveApplyError,
+    PrimitiveOp,
+    RemoveField,
+    SetField,
+    Support,
+)
+from greenkube.automation.actions import DeleteResource as DeletePrimitive
+from greenkube.automation.actions.container_resources import (
+    container_operations,
+    find_container,
+    order_by_container,
+    pod_spec,
+    workload_containers,
+)
+from greenkube.automation.actions.validation import apply_action, validate_expected_delta
+from greenkube.automation.actions.workloads import POD_SPEC_PATHS, WORKLOAD_API_VERSIONS, container_names
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     BindingStatus,
-    ContainerResources,
     FileEdit,
     FilePlan,
     RendererKind,
     ResourceTarget,
     SetContainerResources,
+    TypedOperation,
     ValidationResult,
     WorkloadSource,
 )
+from greenkube.gitops.discovery.inventory import source_matches_target, target_namespace
+from greenkube.gitops.planning.digest import plan_digest
+from greenkube.gitops.planning.render_inputs import contents_blob_shas
 from greenkube.gitops.renderers import RawRenderError, RawRenderResult, RenderedResource, render_raw
 
 _MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
-_WORKLOAD_API_VERSIONS = {
-    "CronJob": frozenset({"batch/v1"}),
-    "DaemonSet": frozenset({"apps/v1"}),
-    "Deployment": frozenset({"apps/v1"}),
-    "Job": frozenset({"batch/v1"}),
-    "Pod": frozenset({"v1"}),
-    "ReplicaSet": frozenset({"apps/v1"}),
-    "ReplicationController": frozenset({"v1"}),
-    "StatefulSet": frozenset({"apps/v1"}),
-}
-_POD_SPEC_PATHS = {
-    "CronJob": ("spec", "jobTemplate", "spec", "template", "spec"),
-    "DaemonSet": ("spec", "template", "spec"),
-    "Deployment": ("spec", "template", "spec"),
-    "Job": ("spec", "template", "spec"),
-    "Pod": ("spec",),
-    "ReplicaSet": ("spec", "template", "spec"),
-    "ReplicationController": ("spec", "template", "spec"),
-    "StatefulSet": ("spec", "template", "spec"),
-}
-_QUANTITY_PATTERN = re.compile(
-    r"(?P<number>(?:\d+(?:\.\d*)?|\.\d+))"
-    r"(?P<suffix>[eE][+-]?\d+|Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|K|M|G|T|P|E)?"
-)
-_DECIMAL_SCALES = {
-    "n": Fraction(1, 1_000_000_000),
-    "u": Fraction(1, 1_000_000),
-    "m": Fraction(1, 1_000),
-    "k": Fraction(1_000),
-    "K": Fraction(1_000),
-    "M": Fraction(1_000_000),
-    "G": Fraction(1_000_000_000),
-    "T": Fraction(1_000_000_000_000),
-    "P": Fraction(1_000_000_000_000_000),
-    "E": Fraction(1_000_000_000_000_000_000),
-}
-_BINARY_SCALES = {
-    "Ki": 1,
-    "Mi": 2,
-    "Gi": 3,
-    "Ti": 4,
-    "Pi": 5,
-    "Ei": 6,
-}
-_MAX_KUBERNETES_QUANTITY = Fraction(2**63 - 1)
+#: Compatibility aliases: the workload tables now live with the action kinds (H0).
+_WORKLOAD_API_VERSIONS = WORKLOAD_API_VERSIONS
+_POD_SPEC_PATHS = POD_SPEC_PATHS
 
 
 class RawManifestPlanError(ValueError):
@@ -135,7 +111,22 @@ class RepositorySnapshot:
 
 
 class RawManifestPlanner:
-    """Create a validated, deterministic FilePlan for a raw Kubernetes workload."""
+    """Create a validated, deterministic FilePlan for a raw Kubernetes workload.
+
+    This is the raw ``PatchStrategy``: the action kind compiles its typed operations to
+    primitive field edits, which are applied to the round-trip source document; the
+    rendered result is validated against the kind's expected delta.
+    """
+
+    renderer_kind = RendererKind.RAW
+
+    def supports(self, op: PrimitiveOp, binding: WorkloadSource) -> Support:
+        """Raw manifests express every field edit of the bound resource and its deletion (H6)."""
+        if not isinstance(op, (SetField, RemoveField, DeletePrimitive)):
+            return Support.unsupported(f"raw manifest planning does not support {op.op!r} primitives yet")
+        if op.ref != _binding_target(op.ref, binding):
+            return Support.unsupported("raw manifest planning edits the bound resource only")
+        return Support.supported()
 
     def plan(
         self,
@@ -144,7 +135,7 @@ class RawManifestPlanner:
         snapshot: RepositorySnapshot,
         base_revision: str,
     ) -> FilePlan:
-        operations = self._validate_request(action, source, snapshot, base_revision)
+        spec, operations = self._validate_request(action, source, snapshot, base_revision)
         scope_sources = _sources_in_binding_scope(snapshot, source)
         before = _render(scope_sources)
         target_resources = [
@@ -160,6 +151,10 @@ class RawManifestPlanner:
             )
 
         target_resource = target_resources[0]
+        if _deletes_target(spec, action.target, operations):
+            return _plan_deletion(
+                action, source, snapshot, base_revision, spec, operations, scope_sources, before, target_resource
+            )
         target_path = target_resource.source_path
         original_sha = snapshot.original_blob_shas.get(target_path)
         if original_sha is None:
@@ -170,7 +165,7 @@ class RawManifestPlanner:
             original_content,
             target_resource,
             action.target,
-            action.target.kind,
+            spec,
             operations,
         )
 
@@ -184,7 +179,7 @@ class RawManifestPlanner:
         target_identity = _matching_target_identity(before, action.target)
         target_changed = before_resources[target_identity] != after_resources[target_identity]
         if not target_changed:
-            raise RawManifestPlanError("the per-container rightsizing action does not change the target resource")
+            raise RawManifestPlanError(f"the {spec.title} action does not change the target resource")
 
         diff = _unified_diff(original_content, updated_content, f"a/{target_path}", f"b/{target_path}")
         rendered_diff = _unified_diff(
@@ -208,19 +203,22 @@ class RawManifestPlanner:
             renderer=RendererKind.RAW,
             output_digest=after.output_digest,
             warnings=warnings,
+            **_render_inputs(scope_sources, snapshot, source, base_revision),
         )
         plan_id = _plan_identifier(action, source, base_revision)
-        digest = _plan_digest(
+        digest = plan_digest(
             plan_id=plan_id,
             action=action,
             source=source,
-            file_edit=file_edit,
+            files=[file_edit],
             diff=diff,
             rendered_diff=rendered_diff,
             base_revision=base_revision,
             source_revision=source_revision,
             validation=validation,
             warnings=warnings,
+            renderer=RendererKind.RAW,
+            error_type=RawManifestPlanError,
         )
         return FilePlan(
             plan_id=plan_id,
@@ -241,7 +239,7 @@ class RawManifestPlanner:
         source: WorkloadSource,
         snapshot: RepositorySnapshot,
         base_revision: str,
-    ) -> list[SetContainerResources]:
+    ) -> tuple[ActionKindSpec, list[TypedOperation]]:
         if not isinstance(snapshot, RepositorySnapshot):
             raise RawManifestPlanError("snapshot must be an immutable RepositorySnapshot")
         if not isinstance(base_revision, str) or not base_revision.strip():
@@ -250,30 +248,22 @@ class RawManifestPlanner:
             raise RawManifestPlanError("source must use the raw renderer")
         if source.status is not BindingStatus.RESOLVED:
             raise RawManifestPlanError("workload source binding must be resolved")
-        if (
-            action.target.kind != source.workload_kind
-            or action.target.namespace != source.namespace
-            or action.target.name != source.workload_name
-        ):
+        if not source_matches_target(source, action.target):
             raise RawManifestPlanError("action target must match the resolved workload binding")
-
-        supported_versions = _WORKLOAD_API_VERSIONS.get(action.target.kind)
-        if supported_versions is None or action.target.api_version not in supported_versions:
-            raise RawManifestPlanError(
-                f"unsupported workload kind or API version: {action.target.api_version}/{action.target.kind}"
-            )
-        if not action.operations or any(not isinstance(op, SetContainerResources) for op in action.operations):
-            raise RawManifestPlanError("only per-container rightsizing operations are supported")
-
-        operations = [operation for operation in action.operations if isinstance(operation, SetContainerResources)]
-        container_names = [operation.container for operation in operations]
-        if len(container_names) != len(set(container_names)):
-            raise RawManifestPlanError("each container may have only one per-container rightsizing operation")
-        for operation in operations:
-            resources = operation.resources
-            if not resources.requests and not resources.limits:
-                raise RawManifestPlanError("a rightsizing operation must set at least one resource quantity")
-        return operations
+        spec, operations = _action_kind(action, RawManifestPlanError)
+        renderer_support = spec.renderer_support(RendererKind.RAW, operations)
+        if not renderer_support.ok:
+            raise RawManifestPlanError(renderer_support.reason or "the action cannot be expressed in a raw manifest")
+        try:
+            primitives = spec.compile(action.target, operations)
+        except ActionKindError as exc:
+            raise RawManifestPlanError(str(exc)) from exc
+        planner = RawManifestPlanner()
+        for primitive in primitives:
+            support = planner.supports(primitive, source)
+            if not support.ok:
+                raise RawManifestPlanError(support.reason or "the action cannot be expressed in a raw manifest")
+        return spec, operations
 
 
 def plan_raw_manifest(
@@ -315,6 +305,19 @@ def _sources_in_binding_scope(
     return dict(sorted(sources.items()))
 
 
+def _render_inputs(
+    scope_sources: Mapping[str, str | bytes],
+    snapshot: RepositorySnapshot,
+    source: WorkloadSource,
+    base_revision: str,
+) -> dict[str, Any]:
+    """Every manifest of the rendered directory, and the directory itself (D7 render inputs)."""
+    return {
+        "render_inputs": contents_blob_shas(scope_sources, base_revision, snapshot.original_blob_shas),
+        "render_scopes": [source.path],
+    }
+
+
 def _is_in_scope(path: str, scope: str) -> bool:
     return scope == "." or path == scope or path.startswith(f"{scope}/")
 
@@ -347,14 +350,13 @@ def _update_source(
     content: str,
     target_resource: RenderedResource,
     target: ResourceTarget,
-    workload_kind: str,
-    operations: list[SetContainerResources],
+    spec: ActionKindSpec,
+    operations: Sequence[TypedOperation],
 ) -> str:
     if PurePosixPath(path).suffix.lower() == ".json":
         document = _load_json(path, content)
         manifest = _matching_manifest(document, target)
-        _apply_operations(manifest, workload_kind, operations)
-        _validate_operation_resources(manifest, workload_kind, operations)
+        _apply_action(manifest, spec, target, operations)
         return _dump_json(content, document)
 
     yaml = YAML(typ="rt")
@@ -372,8 +374,7 @@ def _update_source(
         raise RawManifestPlanError(f"{path}: rendered document index is absent from the round-trip source")
 
     manifest = _matching_manifest(documents[target_resource.document_index], target)
-    _apply_operations(manifest, workload_kind, operations)
-    _validate_operation_resources(manifest, workload_kind, operations)
+    _apply_action(manifest, spec, target, operations)
 
     stream = io.StringIO()
     try:
@@ -468,159 +469,100 @@ def _matches_target(manifest: Mapping[str, Any], target: ResourceTarget) -> bool
         and metadata.get("name") == target.name
         and (
             namespace == target.namespace
-            or (namespace == "" and target.namespace != "" and target.kind in _POD_SPEC_PATHS)
+            or (namespace == "" and target.namespace != "" and target.kind in POD_SPEC_PATHS)
         )
     )
+
+
+def _binding_target(ref: ResourceTarget, binding: WorkloadSource) -> ResourceTarget:
+    """The bound workload's identity, with the API version of ``ref`` (bindings carry no version)."""
+    return ResourceTarget(
+        api_version=ref.api_version,
+        kind=binding.workload_kind,
+        namespace=target_namespace(binding.namespace),
+        name=binding.workload_name,
+    )
+
+
+def _action_kind(
+    action: ActionPlanV3,
+    error_type: type[ValueError],
+) -> tuple[ActionKindSpec, list[TypedOperation]]:
+    """The registered kind of ``action`` and its validated operations (errors become ``error_type``)."""
+    operations: list[TypedOperation] = list(action.operations)
+    try:
+        spec = ACTION_KINDS.spec_for_action(action)
+        spec.validate_operations(action.target, operations)
+    except ActionKindError as exc:
+        raise error_type(str(exc)) from exc
+    return spec, operations
+
+
+def _apply_action(
+    manifest: MutableMapping[str, Any],
+    spec: ActionKindSpec,
+    target: ResourceTarget,
+    operations: Sequence[TypedOperation],
+) -> None:
+    """Apply the kind's primitive field edits to a round-trip manifest and check its invariants."""
+    try:
+        apply_action(manifest, spec, target, operations, new_mapping=CommentedMap)
+    except (ActionKindError, PrimitiveApplyError) as exc:
+        raise RawManifestPlanError(str(exc)) from exc
 
 
 def _apply_operations(
     manifest: MutableMapping[str, Any],
     workload_kind: str,
-    operations: list[SetContainerResources],
+    operations: Sequence[SetContainerResources],
 ) -> None:
-    pod_spec = _pod_spec(manifest, workload_kind)
-    containers = pod_spec.get("containers")
-    if not isinstance(containers, list):
-        raise RawManifestPlanError(f"{workload_kind} target must contain a containers list")
+    """Apply per-container resource operations (Helm expected-output checks; no invariant check)."""
+    from greenkube.automation.actions import CONTAINER_RESOURCES
+    from greenkube.automation.actions.primitives import apply_field_ops, field_operations
 
-    for operation in operations:
-        matches: list[MutableMapping[str, Any]] = []
-        for container in containers:
-            if not isinstance(container, MutableMapping):
-                raise RawManifestPlanError("workload containers must be mappings")
-            name = container.get("name")
-            if not isinstance(name, str) or not name.strip():
-                raise RawManifestPlanError("workload containers must have non-empty names")
-            if name == operation.container:
-                matches.append(container)
-        if len(matches) != 1:
-            raise RawManifestPlanError(f"container {operation.container!r} must exist exactly once in the workload")
-
-        container = matches[0]
-        if "resources" not in container:
-            resources: MutableMapping[str, Any] = CommentedMap()
-            container["resources"] = resources
-        else:
-            resources_value = container["resources"]
-            if not isinstance(resources_value, MutableMapping):
-                raise RawManifestPlanError(f"container {operation.container!r} resources must be a mapping")
-            resources = resources_value
-
-        for field_name, values in (
-            ("requests", operation.resources.requests),
-            ("limits", operation.resources.limits),
-        ):
-            if not values:
-                continue
-            if field_name not in resources:
-                section: MutableMapping[str, Any] = CommentedMap()
-                resources[field_name] = section
-            else:
-                section_value = resources[field_name]
-                if not isinstance(section_value, MutableMapping):
-                    raise RawManifestPlanError(
-                        f"container {operation.container!r} resources.{field_name} must be a mapping"
-                    )
-                section = section_value
-            for resource_name, quantity in values.items():
-                section[resource_name] = quantity
+    target = ResourceTarget(api_version="v1", kind=workload_kind, namespace="", name="target")
+    try:
+        CONTAINER_RESOURCES.validate_target(manifest, target)
+        primitives = CONTAINER_RESOURCES.compile(target, container_operations(operations))
+        apply_field_ops(manifest, field_operations(primitives), new_mapping=CommentedMap)
+    except (ActionKindError, PrimitiveApplyError) as exc:
+        raise RawManifestPlanError(str(exc)) from exc
 
 
 def _validate_operation_resources(
     manifest: MutableMapping[str, Any],
     workload_kind: str,
-    operations: list[SetContainerResources],
+    operations: Sequence[SetContainerResources],
 ) -> None:
-    containers = _containers(_pod_spec(manifest, workload_kind))
-    for operation in operations:
-        container = _find_container(containers, operation.container)
-        raw_resources = container.get("resources", {})
-        if not isinstance(raw_resources, Mapping):
-            raise RawManifestPlanError(f"container {operation.container!r} resources must be a mapping")
-        try:
-            resources = ContainerResources(
-                requests=dict(raw_resources.get("requests", {})),
-                limits=dict(raw_resources.get("limits", {})),
-            )
-        except (ValidationError, TypeError, ValueError) as exc:
-            raise RawManifestPlanError(
-                f"container {operation.container!r} has an invalid Kubernetes resource quantity or mapping"
-            ) from exc
+    """The ``container_resources`` invariants (valid quantities, requests within limits)."""
+    from greenkube.automation.actions import CONTAINER_RESOURCES
 
-        request_values = {
-            resource_name: _quantity_value(quantity) for resource_name, quantity in resources.requests.items()
-        }
-        limit_values = {
-            resource_name: _quantity_value(quantity) for resource_name, quantity in resources.limits.items()
-        }
-        for resource_name, request in resources.requests.items():
-            limit = limit_values.get(resource_name)
-            if limit is not None and request_values[resource_name] > limit:
-                raise RawManifestPlanError(
-                    f"container {operation.container!r} request for {resource_name!r} exceeds its limit"
-                )
+    target = ResourceTarget(api_version="v1", kind=workload_kind, namespace="", name="target")
+    try:
+        CONTAINER_RESOURCES.check_invariants(manifest, target, container_operations(operations))
+    except ActionKindError as exc:
+        raise RawManifestPlanError(str(exc)) from exc
 
 
 def _pod_spec(manifest: Mapping[str, Any], workload_kind: str) -> MutableMapping[str, Any]:
-    path = _POD_SPEC_PATHS.get(workload_kind)
-    if path is None:
-        raise RawManifestPlanError(f"unsupported workload kind: {workload_kind}")
-    current: Any = manifest
-    for part in path:
-        if not isinstance(current, Mapping) or part not in current:
-            raise RawManifestPlanError(f"{workload_kind} target is missing its pod specification")
-        current = current[part]
-    if not isinstance(current, MutableMapping):
-        raise RawManifestPlanError(f"{workload_kind} pod specification must be a mapping")
-    return current
-
-
-def _containers(pod_spec: MutableMapping[str, Any]) -> list[MutableMapping[str, Any]]:
-    values = pod_spec.get("containers")
-    if not isinstance(values, list):
-        raise RawManifestPlanError("workload target must contain a containers list")
-    if any(not isinstance(value, MutableMapping) for value in values):
-        raise RawManifestPlanError("workload containers must be mappings")
-    return values
-
-
-def _find_container(
-    containers: list[MutableMapping[str, Any]],
-    name: str,
-) -> MutableMapping[str, Any]:
-    matches = [container for container in containers if container.get("name") == name]
-    if len(matches) != 1:
-        raise RawManifestPlanError(f"container {name!r} must exist exactly once in the workload")
-    return matches[0]
-
-
-def _quantity_value(quantity: str) -> Fraction:
-    if len(quantity) > 128:
-        raise RawManifestPlanError("Kubernetes resource quantity exceeds the supported precision")
-    match = _QUANTITY_PATTERN.fullmatch(quantity)
-    if match is None:
-        raise RawManifestPlanError(f"invalid Kubernetes resource quantity {quantity!r}")
-
-    number = match.group("number")
-    suffix = match.group("suffix") or ""
     try:
-        if re.fullmatch(r"[eE][+-]?\d+", suffix):
-            exponent = int(suffix[1:])
-            if abs(exponent) > 1_000:
-                raise RawManifestPlanError("Kubernetes resource quantity exponent is out of range")
-            value = Fraction(Decimal(f"{number}{suffix}"))
-        else:
-            value = Fraction(Decimal(number))
-            if suffix in _DECIMAL_SCALES:
-                value *= _DECIMAL_SCALES[suffix]
-            elif suffix in _BINARY_SCALES:
-                value *= 1_024 ** _BINARY_SCALES[suffix]
-    except (InvalidOperation, OverflowError, ValueError) as exc:
-        raise RawManifestPlanError(f"invalid Kubernetes resource quantity {quantity!r}") from exc
+        return pod_spec(manifest, workload_kind)
+    except ActionKindError as exc:
+        raise RawManifestPlanError(str(exc)) from exc
 
-    if value < 0 or value > _MAX_KUBERNETES_QUANTITY:
-        raise RawManifestPlanError(f"Kubernetes resource quantity {quantity!r} is outside the supported range")
-    return value
+
+def _containers(spec: MutableMapping[str, Any]) -> list[MutableMapping[str, Any]]:
+    try:
+        return workload_containers(spec)
+    except ActionKindError as exc:
+        raise RawManifestPlanError(str(exc)) from exc
+
+
+def _find_container(containers: list[MutableMapping[str, Any]], name: str) -> MutableMapping[str, Any]:
+    try:
+        return find_container(containers, name)
+    except ActionKindError as exc:
+        raise RawManifestPlanError(str(exc)) from exc
 
 
 def _validate_rendered_change(
@@ -628,58 +570,22 @@ def _validate_rendered_change(
     after: RawRenderResult,
     target: ResourceTarget,
     workload_kind: str,
-    operations: list[SetContainerResources],
+    operations: Sequence[TypedOperation],
 ) -> None:
-    before_resources = _resources_by_identity(before)
-    after_resources = _resources_by_identity(after)
-    target_identity = _matching_target_identity(before, target)
-    if target_identity not in before_resources or target_identity not in after_resources:
-        raise RawManifestPlanError("render validation did not preserve the exact target resource")
-    if before_resources.keys() != after_resources.keys():
-        raise RawManifestPlanError("render validation found added or removed resources")
-
-    for identity, manifest in before_resources.items():
-        if identity != target_identity and manifest != after_resources[identity]:
-            raise RawManifestPlanError("render validation found an unrelated resource change")
-
-    expected_target = copy.deepcopy(before_resources[target_identity])
-    if not isinstance(expected_target, MutableMapping):
-        raise RawManifestPlanError("rendered target is not a mutable resource mapping")
-    _apply_operations(expected_target, workload_kind, operations)
-    _validate_operation_resources(expected_target, workload_kind, operations)
-    expected_comparison, expected_checksums = _normalize_checksum_annotations(expected_target, workload_kind)
-    actual_comparison, actual_checksums = _normalize_checksum_annotations(
-        after_resources[target_identity],
-        workload_kind,
-    )
-    if expected_checksums != actual_checksums or expected_comparison != actual_comparison:
-        raise RawManifestPlanError("render validation found changes outside the requested container resources")
-    _validate_operation_resources(after_resources[target_identity], workload_kind, operations)
-
-
-def _normalize_checksum_annotations(
-    manifest: Mapping[str, Any],
-    workload_kind: str,
-) -> tuple[dict[str, Any], frozenset[str]]:
-    comparison = copy.deepcopy(dict(manifest))
-    pod_spec_path = _POD_SPEC_PATHS.get(workload_kind)
-    if pod_spec_path is None:
-        return comparison, frozenset()
-    metadata_path = ("metadata",) if workload_kind == "Pod" else (*pod_spec_path[:-1], "metadata")
-    parent: MutableMapping[str, Any] = comparison
-    for part in metadata_path:
-        value = parent.get(part)
-        if not isinstance(value, MutableMapping):
-            return comparison, frozenset()
-        parent = value
-    annotations = parent.get("annotations")
-    if not isinstance(annotations, MutableMapping):
-        return comparison, frozenset()
-
-    checksum_keys = frozenset(key for key in annotations if isinstance(key, str) and key.startswith("checksum/"))
-    for key in checksum_keys:
-        annotations[key] = "<rendered-checksum>"
-    return comparison, checksum_keys
+    """Validate the rendered change against the action kind's expected delta (H0c)."""
+    del workload_kind
+    try:
+        spec = ACTION_KINDS.spec_for_operations(operations)
+        validate_expected_delta(
+            _resources_by_identity(before),
+            _resources_by_identity(after),
+            spec=spec,
+            target=target,
+            target_identity=_matching_target_identity(before, target),
+            operations=operations,
+        )
+    except (ActionKindError, PrimitiveApplyError) as exc:
+        raise RawManifestPlanError(str(exc)) from exc
 
 
 def _resources_by_identity(result: RawRenderResult) -> dict[tuple[str, str, str, str], dict[str, Any]]:
@@ -697,7 +603,7 @@ def _rendered_target_matches(rendered: ResourceTarget, target: ResourceTarget) -
         and rendered.name == target.name
         and (
             rendered.namespace == target.namespace
-            or (rendered.namespace == "" and target.namespace != "" and target.kind in _POD_SPEC_PATHS)
+            or (rendered.namespace == "" and target.namespace != "" and target.kind in POD_SPEC_PATHS)
         )
     )
 
@@ -716,30 +622,9 @@ def _matching_target_identity(
 
 def _target_container_order(result: RawRenderResult, target: ResourceTarget) -> tuple[str, ...] | None:
     manifest = _resources_by_identity(result).get(_matching_target_identity(result, target))
-    pod_spec_path = _POD_SPEC_PATHS.get(target.kind)
-    if manifest is None or pod_spec_path is None:
+    if manifest is None or target.kind not in POD_SPEC_PATHS:
         return None
-
-    current: Any = manifest
-    for field_name in pod_spec_path:
-        if not isinstance(current, Mapping):
-            return None
-        current = current.get(field_name)
-    if not isinstance(current, Mapping):
-        return None
-    containers = current.get("containers")
-    if not isinstance(containers, list):
-        return None
-
-    names: list[str] = []
-    for container in containers:
-        if not isinstance(container, Mapping):
-            return None
-        name = container.get("name")
-        if not isinstance(name, str) or not name:
-            return None
-        names.append(name)
-    return tuple(names) if len(names) == len(set(names)) else None
+    return container_names(manifest, target.kind)
 
 
 def _order_operations_by_target_container(
@@ -748,14 +633,7 @@ def _order_operations_by_target_container(
     operations: Sequence[SetContainerResources],
 ) -> list[SetContainerResources]:
     """Order strategic-merge patch entries to preserve the rendered container list."""
-    container_order = _target_container_order(result, target)
-    if container_order is None:
-        return list(operations)
-    positions = {name: index for index, name in enumerate(container_order)}
-    return sorted(
-        operations,
-        key=lambda operation: (positions.get(operation.container, len(positions)), operation.container),
-    )
+    return order_by_container(operations, _target_container_order(result, target))
 
 
 def _target_description(target: ResourceTarget) -> str:
@@ -796,59 +674,6 @@ def _unified_diff(before: str, after: str, fromfile: str, tofile: str) -> str:
     )
 
 
-def _plan_digest(
-    *,
-    plan_id: str,
-    action: ActionPlanV3,
-    source: WorkloadSource,
-    file_edit: FileEdit,
-    diff: str,
-    rendered_diff: str,
-    base_revision: str,
-    source_revision: str | None,
-    validation: ValidationResult,
-    warnings: list[str],
-) -> str:
-    payload = {
-        "plan_id": plan_id,
-        "action": action.model_dump(mode="json"),
-        "binding": {
-            "id": source.id,
-            "provider_id": source.provider_id,
-            "repo_url": source.repo_url,
-            "ref": source.ref,
-            "path": source.path,
-            "namespace": source.namespace,
-            "workload_kind": source.workload_kind,
-            "workload_name": source.workload_name,
-            "renderer": source.renderer.value,
-            "status": source.status.value,
-            "revision": source.revision,
-            "source_revision": source.source_revision,
-        },
-        "files": [file_edit.model_dump(mode="json")],
-        "diff": diff,
-        "rendered_diff": rendered_diff,
-        "base_revision": base_revision,
-        "source_revision": source_revision,
-        "renderer": RendererKind.RAW.value,
-        "validation": validation.model_dump(mode="json"),
-        "warnings": warnings,
-    }
-    try:
-        canonical = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as exc:
-        raise RawManifestPlanError("plan inputs must be deterministically JSON-serializable") from exc
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
-
-
 def _plan_identifier(action: ActionPlanV3, source: WorkloadSource, base_revision: str) -> str:
     """Keep previews idempotent per immutable source revision while allowing safe re-plans."""
     identity = {
@@ -858,3 +683,166 @@ def _plan_identifier(action: ActionPlanV3, source: WorkloadSource, base_revision
     }
     encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return f"pln-{hashlib.sha256(encoded).hexdigest()[:24]}"
+
+
+# -- resource deletion (H6) -------------------------------------------------------------------
+def _deletes_target(spec: ActionKindSpec, target: ResourceTarget, operations: Sequence[TypedOperation]) -> bool:
+    try:
+        primitives = spec.compile(target, operations)
+    except ActionKindError as exc:
+        raise RawManifestPlanError(str(exc)) from exc
+    return any(isinstance(primitive, DeletePrimitive) and primitive.ref == target for primitive in primitives)
+
+
+def _plan_deletion(
+    action: ActionPlanV3,
+    source: WorkloadSource,
+    snapshot: RepositorySnapshot,
+    base_revision: str,
+    spec: ActionKindSpec,
+    operations: Sequence[TypedOperation],
+    scope_sources: Mapping[str, str | bytes],
+    before: RawRenderResult,
+    target_resource: RenderedResource,
+) -> FilePlan:
+    """Remove the target's manifest: the whole file, one document of it, or one ``List`` item."""
+    target_path = target_resource.source_path
+    original_sha = snapshot.original_blob_shas.get(target_path)
+    if original_sha is None:
+        raise RawManifestPlanError(f"{target_path}: original blob SHA is required for a deletion")
+    original_content = _decode_content(target_path, snapshot.contents[target_path])
+    updated_content = remove_resource_document(target_path, original_content, target_resource, action.target)
+
+    updated_sources = dict(scope_sources)
+    if updated_content is None:
+        del updated_sources[target_path]
+    else:
+        updated_sources[target_path] = updated_content
+    if updated_sources:
+        after = _render(updated_sources)
+    else:
+        after = RawRenderResult(
+            renderer=RendererKind.RAW,
+            resources=(),
+            warnings=(),
+            output_digest=f"sha256:{hashlib.sha256(b'[]').hexdigest()}",
+        )
+    _validate_rendered_change(before, after, action.target, action.target.kind, operations)
+
+    if updated_content is None:
+        file_edit = FileEdit(path=target_path, operation="delete", original_sha=original_sha)
+        diff = _unified_diff(original_content, "", f"a/{target_path}", "/dev/null")
+    else:
+        file_edit = FileEdit(path=target_path, operation="update", original_sha=original_sha, content=updated_content)
+        diff = _unified_diff(original_content, updated_content, f"a/{target_path}", f"b/{target_path}")
+    rendered_diff = _unified_diff(_rendered_json(before), _rendered_json(after), "rendered-before", "rendered-after")
+    kind_warnings = spec.planning_warnings(target_resource.manifest, action.target, source.evidence)
+    warnings = sorted(set(before.warnings) | set(after.warnings) | set(kind_warnings))
+    source_revision = source.source_revision or source.revision
+    validation = ValidationResult(
+        target_changed=True,
+        unrelated_changes=False,
+        requests_within_limits=True,
+        renderer=RendererKind.RAW,
+        output_digest=after.output_digest,
+        warnings=warnings,
+        **_render_inputs(scope_sources, snapshot, source, base_revision),
+    )
+    plan_id = _plan_identifier(action, source, base_revision)
+    digest = plan_digest(
+        plan_id=plan_id,
+        action=action,
+        source=source,
+        files=[file_edit],
+        diff=diff,
+        rendered_diff=rendered_diff,
+        base_revision=base_revision,
+        source_revision=source_revision,
+        validation=validation,
+        warnings=warnings,
+        renderer=RendererKind.RAW,
+        error_type=RawManifestPlanError,
+    )
+    return FilePlan(
+        plan_id=plan_id,
+        files=[file_edit],
+        diff=diff,
+        rendered_diff=rendered_diff,
+        base_revision=base_revision,
+        source_revision=source_revision,
+        renderer=RendererKind.RAW,
+        validation=validation,
+        warnings=warnings,
+        digest=digest,
+    )
+
+
+def remove_resource_document(
+    path: str,
+    content: str,
+    target_resource: RenderedResource,
+    target: ResourceTarget,
+) -> str | None:
+    """``content`` without the target resource; ``None`` when nothing else is left (delete the file).
+
+    A ``kind: List`` loses one item, a multi-document YAML file loses one document and a
+    file holding only the target is deleted.
+    """
+    return remove_document(path, content, target_resource.document_index, target)
+
+
+def remove_document(path: str, content: str, document_index: int, target: ResourceTarget) -> str | None:
+    """``content`` without the target held by document ``document_index`` (see ``remove_resource_document``)."""
+    if PurePosixPath(path).suffix.lower() == ".json":
+        document = _load_json(path, content)
+        if _remove_list_item(document, target):
+            return _dump_json(content, document)
+        _matching_manifest(document, target)
+        return None
+
+    yaml = YAML(typ="rt")
+    yaml.allow_duplicate_keys = False
+    yaml.preserve_quotes = True
+    yaml.indent(mapping=2, sequence=4, offset=2)
+    yaml.width = 4_096
+    if "\r\n" in content and "\n" not in content.replace("\r\n", ""):
+        yaml.line_break = "\r\n"
+    try:
+        documents = list(yaml.load_all(content))
+    except (YAMLError, RecursionError, ValueError, TypeError) as exc:
+        raise RawManifestPlanError(f"{path}: round-trip YAML parsing failed") from exc
+    index = document_index
+    if index >= len(documents):
+        raise RawManifestPlanError(f"{path}: rendered document index is absent from the round-trip source")
+    if not _remove_list_item(documents[index], target):
+        _matching_manifest(documents[index], target)
+        del documents[index]
+    remaining = [document for document in documents if document is not None]
+    if not remaining:
+        return None
+    stream = io.StringIO()
+    try:
+        yaml.dump_all(remaining, stream)
+    except (YAMLError, RecursionError, ValueError, TypeError) as exc:
+        raise RawManifestPlanError(f"{path}: round-trip YAML serialization failed") from exc
+    updated = stream.getvalue()
+    if content.endswith(("\n", "\r")):
+        if not updated.endswith("\n"):
+            updated += "\n"
+    else:
+        updated = updated.rstrip("\r\n")
+    return updated
+
+
+def _remove_list_item(document: Any, target: ResourceTarget) -> bool:
+    """Remove the target from a ``kind: List`` document; ``False`` when ``document`` is not a List."""
+    if not isinstance(document, MutableMapping) or document.get("kind") != "List":
+        return False
+    items = document.get("items")
+    if not isinstance(items, list):
+        raise RawManifestPlanError("kind: List requires an items list")
+    matches = [index for index, item in enumerate(items) if isinstance(item, Mapping) and _matches_target(item, target)]
+    if len(matches) != 1:
+        raise RawManifestPlanError(f"document must contain exactly one resource matching {_target_description(target)}")
+    del items[matches[0]]
+    return True

@@ -3,12 +3,24 @@
 
 This module centralizes the data loading that used to be duplicated across the
 API router, the startup scan and the CLI command.
+
+Scans on the SQL backends are memory-bounded (roadmap E3, BUG-12): instead of
+materializing every metric row of the lookback, the builder reads one usage
+summary per target container, computed in SQL from the ``workload_usage_hourly``
+rollup, plus a few baseline rows per target for the Impact Model. Memory then
+grows with the number of targets, not with pods x lookback x samples. Other
+repositories (custom backends, tests) keep the bounded row-loading path.
 """
 
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, List, Optional, cast
 
+from greenkube.collectors.deletion_candidates import (
+    LOAD_BALANCER_KIND,
+    PERSISTENT_VOLUME_KIND,
+    attach_first_seen,
+)
 from greenkube.collectors.hpa_collector import HPACollector
 from greenkube.collectors.lb_collector import LoadBalancerCollector, enrich_orphaned_lb_costs
 from greenkube.collectors.pv_collector import PVCollector, enrich_orphaned_pv_costs
@@ -19,6 +31,7 @@ from greenkube.storage.base_repository import ContainerMetricsRepository
 if TYPE_CHECKING:
     from greenkube.core.config import Config
     from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository
+    from greenkube.storage.base_workload_usage_repository import WorkloadUsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +64,34 @@ async def get_active_k8s_namespaces() -> Optional[set[str]]:
         return None
 
 
+def usage_repository_for(combined_repo: object) -> Optional["WorkloadUsageRepository"]:
+    """The rollup repository sharing the database of a SQL combined-metrics repository, if any."""
+    from greenkube.storage.base_workload_usage_repository import create_workload_usage_repository
+    from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
+    from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
+
+    if isinstance(combined_repo, PostgresCombinedMetricsRepository):
+        return create_workload_usage_repository(combined_repo.db_manager, "postgres")
+    if isinstance(combined_repo, SQLiteCombinedMetricsRepository):
+        return create_workload_usage_repository(combined_repo.db_manager, "sqlite")
+    return None
+
+
 class ContextBuilder:
     """Loads metrics and cluster side inputs into an :class:`OptimizationContext`."""
 
-    def __init__(self, config: Optional["Config"] = None):
+    def __init__(
+        self,
+        config: Optional["Config"] = None,
+        usage_repo: Optional["WorkloadUsageRepository"] = None,
+        deletion_candidate_repo: Optional[Any] = None,
+    ):
         from greenkube.core.config import get_config
 
         self.config = config if config is not None else get_config()
+        self.usage_repo = usage_repo
+        # First-seen history of deletion candidates; without it no deletion is recommended.
+        self.deletion_candidate_repo = deletion_candidate_repo
 
     async def build(
         self,
@@ -66,6 +100,130 @@ class ContextBuilder:
         namespace: Optional[str] = None,
     ) -> OptimizationContext:
         """Reads the configured lookback window and builds a full context."""
+        if self.deletion_candidate_repo is None:
+            from greenkube.storage.deletion_candidate_repository import deletion_candidate_repository_for
+
+            self.deletion_candidate_repo = deletion_candidate_repository_for(combined_repo)
+        usage_repo = self.usage_repo if self.usage_repo is not None else usage_repository_for(combined_repo)
+        if usage_repo is not None:
+            return await self.build_from_rollup(usage_repo, node_repo, namespace=namespace)
+        return await self._build_from_rows(combined_repo, node_repo, namespace=namespace)
+
+    async def build_from_rollup(
+        self,
+        usage_repo: "WorkloadUsageRepository",
+        node_repo: "NodeRepository",
+        namespace: Optional[str] = None,
+        *,
+        now: Optional[datetime] = None,
+    ) -> OptimizationContext:
+        """Builds the context from usage summaries computed in SQL (memory bounded by targets)."""
+        from greenkube.core.workload_usage import WorkloadUsageRollup, floor_hour
+        from greenkube.utils.time import parse_query_step_seconds
+
+        cfg = self.config
+        end = now or datetime.now(timezone.utc)
+        lookback_days = max(int(cfg.RECOMMENDATION_LOOKBACK_DAYS), 1)
+        start = floor_hour(end - timedelta(days=lookback_days))
+        read_end = floor_hour(end) + timedelta(hours=1)
+
+        # Roll the hours collected since the last compression run, so the scan
+        # sees the newest data; this is cheap (usually one or two hours).
+        await WorkloadUsageRollup(
+            usage_repo,
+            step_seconds=parse_query_step_seconds(cfg.PROMETHEUS_QUERY_RANGE_STEP),
+            backfill_hours=lookback_days * 24,
+            warmup_seconds=int(getattr(cfg, "RIGHTSIZING_WARMUP_MINUTES", 0) or 0) * 60,
+        ).refresh(end, refresh_hours=1)
+
+        # Namespaces that no longer exist are left out in SQL: their targets
+        # get no summary (reconciliation marks their recommendations stale),
+        # and their history counts neither in node averages nor in the
+        # observed window.
+        active_namespaces = await get_active_k8s_namespaces()
+        snapshot = await usage_repo.read_usage_snapshot(
+            start, read_end, namespace=namespace, namespaces=active_namespaces
+        )
+        pod_rows, container_rows = await usage_repo.read_baseline_rows(
+            start, read_end, namespace=namespace, snapshot=snapshot, namespaces=active_namespaces
+        )
+        # Static (mirror) pods are no workload of the cluster's Git (F-04): left out before
+        # liveness and signals, and reported.
+        from greenkube.core.optimization.liveness import exclude_static_pods
+
+        static_pods = exclude_static_pods(snapshot)
+        # OOM kills, CPU throttling and JVM hints of the summaries (E9): rightsizing
+        # sizes increases and judges decreases with them.
+        signals = await self._attach_reliability_signals(snapshot, start, end)
+        liveness = await self._filter_live_targets(snapshot, end, signals)
+
+        # Annualize over the span actually observed: a cluster with three days
+        # of history is not extrapolated as if it had fourteen.
+        observed_start = start
+        if snapshot.first_hour is not None and snapshot.first_hour > start:
+            observed_start = snapshot.first_hour
+        analysis_window_seconds = max((end - observed_start).total_seconds(), 3600.0)
+        logger.debug(
+            "Recommendation scan reads %d target summaries and %d baseline rows over %.0f hours.",
+            sum(len(containers) for containers in snapshot.summaries.values()),
+            len(pod_rows) + len(container_rows),
+            analysis_window_seconds / 3600,
+        )
+
+        side_inputs = await self._collect_side_inputs(node_repo, end)
+        return OptimizationContext(
+            config=cfg,
+            metrics=list(pod_rows),
+            container_metrics=list(container_rows),
+            namespace=namespace,
+            analysis_window_seconds=analysis_window_seconds,
+            window_start=observed_start,
+            window_end=end,
+            usage=snapshot,
+            gone_targets=liveness.gone,
+            not_running_targets=liveness.not_running,
+            static_pod_targets=static_pods.targets,
+            static_pod_count=static_pods.pod_count,
+            **side_inputs,
+        )
+
+    async def _attach_reliability_signals(self, snapshot, start: datetime, end: datetime):
+        from greenkube.core.reliability_signals import SIGNAL_FAILED, SIGNAL_NAMES, attach_reliability_signals
+
+        try:
+            return await attach_reliability_signals(snapshot, self.config, start=start, end=end)
+        except Exception as error:
+            # Signals stay unknown and rightsizing fails closed on them (REC-04): no decrease
+            # without a readable restart/OOM history, and the outcome is reported.
+            logger.warning("Could not attach reliability signals to the usage summaries: %s", error)
+            snapshot.reliability_signal_status = {name: SIGNAL_FAILED for name in SIGNAL_NAMES}
+            return None
+
+    async def _filter_live_targets(self, snapshot, end: datetime, signals):
+        """Leaves targets that no longer run out of the analyzers (REC-05, see ``liveness``)."""
+        from greenkube.core.optimization.liveness import (
+            filter_live_targets,
+            needs_controller_check,
+            read_scaled_to_zero,
+        )
+
+        live = getattr(signals, "live_containers", None)
+        hours = float(getattr(self.config, "RECOMMENDATION_TARGET_MAX_STALENESS_HOURS", 2.0) or 2.0)
+        staleness = timedelta(hours=hours)
+        scaled_to_zero: Optional[set] = set()
+        if needs_controller_check(snapshot, end=end, live_containers=live, max_staleness=staleness):
+            scaled_to_zero = await read_scaled_to_zero()
+        return filter_live_targets(
+            snapshot, end=end, live_containers=live, scaled_to_zero=scaled_to_zero, max_staleness=staleness
+        )
+
+    async def _build_from_rows(
+        self,
+        combined_repo: "CombinedMetricsRepository",
+        node_repo: "NodeRepository",
+        namespace: Optional[str] = None,
+    ) -> OptimizationContext:
+        """Bounded row-loading path for repositories without the usage rollup."""
         cfg = self.config
         end = datetime.now(timezone.utc)
         start, expected_rows = await self._bounded_window(combined_repo, end, namespace=namespace)
@@ -266,6 +424,9 @@ class ContextBuilder:
         try:
             pv_collector = PVCollector()
             orphaned_volumes = await pv_collector.collect()
+            orphaned_volumes = await attach_first_seen(
+                self.deletion_candidate_repo, PERSISTENT_VOLUME_KIND, orphaned_volumes, end
+            )
         except Exception as e:
             logger.warning(
                 "Could not collect orphaned PersistentVolumes: %s. Proceeding without PV cleanup recommendations.",
@@ -287,6 +448,9 @@ class ContextBuilder:
         try:
             lb_collector = LoadBalancerCollector()
             orphaned_load_balancers = await lb_collector.collect()
+            orphaned_load_balancers = await attach_first_seen(
+                self.deletion_candidate_repo, LOAD_BALANCER_KIND, orphaned_load_balancers, end
+            )
         except Exception as e:
             logger.warning(
                 "Could not collect orphaned LoadBalancer Services: %s. Proceeding without LB cleanup recommendations.",

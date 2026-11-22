@@ -22,16 +22,6 @@ rules:
   - get
   - list
   - watch
-{{- if and (eq .Values.profile "production") .Values.production.leaderElection.enabled }}
-  # The controller uses one namespaced Lease for active/standby coordination.
-- apiGroups: ["coordination.k8s.io"]
-  resources: ["leases"]
-  verbs: ["create"]
-- apiGroups: ["coordination.k8s.io"]
-  resources: ["leases"]
-  resourceNames: ["{{ include "greenkube.leaseName" . }}"]
-  verbs: ["get", "update", "patch"]
-{{- end }}
   # GreenKube needs to list HPAs to detect existing autoscalers before recommending new ones
 - apiGroups: ["autoscaling"]
   resources:
@@ -51,10 +41,12 @@ rules:
 - apiGroups: ["autoscaling.k8s.io"]
   resources:
   - verticalpodautoscalers
+  # Checkpoints carry the sample history: a VPA votes only once mature (A.5).
+  - verticalpodautoscalercheckpoints
   verbs:
   - get
   - list
-   # Karpenter connector (node pool consolidation).
+   # The realization factor reads Karpenter NodePools and NodeClaims (autoscaler collector).
 - apiGroups: ["karpenter.sh"]
   resources:
   - nodepools
@@ -73,11 +65,14 @@ rules:
   verbs:
   - get
   - list
-  # GitOps discovery reads Argo CD Applications and projects.
+  # GitOps discovery reads Argo CD Applications and projects. Always rendered,
+  # read-only: discovery activates itself when the CRDs exist (F12).
+  # Rollouts: a Rollout scaled to zero is not retired as gone (COL-16 review).
 - apiGroups: ["argoproj.io"]
   resources:
   - applications
   - appprojects
+  - rollouts
   verbs:
   - get
   - list
@@ -113,5 +108,54 @@ rules:
   - pods
   verbs:
   - get
+  - list
+  # Deletion evidence (docs/recommendation.md, "Why GreenKube thinks a resource
+  # is unused"): a LoadBalancer Service or PersistentVolume is only reported as
+  # unused when GreenKube can read everything that could still use it. A missing
+  # permission makes the evidence unprovable, so nothing is recommended. Read-only.
+- apiGroups: ["discovery.k8s.io"]
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["networking.k8s.io"]
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources:
+  - gateways
+  - httproutes
+  - grpcroutes
+  - tlsroutes
+  - tcproutes
+  - udproutes
+  verbs:
+  - get
+  - list
+  # Jobs: a pod owned by a Job created by a CronJob is attributed to the CronJob (COL-16).
+- apiGroups: ["batch"]
+  resources:
+  - cronjobs
+  - jobs
+  verbs:
+  - get
+  - list
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources:
+  - volumesnapshots
+  - volumesnapshotcontents
+  verbs:
+  - get
+  - list
+  # Karpenter DisruptionBlocked/Unconsolidatable events feed the realization factor. Read-only.
+- apiGroups: [""]
+  resources:
+  - events
+  verbs:
   - list
   {{- end }}

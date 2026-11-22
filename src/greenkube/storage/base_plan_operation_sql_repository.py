@@ -228,9 +228,6 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
     async def get_by_plan_id(self, plan_id: str) -> Operation | None:
         return await self._get("plan_id = ?", plan_id)
 
-    async def get_by_idempotency_key(self, idempotency_key: str) -> Operation | None:
-        return await self._get("idempotency_key = ?", idempotency_key)
-
     async def _get(self, clause: str, value: str) -> Operation | None:
         async with self._connection() as connection:
             row = await self._fetchrow(
@@ -360,7 +357,16 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
             """
             INSERT INTO automation_worker_heartbeats (worker_id, status, heartbeat_at, updated_at)
             VALUES (?, 'idle', ?, ?)
-            ON CONFLICT (worker_id) DO NOTHING
+            ON CONFLICT (worker_id) DO UPDATE SET
+                status = 'idle',
+                heartbeat_at = excluded.heartbeat_at,
+                lease_id = NULL,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                lease_plan_operation_id = NULL,
+                updated_at = excluded.updated_at
+            WHERE automation_worker_heartbeats.lease_expires_at IS NULL
+               OR automation_worker_heartbeats.lease_expires_at <= excluded.heartbeat_at
             """,
             (worker_id, self._db_datetime(now), self._db_datetime(now)),
         )
@@ -503,9 +509,18 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
             assert row is not None
             return row_to_plan_operation(row)
 
-    async def mark_failed(self, lease: PlanOperationLease, error: str, *, retryable: bool = True) -> Operation:
+    async def mark_failed(
+        self,
+        lease: PlanOperationLease,
+        error: str,
+        *,
+        retryable: bool = True,
+        retry_at: datetime | None = None,
+    ) -> Operation:
         if not error.strip():
             raise ValueError("error must not be blank")
+        if retry_at is not None and (not isinstance(retry_at, datetime) or retry_at.tzinfo is None):
+            raise ValueError("retry_at must be a timezone-aware datetime")
         worker_id = self._lease_worker_id(lease)
         operation_id = lease.operation.operation_id
         now = self._now()
@@ -529,10 +544,16 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
             if row is None:
                 raise PlanOperationLeaseError("plan operation lease is no longer owned by this worker")
 
-            should_retry = retryable and int(row["attempts"]) < int(row["max_attempts"])
+            # A provider rate limit (retry_at) is not a failed attempt: the claim's attempt is
+            # refunded and the operation waits for the provider's reset time.
+            rate_limited = retryable and retry_at is not None
+            attempts = max(int(row["attempts"]) - 1, 0) if rate_limited else int(row["attempts"])
+            should_retry = retryable and attempts < int(row["max_attempts"])
             status = OperationStatus.RETRYING.value if should_retry else OperationStatus.FAILED.value
             available_at = self._db_datetime(now)
-            if should_retry:
+            if rate_limited and retry_at is not None:
+                available_at = self._db_datetime(max(retry_at, now))
+            elif should_retry:
                 retry_delay = self._retry_delay(
                     int(row["attempts"]),
                     int(row["backoff_base_seconds"]),
@@ -546,6 +567,7 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
                 UPDATE automation_plan_operations
                 SET status = ?,
                     available_at = ?,
+                    attempts = ?,
                     worker_id = NULL,
                     lease_id = NULL,
                     lease_expires_at = NULL,
@@ -560,6 +582,7 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
                 (
                     status,
                     available_at,
+                    attempts,
                     error.strip(),
                     self._db_datetime(now),
                     operation_id,
@@ -574,6 +597,65 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
                 connection,
                 "SELECT * FROM automation_plan_operations WHERE operation_id = ?",
                 (operation_id,),
+            )
+            assert updated_row is not None
+            return row_to_plan_operation(updated_row)
+
+    async def cancel_unleased_operation(self, plan_id: str, reason: str) -> Operation | None:
+        """Cancel the plan's operation unless a worker holds a live lease on it.
+
+        Queued, retrying and lease-expired running operations become ``cancelled``; a
+        running operation with a live lease is returned unchanged (the caller refuses),
+        and a terminal one is returned as is. ``None`` when the plan has no operation.
+        """
+        if not reason.strip():
+            raise ValueError("reason must not be blank")
+        now = self._now()
+        async with self._transaction(immediate=True) as connection:
+            query = "SELECT * FROM automation_plan_operations WHERE plan_id = ?"
+            if self._postgres:
+                query += " FOR UPDATE"
+            row = await self._fetchrow(connection, query, (plan_id,))
+            if row is None:
+                return None
+            await self._execute(
+                connection,
+                """
+                UPDATE automation_plan_operations
+                SET status = 'cancelled',
+                    worker_id = NULL,
+                    lease_id = NULL,
+                    lease_expires_at = NULL,
+                    locked_at = NULL,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE operation_id = ?
+                  AND (
+                      status IN ('queued', 'retrying')
+                      OR (status = 'running' AND lease_expires_at <= ?)
+                  )
+                """,
+                (reason.strip()[:1000], self._db_datetime(now), row["operation_id"], self._db_datetime(now)),
+            )
+            await self._execute(
+                connection,
+                """
+                UPDATE automation_worker_heartbeats
+                SET status = 'idle',
+                    lease_id = NULL,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    lease_plan_operation_id = NULL,
+                    updated_at = ?
+                WHERE lease_plan_operation_id = ?
+                  AND lease_expires_at <= ?
+                """,
+                (self._db_datetime(now), row["operation_id"], self._db_datetime(now)),
+            )
+            updated_row = await self._fetchrow(
+                connection,
+                "SELECT * FROM automation_plan_operations WHERE operation_id = ?",
+                (row["operation_id"],),
             )
             assert updated_row is not None
             return row_to_plan_operation(updated_row)

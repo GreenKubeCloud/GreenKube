@@ -1,0 +1,20 @@
+{{- $v := include "greenkube.values" . | fromYaml }}
+{{- if gt (int ($v.worker.replicas | default 0)) 0 }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "greenkube.fullname" . }}-worker-metrics
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker-metrics
+spec:
+  type: ClusterIP
+  ports:
+    - name: worker-metrics
+      port: {{ include "greenkube.workerMetricsPort" . }}
+      targetPort: worker-metrics
+      protocol: TCP
+  selector:
+    {{- include "greenkube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+{{- end }}

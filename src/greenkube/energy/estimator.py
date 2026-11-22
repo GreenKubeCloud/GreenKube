@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from greenkube.core.config import Config, get_config
 from greenkube.data.instance_profiles import INSTANCE_PROFILES
+from greenkube.impact.power import LinearCpuPowerModel
 from greenkube.models.metrics import EnergyMetric
 from greenkube.models.prometheus_metrics import PrometheusMetric
 from greenkube.utils.time import parse_query_step_seconds
@@ -222,7 +223,7 @@ class BasicEstimator:
         node_util = (node_total_cpu / vcores) if vcores > 0 else 0.0
         node_util = min(node_util, 1.0)
 
-        node_power_watts = min_watts + (node_util * (max_watts - min_watts))
+        node_power_watts = LinearCpuPowerModel(idle_watts=min_watts, max_watts=max_watts).watts(node_util)
 
         results = []
         reasons = estimation_reasons or []

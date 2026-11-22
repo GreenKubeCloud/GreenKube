@@ -1,0 +1,77 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem. **Security issues go to
+        [private vulnerability reporting](https://github.com/GreenKubeCloud/GreenKube/security/advisories/new), never here.**
+        Remove tokens, cluster names and anything private from what you paste.
+  - type: input
+    id: version
+    attributes:
+      label: GreenKube version
+      description: Chart and image version, or the commit of a dev image (`helm list -n greenkube`).
+      placeholder: 0.3.1
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which stage of the loop is affected?
+      multiple: true
+      options:
+        - Install / Helm chart
+        - Collection (Prometheus, OpenCost, carbon data)
+        - Recommendations and sources
+        - Pull requests (plans, delivery, Git providers)
+        - Sync and apply detection (Argo CD, Flux)
+        - Measurement and savings ledger
+        - UI
+        - API / CLI
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kubernetes distribution and version, GitOps controller, Git provider, database (bundled or external PostgreSQL).
+      placeholder: EKS 1.33, Argo CD 3.1, GitHub App, bundled PostgreSQL
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Include the exact error, eligibility code or failing step.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Install with values ...
+        2. Open ...
+        3. See ...
+  - type: textarea
+    id: setup-status
+    attributes:
+      label: Setup checklist
+      description: The failing checks from the Setup page or `GET /api/v1/setup/status` (ids, statuses and reasons).
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from `kubectl -n greenkube logs deploy/greenkube-controller` (or api, renderer).
+      render: text

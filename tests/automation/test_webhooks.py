@@ -5,6 +5,7 @@ import hmac
 import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -513,3 +514,60 @@ async def test_provider_id_and_delivery_id_are_not_taken_from_payload():
     assert result.event is not None
     assert result.event.provider_id == "provider-github"
     assert result.event.delivery_id == "trusted-header-delivery"
+
+
+@pytest.mark.asyncio
+async def test_bug_45_github_close_without_merge_drops_the_test_merge_sha():
+    fixture = Path(__file__).parent / "fixtures" / "github" / "pull_request_closed_unmerged.webhook.json"
+    body = fixture.read_bytes()
+    assert json.loads(body)["pull_request"]["merge_commit_sha"] is not None
+    service, _, _ = _service()
+
+    result = await service.process(
+        provider_id="provider-github",
+        provider_type="github",
+        headers={
+            "X-GitHub-Event": "pull_request",
+            "X-GitHub-Delivery": "delivery-closed-unmerged",
+            "X-Hub-Signature-256": _github_signature(body, "github-secret"),
+        },
+        body=body,
+    )
+
+    assert result.event is not None
+    assert result.event.action == "closed"
+    assert result.event.merged is False
+    assert result.event.merge_commit_sha is None
+    assert result.event.head_sha == "9a1c2b3d4e5f60718293a4b5c6d7e8f901234567"
+
+
+@pytest.mark.asyncio
+async def test_gitlab_merge_request_closed_without_merge_carries_no_merge_sha():
+    payload: dict[str, object] = {
+        "object_kind": "merge_request",
+        "project": {"path_with_namespace": "acme/platform"},
+        "object_attributes": {
+            "iid": 7,
+            "action": "close",
+            "state": "closed",
+            "merge_commit_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+            "updated_at": "2026-10-21T12:45:00Z",
+        },
+    }
+    body = _body(payload)
+    service, _, _ = _service(secrets={"provider-gitlab": "gitlab-secret"})
+
+    result = await service.process(
+        provider_id="provider-gitlab",
+        provider_type="gitlab",
+        headers={
+            "X-Gitlab-Event": "Merge Request Hook",
+            "X-Gitlab-Event-UUID": "delivery-gitlab-closed",
+            "X-Gitlab-Token": "gitlab-secret",
+        },
+        body=body,
+    )
+
+    assert result.event is not None
+    assert result.event.merged is False
+    assert result.event.merge_commit_sha is None

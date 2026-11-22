@@ -16,6 +16,7 @@ from greenkube.gitops.contracts import (
     PlanStatus,
     RendererKind,
 )
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, TimeseriesCachePoint
 from greenkube.models.node import NodeInfo
 
@@ -93,7 +94,7 @@ class GitOpsWorkloadSourceResponse(GitOpsResponseModel):
     source_revision: Optional[str] = None
     observed_at: datetime
     expires_at: Optional[datetime] = None
-    generation_token: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    generation_token: StrictStr = Field(pattern=rf"^{SHA256_DIGEST.pattern}$")
 
 
 class GitOpsBindingProvenanceResponse(GitOpsResponseModel):
@@ -144,7 +145,7 @@ class GitOpsManualBindingResolutionRequest(GitOpsResponseModel):
     """Explicit confirmation of one current server-returned candidate."""
 
     candidate_id: StrictStr = Field(min_length=1, max_length=256)
-    generation_token: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    generation_token: StrictStr = Field(pattern=rf"^{SHA256_DIGEST.pattern}$")
     confirmed: Literal[True]
 
 
@@ -202,7 +203,7 @@ class AutomationPlanCreateRequest(GitOpsResponseModel):
 class AutomationPlanApproveRequest(GitOpsResponseModel):
     """Approval for the exact digest returned by plan creation or read."""
 
-    digest: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    digest: StrictStr = Field(pattern=rf"^{SHA256_DIGEST.pattern}$")
 
 
 class AutomationPlanSourceResponse(GitOpsResponseModel):
@@ -241,6 +242,8 @@ class AutomationPlanResponse(GitOpsResponseModel):
     plan_id: str
     recommendation_ids: List[int]
     status: PlanStatus
+    #: Reason code of the last status change (``cancelled_by_user``, ``plan_expired``...), F-10.
+    status_reason: Optional[str] = None
     digest: Optional[str] = None
     policy_result: Dict[str, Any] = Field(default_factory=dict)
     operation_id: Optional[str] = None
@@ -255,6 +258,58 @@ class AutomationPlanResponse(GitOpsResponseModel):
     validation: Optional[AutomationPlanValidationResponse] = None
     created_at: datetime
     expires_at: Optional[datetime] = None
+    #: How the approved plan is delivered (F4): ``direct``, ``patch`` or ``ci``; None before approval.
+    delivery_mode: Optional[Literal["direct", "patch", "ci"]] = None
+    #: True when ``automation.autoApprove`` approved the plan with its preview (F5).
+    auto_approved: bool = False
+    #: Why ``automation.autoApprove`` did not approve the preview (empty when it is off or approved).
+    auto_approve_blockers: List[str] = Field(default_factory=list)
+
+
+class AutomationPlanDeliveryRequest(GitOpsResponseModel):
+    """A pull request opened outside GreenKube for an approved plan (``patch`` and ``ci`` modes, F4)."""
+
+    pr_url: StrictStr = Field(min_length=8, max_length=2048)
+    #: Head commit of the pull request; required in ``ci`` mode, optional for a ``patch`` link-back.
+    head_sha: Optional[StrictStr] = Field(default=None, pattern=rf"^(?:{GIT_OBJECT_SHA.pattern})$")
+
+
+class AutomationPlanDeliveryPullRequest(GitOpsResponseModel):
+    number: int
+    url: Optional[str] = None
+    head_sha: Optional[str] = None
+    #: ``branch`` (deterministic plan branch), ``trailer`` (GreenKube-Plan trailer) or ``recorded``.
+    linked_by: str
+
+
+class AutomationPlanDeliveryResponse(GitOpsResponseModel):
+    plan: AutomationPlanResponse
+    pull_request: AutomationPlanDeliveryPullRequest
+    #: False when the same pull request had already been recorded (idempotent report).
+    created: bool
+
+
+class AutomationPlanDeliveryItem(GitOpsResponseModel):
+    """One approved plan awaiting external delivery, with what a CI job needs to deliver it."""
+
+    plan_id: str
+    status: PlanStatus
+    delivery_mode: Optional[Literal["direct", "patch", "ci"]] = None
+    digest: Optional[str] = None
+    recommendation_ids: List[int]
+    repository: str
+    base_branch: str
+    base_revision: Optional[str] = None
+    #: Deterministic branch the pull request must come from.
+    branch: Optional[str] = None
+    #: ``GET`` path of the ``git format-patch`` mailbox.
+    patch_url: str
+    #: ``POST`` path of the delivery report.
+    delivery_url: str
+    title: Optional[str] = None
+    body: Optional[str] = None
+    created_at: datetime
+    expires_at: Optional[datetime] = None
 
 
 class AutomationPlanErrorResponse(GitOpsResponseModel):
@@ -262,8 +317,86 @@ class AutomationPlanErrorResponse(GitOpsResponseModel):
 
     code: str
     detail: str
+    #: The planner's own explanation (plan creation and rollback preview only), redacted and bounded.
+    reason: Optional[str] = None
     policy_result: Optional[Dict[str, Any]] = None
     mapping_options: Optional[AutomationPlanMappingOptionsResponse] = None
+
+
+class CollectionHoleResponse(BaseModel):
+    """Consecutive uncovered steps of one status (COL-04)."""
+
+    start: datetime
+    end: datetime
+    status: str = Field(..., description="gap, failed or unknown.")
+    reason: Optional[str] = None
+
+
+class CollectionCoverageResponse(BaseModel):
+    """Coverage of a period by the metric collection (COL-04).
+
+    ``coverage_ratio`` is the share of steps whose data is known: collected
+    (rows stored) or empty (Prometheus scraped, no pod ran). Totals over a
+    period with ``complete = false`` miss the uncovered steps.
+    """
+
+    cluster: str
+    source: str
+    start: datetime
+    end: datetime
+    step_seconds: int
+    expected_steps: int
+    collected_steps: int
+    empty_steps: int
+    failed_steps: int
+    gap_steps: int
+    unknown_steps: int
+    coverage_ratio: float
+    complete: bool
+    holes: List[CollectionHoleResponse] = Field(default_factory=list)
+
+
+class CollectionIdentityMismatchResponse(BaseModel):
+    """A controller of another cluster refused this database: collection is stopped (COL-02 review)."""
+
+    stored_uid: str = Field(..., description="kube-system UID this database belongs to.")
+    live_uid: str = Field(..., description="kube-system UID of the controller that refused it.")
+    seen_at: Optional[datetime] = None
+
+
+class CollectionStatusResponse(BaseModel):
+    """Watermark, lag and last hole of the metric collection (COL-04)."""
+
+    watermark: Optional[datetime] = None
+    lag_seconds: Optional[float] = None
+    last_gap: Optional[CollectionHoleResponse] = None
+    identity_mismatch: Optional[CollectionIdentityMismatchResponse] = Field(
+        None,
+        description="Set while collection refuses this database because it belongs to another cluster; "
+        "set config.collection.allowClusterUidChange once to adopt it.",
+    )
+    container_usage_source: Optional[str] = Field(
+        None,
+        description="Where the container usage of the newest stored step comes from (COL-05): `prometheus`, "
+        "`metrics_server` (Metrics API point samples, because cAdvisor exports pod-level series only, for "
+        "example on cri-dockerd), `mixed`, or null when no container row is stored.",
+    )
+
+
+class CompressionStatusResponse(BaseModel):
+    """Hourly compression watermark and lag (ROL-01)."""
+
+    status: str = Field(
+        ..., description="`ok`, or `degraded` when a compression watermark trails its reachable hour by over 2 h."
+    )
+    lag_seconds: Optional[float] = Field(
+        None,
+        description="Largest lag of the metric tables behind now - the effective compression age (the longer of "
+        "METRICS_COMPRESSION_AGE_HOURS and COLLECTION_MAX_BACKFILL).",
+    )
+    watermarks: dict[str, Optional[datetime]] = Field(
+        default_factory=dict, description="Compression watermark per raw metric table (exclusive end)."
+    )
 
 
 class HealthResponse(BaseModel):
@@ -271,6 +404,15 @@ class HealthResponse(BaseModel):
 
     status: str = Field(..., description="Health status of the API.")
     version: str = Field(..., description="Current application version.")
+    collection: Optional[CollectionStatusResponse] = Field(
+        None, description="Collection watermark, lag and last hole; absent when the database cannot be read."
+    )
+    demo: bool = Field(
+        False, description="True when the API runs `greenkube demo` (synthetic data, pull requests disabled)."
+    )
+    compression: Optional[CompressionStatusResponse] = Field(
+        None, description="Hourly compression watermark and lag; absent when the database cannot be read."
+    )
 
 
 class VersionResponse(BaseModel):
@@ -293,6 +435,29 @@ class MetricsSummaryResponse(BaseModel):
     total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
     pod_count: int = Field(0, description="Number of unique pods.")
     namespace_count: int = Field(0, description="Number of unique namespaces.")
+    idle_co2e_grams: Optional[float] = Field(
+        None,
+        description="Scope 2 CO₂e of the node idle share (unreserved capacity, `__idle__` rows); null with a "
+        "namespace filter or when the range holds no idle row.",
+    )
+    idle_embodied_co2e_grams: Optional[float] = Field(None, description="Scope 3 CO₂e of the node idle share.")
+    idle_cost: Optional[float] = Field(None, description="Modeled cost of the node idle share.")
+    idle_energy_joules: Optional[float] = Field(None, description="Energy of the node idle share in Joules.")
+    cluster_total_co2e_grams: Optional[float] = Field(
+        None, description="Scope 2 CO₂e of the cluster: allocated to workloads + idle share."
+    )
+    cluster_total_embodied_co2e_grams: Optional[float] = Field(
+        None, description="Scope 3 CO₂e of the cluster: allocated + idle share."
+    )
+    cluster_total_cost: Optional[float] = Field(None, description="Cost of the cluster: allocated + idle share.")
+    cluster_total_energy_joules: Optional[float] = Field(
+        None, description="Energy of the cluster in Joules: allocated + idle share."
+    )
+    idle_data_since: Optional[datetime] = Field(
+        None,
+        description="First instant covered by stored idle rows. When the window holds pod rows before it, the "
+        "idle and cluster-total fields are null (the idle history covers only part of the window).",
+    )
 
 
 class TimeseriesPoint(BaseModel):
@@ -310,6 +475,24 @@ class TimeseriesPoint(BaseModel):
     joules: float = Field(0.0, description="Total energy in Joules for this bucket.")
     pod_count: int = Field(0, description="Number of unique pods in this bucket.")
     namespace_count: int = Field(0, description="Number of unique namespaces in this bucket.")
+    idle_co2e_grams: Optional[float] = Field(
+        None,
+        description="Scope 2 CO₂e of the node idle share (unreserved capacity, `__idle__` rows); null with a "
+        "namespace filter or when the range holds no idle row.",
+    )
+    idle_embodied_co2e_grams: Optional[float] = Field(None, description="Scope 3 CO₂e of the node idle share.")
+    idle_cost: Optional[float] = Field(None, description="Modeled cost of the node idle share.")
+    idle_energy_joules: Optional[float] = Field(None, description="Energy of the node idle share in Joules.")
+    cluster_total_co2e_grams: Optional[float] = Field(
+        None, description="Scope 2 CO₂e of the cluster: allocated to workloads + idle share."
+    )
+    cluster_total_embodied_co2e_grams: Optional[float] = Field(
+        None, description="Scope 3 CO₂e of the cluster: allocated + idle share."
+    )
+    cluster_total_cost: Optional[float] = Field(None, description="Cost of the cluster: allocated + idle share.")
+    cluster_total_energy_joules: Optional[float] = Field(
+        None, description="Energy of the cluster in Joules: allocated + idle share."
+    )
 
 
 class ConfigResponse(BaseModel):
@@ -326,6 +509,16 @@ class ConfigResponse(BaseModel):
     prometheus_query_range_step: str
     api_host: str
     api_port: int
+    currency: str = Field(
+        "USD", description="Pricing currency (ISO 4217) of every cost and savings amount (impact.pricing.currency)."
+    )
+    intensity_defaults_year: Optional[int] = Field(
+        None,
+        description=(
+            "Calendar year of the bundled annual grid intensities used when no live value exists "
+            "(intensity_source zone_default or country_default, NRG-04)."
+        ),
+    )
 
 
 class PaginatedMetricsResponse(BaseModel):
@@ -338,10 +531,22 @@ class PaginatedMetricsResponse(BaseModel):
     next_cursor: Optional[str] = Field(None, description="Opaque cursor for the next page.")
 
 
+class NodeResponse(NodeInfo):
+    """A node snapshot with where its GPU power came from in the latest collection (NRG-13)."""
+
+    gpu_source: Optional[str] = Field(
+        None,
+        description=(
+            "GPU power source of the node's latest idle row: dcgm, gpu_tdp_estimate or unmeasured. "
+            "None when no GPU was detected or no recent row exists."
+        ),
+    )
+
+
 class PaginatedNodesResponse(BaseModel):
     """Opt-in cursor-paginated node response."""
 
-    items: List[NodeInfo] = Field(default_factory=list, description="Nodes in this page.")
+    items: List[NodeResponse] = Field(default_factory=list, description="Nodes in this page.")
     next_cursor: Optional[str] = Field(None, description="Opaque cursor for the next page.")
 
 
@@ -381,6 +586,29 @@ class ReportSummaryResponse(BaseModel):
     total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
     unique_pods: int = Field(0, description="Number of unique pods.")
     unique_namespaces: int = Field(0, description="Number of unique namespaces.")
+    idle_co2e_grams: Optional[float] = Field(
+        None,
+        description="Scope 2 CO₂e of the node idle share (unreserved capacity, `__idle__` rows); null with a "
+        "namespace filter or when the range holds no idle row.",
+    )
+    idle_embodied_co2e_grams: Optional[float] = Field(None, description="Scope 3 CO₂e of the node idle share.")
+    idle_cost: Optional[float] = Field(None, description="Modeled cost of the node idle share.")
+    idle_energy_joules: Optional[float] = Field(None, description="Energy of the node idle share in Joules.")
+    cluster_total_co2e_grams: Optional[float] = Field(
+        None, description="Scope 2 CO₂e of the cluster: allocated to workloads + idle share."
+    )
+    cluster_total_embodied_co2e_grams: Optional[float] = Field(
+        None, description="Scope 3 CO₂e of the cluster: allocated + idle share."
+    )
+    cluster_total_cost: Optional[float] = Field(None, description="Cost of the cluster: allocated + idle share.")
+    cluster_total_energy_joules: Optional[float] = Field(
+        None, description="Energy of the cluster in Joules: allocated + idle share."
+    )
+    idle_data_since: Optional[datetime] = Field(
+        None,
+        description="First instant covered by stored idle rows. When the window holds pod rows before it, the "
+        "idle and cluster-total fields are null (the idle history covers only part of the window).",
+    )
 
 
 class DashboardSummaryResponse(BaseModel):

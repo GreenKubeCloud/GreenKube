@@ -1,16 +1,15 @@
 # tests/storage/test_carbon_recompute.py
 """
 Tests for CombinedMetricsRepository.recompute_carbon_with_latest_intensities
-(the default Python implementation, exercised through the SQLite backend).
+(the set-based SQLite implementation; PostgreSQL is covered by
+tests/storage/test_metric_provenance_storage.py).
 """
 
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
 
-import aiosqlite
 import pytest
 
+from greenkube.core.db import DatabaseManager
 from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.sqlite.repository import (
     SQLiteCarbonIntensityRepository,
@@ -21,77 +20,12 @@ BASE = datetime(2026, 8, 7, 10, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
-async def db_connection():
-    async with aiosqlite.connect(":memory:") as conn:
-        await conn.execute("""
-            CREATE TABLE carbon_intensity_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                zone TEXT NOT NULL,
-                carbon_intensity REAL,
-                datetime TEXT NOT NULL,
-                updated_at TEXT,
-                created_at TEXT,
-                emission_factor_type TEXT,
-                is_estimated BOOLEAN,
-                estimation_method TEXT,
-                UNIQUE(zone, datetime)
-            );
-        """)
-        await conn.execute("""
-            CREATE TABLE combined_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pod_name TEXT NOT NULL,
-                namespace TEXT NOT NULL,
-                total_cost REAL,
-                co2e_grams REAL,
-                pue REAL,
-                grid_intensity REAL,
-                joules REAL,
-                cpu_request INTEGER,
-                memory_request INTEGER,
-                cpu_usage_millicores INTEGER,
-                memory_usage_bytes INTEGER,
-                network_receive_bytes REAL,
-                network_transmit_bytes REAL,
-                disk_read_bytes REAL,
-                disk_write_bytes REAL,
-                storage_request_bytes INTEGER,
-                storage_usage_bytes INTEGER,
-                ephemeral_storage_request_bytes INTEGER,
-                ephemeral_storage_usage_bytes INTEGER,
-                gpu_usage_millicores INTEGER,
-                restart_count INTEGER,
-                owner_kind TEXT,
-                owner_name TEXT,
-                period TEXT,
-                "timestamp" TEXT,
-                duration_seconds INTEGER,
-                grid_intensity_timestamp TEXT,
-                node TEXT,
-                node_instance_type TEXT,
-                node_zone TEXT,
-                emaps_zone TEXT,
-                is_estimated BOOLEAN,
-                estimation_reasons TEXT,
-                embodied_co2e_grams REAL,
-                calculation_version TEXT,
-                UNIQUE(pod_name, namespace, "timestamp")
-            );
-        """)
-        await conn.commit()
-        yield conn
-
-
-@pytest.fixture
-async def mock_db_manager(db_connection):
-    manager = MagicMock()
-
-    @asynccontextmanager
-    async def scope():
-        yield db_connection
-
-    manager.connection_scope = scope
-    return manager
+async def mock_db_manager():
+    """A real in-memory SQLite database with the fully migrated schema."""
+    manager = DatabaseManager()
+    await manager.setup_sqlite(db_path=":memory:")
+    yield manager
+    await manager.close()
 
 
 @pytest.fixture

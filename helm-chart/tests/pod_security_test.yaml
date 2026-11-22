@@ -1,0 +1,184 @@
+suite: pod security admission "restricted" (roadmap N5)
+# Every pod the chart renders with its defaults must pass the Kubernetes Pod
+# Security Standard "restricted": non-root, no privilege escalation, every
+# capability dropped, RuntimeDefault seccomp. The CI job "psa-restricted"
+# (.github/workflows/ci.yml) checks the same renders with a server-side dry run
+# in a namespace that enforces the profile.
+templates:
+  - templates/postgres-statefulset.yaml
+  - templates/components.yaml
+  - templates/renderer.yaml
+  - templates/credentials-bootstrap.yaml
+  - templates/tests/test-connection.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # Bundled PostgreSQL
+  # --------------------------------------------------------------------------
+  - it: runs PostgreSQL without a root init container
+    templates:
+      - templates/postgres-statefulset.yaml
+    asserts:
+      - isKind:
+          of: StatefulSet
+      - isNull:
+          path: spec.template.spec.initContainers
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 70
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 70
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: [ALL]
+      - isNull:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+      - notEqual:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 0
+
+  - it: keeps the socket directory writable through fsGroup when persistence is off
+    templates:
+      - templates/postgres-statefulset.yaml
+    set:
+      postgres.persistence.enabled: false
+    asserts:
+      - isNull:
+          path: spec.template.spec.initContainers
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: pg-run
+            emptyDir:
+              sizeLimit: 16Mi
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: pg-run
+            mountPath: /var/run/postgresql
+
+  # --------------------------------------------------------------------------
+  # api, controller and worker
+  # --------------------------------------------------------------------------
+  - it: runs the api, controller and worker as restricted pods
+    templates:
+      - templates/components.yaml
+    set:
+      worker.replicas: 1
+    asserts:
+      - hasDocuments:
+          count: 3
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: [ALL]
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.drop
+          value: [ALL]
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.runAsNonRoot
+          value: true
+
+  # --------------------------------------------------------------------------
+  # Renderer: restricted by default; the optional egress firewall is not
+  # --------------------------------------------------------------------------
+  - it: runs the renderer as a restricted pod by default
+    templates:
+      - templates/renderer.yaml
+    documentSelector:
+      path: kind
+      value: Deployment
+    asserts:
+      - isNull:
+          path: spec.template.spec.initContainers
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: [ALL]
+
+  - it: documents that the optional renderer egress firewall needs root and NET_ADMIN
+    templates:
+      - templates/renderer.yaml
+    documentSelector:
+      path: kind
+      value: Deployment
+    set:
+      renderer.egressFirewall.enabled: true
+    asserts:
+      # Outside "restricted": use a "privileged" or "baseline"-plus-exemption
+      # namespace, or keep it off and rely on the egress NetworkPolicy.
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.runAsUser
+          value: 0
+      - contains:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          content: NET_ADMIN
+
+  # --------------------------------------------------------------------------
+  # Jobs and test pod
+  # --------------------------------------------------------------------------
+  - it: runs the credentials bootstrap Job as a restricted pod
+    templates:
+      - templates/credentials-bootstrap.yaml
+    documentSelector:
+      path: kind
+      value: Job
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: [ALL]
+
+  - it: runs the Helm test pod as a restricted pod
+    templates:
+      - templates/tests/test-connection.yaml
+    asserts:
+      - equal:
+          path: spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.containers[0].securityContext.capabilities.drop
+          value: [ALL]

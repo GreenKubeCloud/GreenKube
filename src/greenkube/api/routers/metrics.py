@@ -7,7 +7,7 @@ import base64
 import binascii
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,6 +21,7 @@ from greenkube.api.schemas import (
     TopPodItem,
 )
 from greenkube.core.config import get_config
+from greenkube.core.idle_share import window_idle_share, with_idle_share
 from greenkube.storage.base_repository import CombinedMetricsRepository
 from greenkube.utils.date_utils import time_range_from_last
 
@@ -132,7 +133,40 @@ async def metrics_summary(
     summary = await repo.aggregate_summary(start_time=start, end_time=end, namespace=namespace)
     scope2 = summary.get("total_co2e_grams", 0.0)
     scope3 = summary.get("total_embodied_co2e_grams", 0.0)
-    return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3)
+    # The node idle share belongs to no namespace: cluster-wide scope only (NRG-02).
+    idle_fields: dict = {}
+    if not namespace:
+        idle_fields = await window_idle_share(repo, start, end, summary)
+    return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3, **idle_fields)
+
+
+def _bucket_start(label) -> Optional[datetime]:
+    """Start of a time-series bucket from its label (a datetime or an ISO string)."""
+    if isinstance(label, datetime):
+        return label if label.tzinfo else label.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(label).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+async def _drop_partial_idle_buckets(repo: CombinedMetricsRepository, idle_by_bucket: dict) -> None:
+    """Remove the idle share of a bucket that starts before the idle history and has earlier pod rows.
+
+    Such a bucket (the one that straddles ``idle_data_since``) would show an
+    idle share, and a cluster total, covering only part of it (NRG-02 review).
+    """
+    since = await repo.idle_data_since()
+    if since is None:
+        return
+    for label in list(idle_by_bucket):
+        start = _bucket_start(label)
+        if start is None or start >= since:
+            continue
+        before = await repo.aggregate_summary(start_time=start, end_time=since, namespace=None)
+        if before.get("row_count"):
+            del idle_by_bucket[label]
 
 
 _GRANULARITY_FORMATS = {
@@ -161,19 +195,45 @@ async def metrics_timeseries(
     # Use SQL-level aggregation when available (e.g. SQLite) to avoid loading
     # all rows into Python objects — typically 10–20x faster for demo mode.
     rows = await repo.aggregate_timeseries(start_time=start, end_time=end, granularity=granularity, namespace=namespace)
-    return [
-        TimeseriesPoint(
-            timestamp=row["timestamp"],
-            co2e_grams=row["co2e_grams"],
-            embodied_co2e_grams=row["embodied_co2e_grams"],
-            total_co2e_all_scopes=row["co2e_grams"] + row.get("embodied_co2e_grams", 0.0),
-            total_cost=row["total_cost"],
-            joules=row["energy_joules"],
-            pod_count=0,  # not aggregated at timeseries level
-            namespace_count=0,  # not aggregated at timeseries level
+    idle_rows = [] if namespace else await repo.aggregate_idle_timeseries(start, end, granularity)
+    idle_by_bucket = {
+        row["timestamp"]: {
+            "idle_co2e_grams": row["co2e_grams"],
+            "idle_embodied_co2e_grams": row["embodied_co2e_grams"],
+            "idle_cost": row["total_cost"],
+            "idle_energy_joules": row["energy_joules"],
+        }
+        for row in idle_rows
+    }
+    if idle_by_bucket:
+        await _drop_partial_idle_buckets(repo, idle_by_bucket)
+    by_bucket = {row["timestamp"]: row for row in rows}
+    empty = {"co2e_grams": 0.0, "embodied_co2e_grams": 0.0, "total_cost": 0.0, "energy_joules": 0.0}
+    for bucket in idle_by_bucket.keys() - by_bucket.keys():
+        by_bucket[bucket] = {"timestamp": bucket, **empty}
+    points = []
+    for bucket in sorted(by_bucket):
+        row = by_bucket[bucket]
+        allocated = {
+            "total_co2e_grams": row["co2e_grams"],
+            "total_embodied_co2e_grams": row.get("embodied_co2e_grams", 0.0),
+            "total_cost": row["total_cost"],
+            "total_energy_joules": row["energy_joules"],
+        }
+        points.append(
+            TimeseriesPoint(
+                timestamp=row["timestamp"],
+                co2e_grams=row["co2e_grams"],
+                embodied_co2e_grams=row["embodied_co2e_grams"],
+                total_co2e_all_scopes=row["co2e_grams"] + row.get("embodied_co2e_grams", 0.0),
+                total_cost=row["total_cost"],
+                joules=row["energy_joules"],
+                pod_count=0,  # not aggregated at timeseries level
+                namespace_count=0,  # not aggregated at timeseries level
+                **with_idle_share(allocated, idle_by_bucket.get(bucket)),
+            )
         )
-        for row in rows
-    ]
+    return points
 
 
 @router.get("/metrics/by-namespace", response_model=List[NamespaceBreakdownItem])

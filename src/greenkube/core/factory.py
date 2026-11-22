@@ -25,6 +25,7 @@ from ..core.processor import DataProcessor
 # --- GreenKube Core Imports ---
 from ..energy.estimator import BasicEstimator
 from ..storage.base_gitops_repository import GitOpsRepository
+from ..storage.base_pod_snapshot_repository import PodSnapshotRepository
 
 # --- GreenKube Storage Imports ---
 from ..storage.base_repository import (
@@ -298,6 +299,19 @@ def get_electricity_provider():
     return ElectricityMapsCollector()
 
 
+def get_pod_snapshot_repository() -> PodSnapshotRepository:
+    """Return the pod metadata history repository of the configured database (WP-01.1)."""
+    from ..core.db import get_db_manager
+
+    if get_config().DB_TYPE == "postgres":
+        from ..storage.postgres.pod_snapshot_repository import PostgresPodSnapshotRepository
+
+        return PostgresPodSnapshotRepository(get_db_manager())
+    from ..storage.sqlite.pod_snapshot_repository import SQLitePodSnapshotRepository
+
+    return SQLitePodSnapshotRepository(get_db_manager())
+
+
 @lru_cache(maxsize=1)
 def get_processor() -> DataProcessor:
     """
@@ -340,6 +354,7 @@ def get_processor() -> DataProcessor:
             calculator=calculator,
             estimator=estimator,
             config=cfg,
+            pod_snapshot_repository=get_pod_snapshot_repository(),
         )
     except Exception as e:
         logger.error("An error occurred during processor initialization: %s", e)

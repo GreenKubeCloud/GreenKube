@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -14,12 +15,14 @@ from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
+from greenkube.automation.actions import action_kind_of, operation_subjects
 from greenkube.automation.git.base import (
     DEFAULT_AUTOMATION_PULL_REQUEST_OPTIONS,
     GitProviderArchiveLimitError,
     GitProviderCapability,
     GitProviderCapabilityError,
     GitProviderError,
+    GitProviderTransientError,
     GitRepository,
     PullRequestOptions,
     parse_repo_url,
@@ -37,9 +40,14 @@ from greenkube.automation.git.registry import GitProviderRegistry
 from greenkube.automation.plan_worker import (
     PlanGitProvider,
     PlanWorker,
+    PlanWorkerError,
     RegistryPlanProviderResolver,
+    _plan_on_committed_revision,
+    _pull_request_head_sha,
+    plan_branch_name,
 )
 from greenkube.automation.plans import (
+    SUPERSEDABLE_PREVIEW_STATUSES,
     AutomationPlanError,
     AutomationPlanService,
     GitBlobFile,
@@ -50,12 +58,14 @@ from greenkube.automation.policy import (
     AutomationPolicyConfig,
     AutomationPolicyEvaluator,
     AutomationPolicyResult,
+    ControllerStatusReader,
     PolicyPlanRepository,
 )
 from greenkube.automation.rollback import (
     ONE_TIME_HELM_VALUES_MAPPING_EVIDENCE_KEY,
     FluxHelmReleaseRollbackRenderer,
     HelmValuesRollbackRenderer,
+    KustomizeRollbackRenderer,
     RollbackConflictError,
     RollbackPlanError,
     RollbackRenderer,
@@ -71,6 +81,7 @@ from greenkube.automation.rollback import (
 from greenkube.core.config import get_config
 from greenkube.core.optimization.applied_detector import K8sWorkloadReader
 from greenkube.gitops.contracts import (
+    PLANNABLE_RENDERERS,
     UNRESOLVED_PROVIDER_ID,
     ActionPlanV3,
     ActionStatus,
@@ -82,12 +93,15 @@ from greenkube.gitops.contracts import (
     Plan,
     PlanStatus,
     RendererKind,
-    SetContainerResources,
+    ResourceTarget,
     WorkloadSource,
+    configured_binding_ttl,
 )
 from greenkube.gitops.discovery.common import safe_repo_path
 from greenkube.gitops.planning.helm import FluxHelmReleasePlanner, HelmValuesPlanner
 from greenkube.gitops.planning.raw_manifest import RawManifestPlanner
+from greenkube.gitops.renderers.kustomize import KustomizeRenderer
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.gitops.snapshots import (
     RepositorySnapshot,
     SnapshotError,
@@ -95,7 +109,7 @@ from greenkube.gitops.snapshots import (
     SnapshotLimits,
     extract_archive,
 )
-from greenkube.models.metrics import RecommendationRecord, RecommendationStatus
+from greenkube.models.metrics import PullRequestRecord, PullRequestStatus, RecommendationRecord, RecommendationStatus
 from greenkube.storage.base_gitops_repository import (
     GitOpsProviderConfig,
     GitOpsRepository,
@@ -104,10 +118,12 @@ from greenkube.storage.base_gitops_repository import (
 from greenkube.storage.base_plan_operation_repository import PlanOperationRepository
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
+from greenkube.utils.time import ensure_utc
+
+logger = logging.getLogger(__name__)
 
 _PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SUPPORTED_PROVIDER_TYPES = frozenset({"github", "gitlab", "gitea"})
-_COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 _MAX_PROVIDER_CONFIG_BYTES = 1024 * 1024
 _MAX_CONFIGURED_PROVIDERS = 100
 
@@ -127,6 +143,7 @@ class ConfiguredGitProvider:
     config: GitOpsProviderConfig
     repositories: tuple[str, ...]
     token_file: str
+    web_base_url: str | None = None
 
 
 class GitRefRevisionReader(Protocol):
@@ -167,6 +184,12 @@ class PlanRecommendationReader(Protocol):
     """Read persisted actionable recommendation records for API plan creation."""
 
     async def get_recommendation_by_id(self, rec_id: int) -> RecommendationRecord | None: ...
+
+
+class PlanResourceBindingReader(Protocol):
+    """Resource bindings persisted by discovery (H0d), for kinds bound by GVK and name."""
+
+    async def get(self, cluster: str, ref: ResourceTarget) -> Any: ...
 
 
 class PlanBindingReader(Protocol):
@@ -227,6 +250,15 @@ class AuthorizedGitBlobResolver:
         finally:
             await _close_provider(target.provider)
 
+    async def changed_paths(self, source: WorkloadSource, base_revision: str, head_revision: str) -> list[str]:
+        """Every path that differs between two immutable revisions (D7 render-input check)."""
+        target = await self._provider_resolver.resolve(source)
+        try:
+            comparison = await target.provider.compare_trees(target.repository, base_revision, head_revision)
+            return [change.path for change in comparison.changes]
+        finally:
+            await _close_provider(target.provider)
+
 
 class ProviderSourceSnapshotResolver:
     """Build bounded snapshots from authorized provider archives pinned to an immutable commit."""
@@ -241,12 +273,7 @@ class ProviderSourceSnapshotResolver:
         self._limits = limits or SnapshotLimits()
 
     async def create_snapshot(self, source: WorkloadSource) -> RepositorySnapshot:
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} does not have a configured snapshot planner",
@@ -272,7 +299,7 @@ class ProviderSourceSnapshotResolver:
                 )
 
             revision = await _current_revision(target.provider, target.repository, source.ref)
-            if not isinstance(revision, str) or not _COMMIT_SHA.fullmatch(revision):
+            if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
                 raise AutomationPlanError(
                     AutomationErrorCode.PROVIDER_NOT_READY,
                     "the provider did not resolve the source ref to an immutable full Git commit SHA",
@@ -359,9 +386,12 @@ class RuntimePlanService:
         policy_config: AutomationPolicyConfig | None = None,
         policy_repository: PolicyPlanRepository | None = None,
         policy_clock=None,
+        resource_binding_repository: PlanResourceBindingReader | None = None,
+        controller_status_reader: ControllerStatusReader | None = None,
     ) -> None:
         self._recommendation_repository = recommendation_repository
         self._binding_repository = binding_repository
+        self._resource_binding_repository = resource_binding_repository
         self._cluster = cluster or "default"
         self._snapshot_resolver = snapshot_resolver
         self._plan_service = plan_service
@@ -388,9 +418,10 @@ class RuntimePlanService:
             config=policy_config or AutomationPolicyConfig(),
             plan_repository=cast(PolicyPlanRepository | None, selected_policy_repository),
             clock=selected_policy_clock or (lambda: datetime.now(timezone.utc)),
+            controller_status_reader=controller_status_reader,
         )
 
-    async def create_plan(
+    async def prepare_plan(
         self,
         recommendation_ids: Sequence[int],
         *,
@@ -400,26 +431,26 @@ class RuntimePlanService:
     ) -> Plan:
         """Create a plan from persisted actionable recommendations and a resolved DB binding."""
         action, source = await self._resolve_request(recommendation_ids)
-        policy_result = await self._evaluate_policy(action.recommendation_ids, source)
+        policy_result = await self._evaluate_policy(
+            action.recommendation_ids,
+            source,
+            exclude_plan_ids=await self._supersedable_preview_plan_ids(source),
+        )
         self._ensure_policy_allowed(policy_result)
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} is not supported by the configured plan service",
             )
         if values_mapping is not None:
             source = _with_one_time_helm_values_mapping(action, source, values_mapping)
+        revisions = await self._recommendation_revisions(action.recommendation_ids)
 
         try:
             snapshot = await self._snapshot_resolver.create_snapshot(source)
             try:
                 try:
-                    return await self._plan_service.create_plan(
+                    plan = await self._plan_service.create_plan(
                         action,
                         source,
                         snapshot,
@@ -427,6 +458,8 @@ class RuntimePlanService:
                         change_set_id=change_set_id,
                         actor=actor,
                     )
+                    await self._pin_revisions(plan, revisions)
+                    return plan
                 except AutomationPlanError as exc:
                     if exc.code is not AutomationErrorCode.NEEDS_CHART_MAPPING or exc.mapping_options is not None:
                         raise
@@ -447,31 +480,28 @@ class RuntimePlanService:
                 "the repository snapshot is unavailable or exceeds configured planning limits",
             ) from exc
 
-    async def create_plan_for_recommendations(
-        self,
-        recommendation_ids: Sequence[int],
-        *,
-        change_set_id: str | None = None,
-        actor: str = "system",
-        values_mapping: Mapping[str, Any] | None = None,
-    ) -> Plan:
-        """Explicit alias for the source-safe plan creation entry point."""
-        return await self.create_plan(
-            recommendation_ids,
-            change_set_id=change_set_id,
-            actor=actor,
-            values_mapping=values_mapping,
-        )
+    async def _recommendation_revisions(self, recommendation_ids: Sequence[int]) -> dict[int, int]:
+        """Revision of each recommendation the plan is built from (E7)."""
+        revisions: dict[int, int] = {}
+        for recommendation_id in recommendation_ids:
+            record = await self._recommendation_repository.get_recommendation_by_id(recommendation_id)
+            if record is not None:
+                revisions[recommendation_id] = int(getattr(record, "revision", 1) or 1)
+        return revisions
 
-    async def prepare_plan(
-        self,
-        recommendation_ids: Sequence[int],
-        *,
-        actor: str = "system",
-        values_mapping: Mapping[str, Any] | None = None,
-    ) -> Plan:
-        """API protocol alias for source-safe preparation from persisted recommendation IDs."""
-        return await self.create_plan(recommendation_ids, actor=actor, values_mapping=values_mapping)
+    async def _pin_revisions(self, plan: Plan, revisions: Mapping[int, int]) -> None:
+        """Pin ``(recommendation_id, revision)`` on the plan; newer advice is then reported on its PR."""
+        pin = getattr(self._recommendation_repository, "pin_plan_revisions", None)
+        if not callable(pin) or not revisions:
+            return
+        try:
+            await cast(Any, pin)(
+                plan.plan_id, {rec_id: revisions[rec_id] for rec_id in plan.recommendation_ids if rec_id in revisions}
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not pin the recommendation revisions of plan %s (%s).", plan.plan_id, type(exc).__name__
+            )
 
     async def prune_retained_history(self, *, cutoff: datetime) -> dict[str, int]:
         """Prune expired rendered content and terminal outbox rows while retaining plan metadata."""
@@ -480,14 +510,13 @@ class RuntimePlanService:
     async def preview_plan(self, recommendation_ids: Sequence[int]) -> Plan:
         """Render an eligibility preview without persisting plans or changing recommendation state."""
         action, source = await self._resolve_request(recommendation_ids)
-        policy_result = await self._evaluate_policy(action.recommendation_ids, source)
+        policy_result = await self._evaluate_policy(
+            action.recommendation_ids,
+            source,
+            exclude_plan_ids=await self._supersedable_preview_plan_ids(source),
+        )
         self._ensure_policy_allowed(policy_result)
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} is not supported by the configured plan service",
@@ -532,7 +561,9 @@ class RuntimePlanService:
                     AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
                     "one or more persisted recommendations were not found",
                 )
-            if record.status is not RecommendationStatus.ACTIVE or record.scope != "workload":
+            record_spec = action_kind_of(record.action)
+            workload_scoped = record_spec is None or record_spec.binding_scope == "workload"
+            if record.status is not RecommendationStatus.ACTIVE or (workload_scoped and record.scope != "workload"):
                 raise AutomationPlanError(
                     AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
                     "only active workload recommendations can be planned",
@@ -550,6 +581,7 @@ class RuntimePlanService:
                 "recommendations do not share a persisted actionable plan",
             )
         action_data = action.model_dump(mode="json")
+        spec = action_kind_of(action)
         records: list[RecommendationRecord] = []
         for recommendation_id in action.recommendation_ids:
             record = requested_records.get(recommendation_id)
@@ -560,7 +592,9 @@ class RuntimePlanService:
                     AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
                     "one or more persisted recommendations for the grouped action were not found",
                 )
-            if record.status is not RecommendationStatus.ACTIVE or record.scope != "workload":
+            if record.status is not RecommendationStatus.ACTIVE or (
+                (spec is None or spec.binding_scope == "workload") and record.scope != "workload"
+            ):
                 raise AutomationPlanError(
                     AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
                     "all recommendations in the grouped action must remain active workload recommendations",
@@ -574,15 +608,22 @@ class RuntimePlanService:
 
         target = action.target
         for record in records:
-            if (
-                record.namespace != target.namespace
-                or record.owner_kind != target.kind
-                or record.owner_name != target.name
-            ):
+            if spec is not None and spec.binding_scope == "resource":
+                matches = spec.matches_recommendation(record, target)
+            else:
+                matches = (
+                    record.namespace == target.namespace
+                    and record.owner_kind == target.kind
+                    and record.owner_name == target.name
+                )
+            if not matches:
                 raise AutomationPlanError(
                     AutomationErrorCode.AMBIGUOUS_BINDING,
                     "persisted recommendation target does not match its stored action",
                 )
+
+        if spec is not None and spec.binding_scope == "resource":
+            return action, await self._resolve_resource_source(target)
 
         binding = await self._binding_repository.get_workload_binding(
             self._cluster,
@@ -607,15 +648,94 @@ class RuntimePlanService:
                 AutomationErrorCode.AMBIGUOUS_BINDING,
                 "resolved GitOps binding does not match the persisted recommendation target",
             )
-        now = _as_utc(self._policy_evaluator.clock())
-        if (binding.expires_at is not None and _as_utc(binding.expires_at) <= now) or (
-            source.expires_at is not None and _as_utc(source.expires_at) <= now
+        now = ensure_utc(self._policy_evaluator.clock())
+        if (binding.expires_at is not None and ensure_utc(binding.expires_at) <= now) or (
+            source.expires_at is not None and ensure_utc(source.expires_at) <= now
         ):
             raise AutomationPlanError(
                 AutomationErrorCode.SOURCE_CHANGED,
                 "the resolved workload binding expired; refresh GitOps discovery before retrying",
             )
         return action, source
+
+    async def _resolve_resource_source(self, target: ResourceTarget) -> WorkloadSource:
+        """The Git source of a non-workload target from the persisted resource bindings (H0d).
+
+        Fails closed when no single resolved controller manages the resource, or when the
+        binding is older than the binding TTL (discovery stopped refreshing it).
+        """
+        described = f"{target.kind} {target.namespace + '/' if target.namespace else ''}{target.name}"
+        if self._resource_binding_repository is None:
+            raise AutomationPlanError(
+                AutomationErrorCode.AMBIGUOUS_BINDING,
+                f"resource bindings are not available, so the Git source of {described} cannot be resolved",
+            )
+        stored = await self._resource_binding_repository.get(self._cluster, target)
+        binding = getattr(stored, "binding", None)
+        if binding is None:
+            raise AutomationPlanError(
+                AutomationErrorCode.AMBIGUOUS_BINDING,
+                f"{described} is not managed by an Argo CD Application or Flux Kustomization; apply it manually",
+            )
+        if binding.status == "ambiguous":
+            raise AutomationPlanError(
+                AutomationErrorCode.AMBIGUOUS_BINDING, f"{described} is managed by several GitOps controllers"
+            )
+        source = binding.workload_source()
+        if source is None or source.status is not BindingStatus.RESOLVED or source.cluster != self._cluster:
+            raise AutomationPlanError(
+                AutomationErrorCode.AMBIGUOUS_BINDING,
+                f"the Git source of the controller managing {described} is unresolved",
+            )
+        now = ensure_utc(self._policy_evaluator.clock())
+        observed_at = getattr(stored, "observed_at", None)
+        if not isinstance(observed_at, datetime) or now - ensure_utc(observed_at) >= configured_binding_ttl():
+            raise AutomationPlanError(
+                AutomationErrorCode.SOURCE_CHANGED,
+                f"the resource binding of {described} is stale; refresh GitOps discovery before retrying",
+            )
+        return source
+
+    async def _supersedable_preview_plan_ids(self, source: WorkloadSource) -> tuple[str, ...]:
+        """Unapproved previews of this workload that a new request supersedes (D6, BUG-48).
+
+        Persisting the new plan transitions them to SUPERSEDED, so they must not count as a
+        competing active plan. A history read failure returns nothing: the policy history
+        gate then fails closed on its own read.
+        """
+        repository = getattr(self._plan_service, "repository", None)
+        reader = getattr(repository, "list_plans_for_workload", None)
+        statuses = sorted(SUPERSEDABLE_PREVIEW_STATUSES, key=lambda status: status.value)
+        try:
+            if callable(reader):
+                plans = await cast(Any, reader)(
+                    cluster=source.cluster,
+                    namespace=source.namespace,
+                    workload_kind=source.workload_kind,
+                    workload_name=source.workload_name,
+                    statuses=statuses,
+                )
+            elif callable(getattr(repository, "list_plans", None)):
+                plans = [plan for status in statuses for plan in await cast(Any, repository).list_plans(status=status)]
+            else:
+                return ()
+        except Exception:
+            return ()
+        return tuple(
+            plan.plan_id
+            for plan in plans
+            if plan.status in SUPERSEDABLE_PREVIEW_STATUSES
+            and (plan.source.cluster, plan.source.namespace, plan.source.workload_kind, plan.source.workload_name)
+            == (source.cluster, source.namespace, source.workload_kind, source.workload_name)
+        )
+
+    async def cancel_by_user(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        """Cancel a plan before it applies (POST /automation/plans/{id}/cancel); it becomes CANCELLED."""
+        return await self._plan_service.cancel_by_user(plan_id, actor=actor)
+
+    async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        """Cancel an unapproved preview (DELETE /automation/plans/{id}); it becomes SUPERSEDED."""
+        return await self._plan_service.cancel_plan(plan_id, actor=actor)
 
     async def _evaluate_policy(
         self,
@@ -708,12 +828,7 @@ class RuntimePlanService:
         await self._validate_rollback_source_plan(original_plan)
         await self._rollback_review_records(original_plan)
         source = await self._resolve_current_rollback_source(original_plan)
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.ROLLBACK_UNSUPPORTED,
                 f"renderer {source.renderer.value!r} does not support exact-target rollback",
@@ -722,6 +837,10 @@ class RuntimePlanService:
         rollback_renderer = self._rollback_renderer
         if source.renderer is RendererKind.RAW and getattr(rollback_renderer, "renderer", None) is not RendererKind.RAW:
             rollback_renderer = None
+        if source.renderer is RendererKind.KUSTOMIZE and getattr(rollback_renderer, "renderer", None) is not (
+            RendererKind.KUSTOMIZE
+        ):
+            rollback_renderer = kustomize_rollback_renderer(self._plan_service, snapshot_limits=self._snapshot_limits)
         if source.renderer is RendererKind.KUSTOMIZE and (
             rollback_renderer is None
             or getattr(rollback_renderer, "renderer", None) is not RendererKind.KUSTOMIZE
@@ -788,7 +907,7 @@ class RuntimePlanService:
                     "current rollback snapshot does not match the resolved provider repository",
                 )
             revision = metadata.commit_sha
-            if not isinstance(revision, str) or not _COMMIT_SHA.fullmatch(revision):
+            if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
                 raise AutomationPlanError(
                     AutomationErrorCode.PROVIDER_NOT_READY,
                     "current rollback snapshot does not identify an immutable full Git commit SHA",
@@ -834,6 +953,12 @@ class RuntimePlanService:
         return rollback_plan
 
     async def _validate_rollback_source_plan(self, plan: Plan) -> None:
+        if plan.file_plan is None and plan.file_plan_summary is not None:
+            raise AutomationPlanError(
+                AutomationErrorCode.ROLLBACK_UNSUPPORTED,
+                "original plan's rendered file contents were removed by retention; preview a new change "
+                "with the desired resources instead of a rollback",
+            )
         if (
             plan.status not in {PlanStatus.SYNCED, PlanStatus.APPLIED}
             or plan.file_plan is None
@@ -873,14 +998,13 @@ class RuntimePlanService:
         records: list[RecommendationRecord] = []
         expected_action = plan.action.model_dump(mode="json")
         operations = plan.action.operations
-        if not operations or any(not isinstance(operation, SetContainerResources) for operation in operations):
+        spec = action_kind_of(plan.action)
+        if spec is None or not spec.supports_rollback(operations):
             raise AutomationPlanError(
                 AutomationErrorCode.ROLLBACK_UNSUPPORTED,
                 "only per-container resource actions have a supported rollback workflow",
             )
-        operation_containers = {
-            operation.container for operation in operations if isinstance(operation, SetContainerResources)
-        }
+        operation_containers = spec.subjects(operations)
         for recommendation_id in plan.recommendation_ids:
             record = await self._recommendation_repository.get_recommendation_by_id(recommendation_id)
             if (
@@ -927,9 +1051,9 @@ class RuntimePlanService:
                 "the resolved workload source no longer matches the original plan",
             )
         source = _with_binding_policy_evidence(source, binding)
-        now = _as_utc(self._plan_service.clock())
-        if (binding.expires_at is not None and _as_utc(binding.expires_at) <= now) or (
-            source.expires_at is not None and _as_utc(source.expires_at) <= now
+        now = ensure_utc(self._plan_service.clock())
+        if (binding.expires_at is not None and ensure_utc(binding.expires_at) <= now) or (
+            source.expires_at is not None and ensure_utc(source.expires_at) <= now
         ):
             raise AutomationPlanError(
                 AutomationErrorCode.SOURCE_CHANGED,
@@ -944,7 +1068,7 @@ class RuntimePlanService:
     ) -> dict[str, str | bytes]:
         file_plan = plan.file_plan
         assert file_plan is not None
-        if not _COMMIT_SHA.fullmatch(file_plan.base_revision):
+        if not GIT_OBJECT_SHA.fullmatch(file_plan.base_revision):
             raise AutomationPlanError(
                 AutomationErrorCode.ROLLBACK_CONFLICT,
                 "original plan base revision is not an immutable full Git commit SHA",
@@ -987,6 +1111,13 @@ class RuntimePlanService:
         return contents
 
     async def approve_plan(self, plan_id: str, digest: str, *, actor: str = "system") -> Plan:
+        # automation.policy.pauseDelivery (F12): the only off switch. Approval is refused
+        # with a policy error; discovery, previews and measurement keep running.
+        if get_config().automation_delivery_paused:
+            raise AutomationPlanError(
+                AutomationErrorCode.DELIVERY_PAUSED,
+                "pull-request delivery is paused by policy (automation.policy.pauseDelivery)",
+            )
         plan = await self._plan_service.read_plan(plan_id)
         additional_excluded_plan_ids: tuple[str, ...] = ()
         policy_source = plan.source if plan is not None else None
@@ -1085,36 +1216,275 @@ class RuntimePlanService:
                 continue
             if operation is None or operation.status not in {OperationStatus.FAILED, OperationStatus.CANCELLED}:
                 continue
-            if await self._plan_has_pull_request(plan.plan_id):
+            records = await self._plan_pull_request_records(plan.plan_id)
+            if records is None:
                 continue
-            updated = await repository.set_plan_status(
-                plan.plan_id,
-                PlanStatus.FAILED,
-                expected_statuses=(PlanStatus.APPLYING,),
-                expected_digest=plan.digest,
-                actor="automation-reconciler",
-                reason_code="operation_retry_exhausted",
-            )
-            if updated is None:
+            if records:
+                # The worker wrote PENDING records before its last attempt (crash or retries
+                # exhausted after them): look the deterministic branch up on the provider and
+                # adopt its request, or fail the plan cleanly instead of leaving it APPLYING.
+                if not all(_pending_without_number(record) for record in records):
+                    continue
+                recovered = await self._recover_pending_delivery(plan, records)
+                if recovered is not None:
+                    reconciled.append(recovered)
                 continue
-            await repository.set_recommendation_action_status(
-                plan.recommendation_ids,
-                ActionStatus.FAILED,
-                expected_statuses=(ActionStatus.PLAN_READY, ActionStatus.PR_OPEN),
-                actor="automation-reconciler",
-                plan_id=plan.plan_id,
+            updated = await self._fail_applying_plan(
+                plan, actor="automation-reconciler", reason_code="operation_retry_exhausted"
             )
-            reconciled.append(updated)
+            if updated is not None:
+                reconciled.append(updated)
         return reconciled
 
-    async def _plan_has_pull_request(self, plan_id: str) -> bool:
+    async def _fail_applying_plan(
+        self,
+        plan: Plan,
+        *,
+        actor: str,
+        reason_code: str,
+        records: Sequence[PullRequestRecord] = (),
+        record_error: str | None = None,
+    ) -> Plan | None:
+        """APPLYING -> FAILED (audited), linked PENDING records -> ERROR, action -> FAILED (re-plannable)."""
+        repository = self._plan_service.repository
+        updated = await repository.set_plan_status(
+            plan.plan_id,
+            PlanStatus.FAILED,
+            expected_statuses=(PlanStatus.APPLYING,),
+            expected_digest=plan.digest,
+            actor=actor,
+            reason_code=reason_code,
+        )
+        if updated is None:
+            return None
+        pull_requests = getattr(self.worker, "pull_request_repository", None)
+        for record in records:
+            if pull_requests is None or record.id is None or record.pr_number is not None:
+                continue
+            try:
+                await pull_requests.update_pull_request(
+                    record.id,
+                    {"status": PullRequestStatus.ERROR, "error": (record_error or reason_code)[:500]},
+                    expected_statuses=(PullRequestStatus.PENDING.value, PullRequestStatus.ERROR.value),
+                    expected_plan_id=plan.plan_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not close pending pull-request record %s of plan %s: %s", record.id, plan.plan_id, exc
+                )
+        await repository.set_recommendation_action_status(
+            plan.recommendation_ids,
+            ActionStatus.FAILED,
+            expected_statuses=(ActionStatus.PLAN_READY, ActionStatus.PR_OPEN),
+            actor=actor,
+            plan_id=plan.plan_id,
+        )
+        return updated
+
+    async def _plan_pull_request_records(self, plan_id: str) -> list[Any] | None:
+        """Records linked to ``plan_id``; ``None`` when they cannot be read (try again later)."""
         repository = getattr(self.worker, "pull_request_repository", None)
         if repository is None:
-            return False
+            return []
         try:
-            return await repository.get_pull_request_by_plan_id(plan_id) is not None
+            lister = getattr(repository, "list_pull_requests_by_plan_id", None)
+            if callable(lister):
+                return list(await cast(Any, lister)(plan_id))
+            record = await repository.get_pull_request_by_plan_id(plan_id)
         except Exception:
-            return True
+            return None
+        return [record] if record is not None else []
+
+    async def _recover_pending_delivery(self, plan: Plan, records: Sequence[PullRequestRecord]) -> Plan | None:
+        """Adopt the deterministic branch's request when it holds the plan; otherwise fail the plan.
+
+        Returns the updated plan, or ``None`` when the provider could not be asked (retried
+        on the next sweep).
+        """
+        worker = cast(Any, self.worker)
+        resolver = getattr(worker, "provider_resolver", None)
+        if resolver is None:
+            return None
+        branch = plan_branch_name(plan)
+        try:
+            target = await resolver.resolve(plan.source)
+        except GitProviderTransientError:
+            return None
+        except (PlanWorkerError, GitProviderError) as exc:
+            # The provider is gone (removed, disabled, unsupported or misconfigured).
+            logger.warning("Plan %s: provider unavailable while recovering its delivery: %s", plan.plan_id, exc)
+            return await self._fail_applying_plan(
+                plan,
+                actor="automation-reconciler",
+                reason_code="delivery_recovery_provider_unavailable",
+                records=records,
+                record_error=(
+                    f"The provider could not be reached to check branch {branch}; a pull request opened from it "
+                    "is not tracked. Close it on the provider, then re-plan."
+                ),
+            )
+        except Exception as exc:
+            # Anything else (a storage hiccup reading the provider config) says nothing about
+            # the branch: keep the plan and its recommendations, retry on the next sweep.
+            logger.warning("Plan %s: could not resolve its provider, retrying later: %s", plan.plan_id, exc)
+            return None
+        try:
+            worker._validate_target(plan.source, target)
+            committed = _plan_on_committed_revision(plan)
+            pull_request = await target.provider.find_pull_request(target.repository, branch, plan.source.ref)
+            head_ref: str = branch
+            if pull_request is not None:
+                worker._validate_pull_request(pull_request, branch, plan.source.ref)
+            else:
+                finder = getattr(target.provider, "find_terminal_pull_request", None)
+                pull_request = (
+                    await cast(Any, finder)(target.repository, branch, plan.source.ref) if callable(finder) else None
+                )
+                head_sha = _pull_request_head_sha(pull_request) if pull_request is not None else None
+                if pull_request is not None and head_sha is not None:
+                    head_ref = head_sha
+                elif pull_request is not None:
+                    pull_request = None
+            if pull_request is not None and await worker._branch_state(None, target, head_ref, committed) == "applied":
+                await worker._record_open_pull_request(plan, target, branch, pull_request)
+                return await self._adopt_pending_delivery(plan, pull_request.number)
+            reason = (
+                "the pull request on the deterministic plan branch does not hold the planned files"
+                if pull_request is not None
+                else "no pull request was opened from the deterministic plan branch"
+            )
+        except GitProviderTransientError:
+            return None
+        except (GitProviderError, PlanWorkerError) as exc:
+            reason = f"the plan branch could not be verified: {exc}"
+        finally:
+            try:
+                await target.provider.close()
+            except Exception:
+                pass
+        logger.warning(
+            "Plan %s: operation exhausted after its pull-request record was written; %s.", plan.plan_id, reason
+        )
+        return await self._fail_applying_plan(
+            plan,
+            actor="automation-reconciler",
+            reason_code="operation_retry_exhausted",
+            records=records,
+            record_error=f"Plan operation retries were exhausted and {reason}; re-plan to retry.",
+        )
+
+    async def _adopt_pending_delivery(self, plan: Plan, number: int) -> Plan | None:
+        repository = self._plan_service.repository
+        updated = await repository.set_plan_status(
+            plan.plan_id,
+            PlanStatus.PR_OPEN,
+            expected_statuses=(PlanStatus.APPLYING,),
+            expected_digest=plan.digest,
+            actor="automation-reconciler",
+            reason_code="pull_request_adopted",
+        )
+        if updated is None:
+            return None
+        await repository.set_recommendation_action_status(
+            plan.recommendation_ids,
+            ActionStatus.PR_OPEN,
+            expected_statuses=(ActionStatus.PLAN_READY, ActionStatus.PR_OPEN),
+            actor="automation-reconciler",
+            plan_id=plan.plan_id,
+        )
+        logger.info("Plan %s: adopted pull request #%s after its operation was exhausted.", plan.plan_id, number)
+        return updated
+
+    async def abandon_plan(self, plan_id: str, *, actor: str, reason: str | None = None) -> Plan | None:
+        """Fail a stuck APPLYING plan on an operator's request (audited); ``None`` when unknown.
+
+        Refused while a worker holds a live lease on its operation, and when a pull request
+        was already recorded for it (close that request on the provider instead: the
+        pull-request lifecycle then closes the plan).
+        """
+        plan = await self._plan_service.read_plan(plan_id)
+        if plan is None:
+            return None
+        if plan.status is not PlanStatus.APPLYING:
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                f"only an applying plan can be abandoned (status {plan.status.value})",
+            )
+        records = await self._plan_pull_request_records(plan_id)
+        if records is None:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY, "the plan's pull-request records cannot be read; retry"
+            )
+        numbered = [record for record in records if not _pending_without_number(record)]
+        if numbered:
+            number = getattr(numbered[0], "pr_number", None)
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                f"the plan already has pull request #{number}; close it on the provider instead",
+            )
+        if records:
+            # An earlier attempt may have opened a request it never recorded: refuse while the
+            # deterministic plan branch holds an open one, so the plan is not released with an
+            # untracked pull request a later plan would duplicate.
+            open_number = await self._open_pull_request_on_plan_branch(plan)
+            if open_number is not None:
+                raise AutomationPlanError(
+                    AutomationErrorCode.PLAN_STALE,
+                    f"pull request #{open_number} is open on plan branch {plan_branch_name(plan)}; "
+                    "close it on the provider, or wait for the reconciler to adopt it",
+                )
+        operations = getattr(self.worker, "operations", None)
+        canceller = getattr(operations, "cancel_unleased_operation", None)
+        if callable(canceller):
+            operation = await cast(Any, canceller)(plan_id, f"abandoned by {actor}")
+            if operation is not None and operation.status is OperationStatus.RUNNING:
+                raise AutomationPlanError(
+                    AutomationErrorCode.PLAN_STALE,
+                    "a worker is applying this plan right now; retry after its lease expires",
+                )
+        detail = f"Abandoned by {actor}" + (f": {reason}" if reason else "") + "."
+        logger.info("Plan %s: %s", plan_id, detail)
+        updated = await self._fail_applying_plan(
+            plan, actor=actor, reason_code="abandoned_by_operator", records=records, record_error=detail
+        )
+        if updated is None:
+            raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "the plan changed while it was being abandoned")
+        return updated
+
+    async def _open_pull_request_on_plan_branch(self, plan: Plan) -> int | None:
+        """Number of the open request on the plan's deterministic branch, or ``None``.
+
+        A provider that is gone cannot hold the branch any more (``None``); a transient
+        failure refuses the abandon so the operator retries once the provider answers.
+        """
+        resolver = getattr(self.worker, "provider_resolver", None)
+        if resolver is None:
+            return None
+        branch = plan_branch_name(plan)
+        try:
+            target = await resolver.resolve(plan.source)
+        except GitProviderTransientError:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                f"the provider could not be asked whether plan branch {branch} has a pull request; retry",
+            ) from None
+        except (PlanWorkerError, GitProviderError):
+            return None
+        try:
+            pull_request = await target.provider.find_pull_request(target.repository, branch, plan.source.ref)
+        except GitProviderTransientError:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                f"the provider could not be asked whether plan branch {branch} has a pull request; retry",
+            ) from None
+        except GitProviderError:
+            return None
+        finally:
+            try:
+                await target.provider.close()
+            except Exception:
+                pass
+        return pull_request.number if pull_request is not None else None
 
     async def supersede_plan(self, plan_id: str) -> Plan | None:
         return await self._plan_service.supersede_plan(plan_id)
@@ -1193,6 +1563,10 @@ def parse_gitops_providers_json(
             raise PlanRuntimeConfigurationError(
                 f"provider ID {UNRESOLVED_PROVIDER_ID!r} is reserved for unresolved GitOps sources."
             )
+        if provider.config.id.startswith("inferred-"):
+            raise PlanRuntimeConfigurationError(
+                "provider IDs starting with 'inferred-' are reserved for providers inferred from discovery."
+            )
         if provider.config.id in seen_ids:
             raise PlanRuntimeConfigurationError("GITOPS_PROVIDERS_JSON provider IDs must be unique.")
         seen_ids.add(provider.config.id)
@@ -1207,6 +1581,8 @@ def _parse_provider(raw: Mapping[str, Any]) -> ConfiguredGitProvider:
         "provider_type",
         "apiBaseUrl",
         "api_base_url",
+        "webBaseUrl",
+        "web_base_url",
         "tokenSecret",
         "token_secret",
         "secretRef",
@@ -1254,6 +1630,27 @@ def _parse_provider(raw: Mapping[str, Any]) -> ConfiguredGitProvider:
                 raise PlanRuntimeConfigurationError(
                     "Provider API base URL must use HTTP(S) and must not contain credentials."
                 )
+
+    web_base_url = _aliased_value(raw, ("webBaseUrl", "web_base_url"), "web base URL", required=False)
+    if web_base_url is not None:
+        if not isinstance(web_base_url, str):
+            raise PlanRuntimeConfigurationError("Provider web base URL must be a URL string.")
+        web_base_url = web_base_url.strip() or None
+        if web_base_url is not None:
+            parsed_url = urlsplit(web_base_url)
+            if (
+                parsed_url.scheme not in {"http", "https"}
+                or not parsed_url.hostname
+                or parsed_url.username is not None
+                or parsed_url.password is not None
+                or parsed_url.path not in {"", "/"}
+                or parsed_url.query
+                or parsed_url.fragment
+            ):
+                raise PlanRuntimeConfigurationError(
+                    "Provider web base URL must be an HTTP(S) origin without credentials, path, query, or fragment."
+                )
+            web_base_url = web_base_url.rstrip("/")
 
     secret_namespace, secret_name, secret_key = _parse_secret_reference(raw)
     token_file = raw.get("tokenFile")
@@ -1310,6 +1707,7 @@ def _parse_provider(raw: Mapping[str, Any]) -> ConfiguredGitProvider:
         config=config,
         repositories=repositories,
         token_file=expected_token_file,
+        web_base_url=web_base_url,
     )
 
 
@@ -1410,7 +1808,16 @@ async def reconcile_gitops_providers(
     for provider in providers:
         previous = existing.get(provider.config.id)
         if previous is None or not _same_provider_configuration(previous, provider.config):
-            await repository.save_provider_config(provider.config)
+            config = provider.config
+            if previous is not None and _same_provider_connection(previous, config):
+                # Same endpoint and credential reference: keep what the last real call verified.
+                config = replace(
+                    config,
+                    status=previous.status,
+                    last_checked_at=previous.last_checked_at,
+                    last_error_code=previous.last_error_code,
+                )
+            await repository.save_provider_config(config)
 
         allowlist = set(await repository.list_provider_allowlists(provider.config.id))
         desired = set(provider.repositories)
@@ -1420,7 +1827,9 @@ async def reconcile_gitops_providers(
             await repository.add_provider_allowlist(provider.config.id, pattern)
 
     for provider_id, provider in existing.items():
-        if provider_id in configured_ids:
+        # Inferred providers belong to the readiness reconciler (F12), not to the
+        # configured list: a controller restart must not disable them.
+        if provider_id in configured_ids or provider_id.startswith("inferred-"):
             continue
         if provider.enabled:
             await repository.save_provider_config(
@@ -1512,10 +1921,19 @@ async def create_plan_runtime(
     rollback_renderer: RollbackRenderer | None = None,
     snapshot_limits: SnapshotLimits | None = None,
     connect_db: bool = True,
+    allow_empty: bool = False,
+    reconcile_providers: bool = True,
 ) -> PlanRuntime:
-    """Build repositories, authorized providers, service and plan worker for production."""
+    """Build repositories, authorized providers, service and plan worker for production.
+
+    ``allow_empty`` composes the runtime without explicit providers: automation is
+    always on (F12) and the readiness reconciler infers providers from discovered
+    repositories at run time. ``reconcile_providers=False`` leaves the provider rows
+    to the controller (the API never writes them, and may start before the
+    controller has migrated the schema).
+    """
     raw = config_json if config_json is not None else os.getenv("GITOPS_PROVIDERS_JSON")
-    providers = parse_gitops_providers_json(raw)
+    providers = parse_gitops_providers_json(raw, allow_empty=allow_empty)
     try:
         selected_policy_config = policy_config or AutomationPolicyConfig.from_json(os.getenv("GITOPS_POLICY_JSON"))
     except ValueError as exc:
@@ -1535,7 +1953,8 @@ async def create_plan_runtime(
 
     if gitops_repository is None:
         gitops_repository = _make_gitops_repository(db_manager, config.DB_TYPE)
-    await reconcile_gitops_providers(gitops_repository, providers)
+    if reconcile_providers:
+        await reconcile_gitops_providers(gitops_repository, providers)
 
     if plan_operation_repository is None:
         plan_operation_repository = _make_plan_operation_repository(db_manager, config.DB_TYPE)
@@ -1559,13 +1978,22 @@ async def create_plan_runtime(
     blob_resolver = AuthorizedGitBlobResolver(provider_resolver)
     snapshot_resolver = ProviderSourceSnapshotResolver(provider_resolver, limits=snapshot_limits)
 
+    from greenkube.automation.readiness import renderer_egress_probe
+
     plan_service = AutomationPlanService(
         gitops_repository,
         git_blob_resolver=blob_resolver,
         revision_resolver=revision_resolver,
         planner=RawManifestPlanner(),
         operation_enqueuer=cast(PlanOperationEnqueuer, plan_operation_repository),
+        # Kustomize and Helm previews say when the renderer's egress is not enforced (F6).
+        renderer_egress_unenforced=renderer_egress_probe(db_manager),
     )
+    from greenkube.automation.deletion_recheck import DeletionOrphanChecker
+    from greenkube.core.optimization.applied_detector import K8sResourceReader
+    from greenkube.storage.resource_binding_repository import ResourceBindingRepository
+
+    resource_bindings = ResourceBindingRepository(db_manager)
     worker = PlanWorker(
         operations=plan_operation_repository,
         plans=gitops_repository,
@@ -1576,6 +2004,10 @@ async def create_plan_runtime(
         workload_reader=K8sWorkloadReader(),
         pull_request_options=selected_pull_request_options,
         binding_reader=gitops_repository,
+        resource_reader=K8sResourceReader(),
+        resource_binding_reader=resource_bindings,
+        # H6 delivery safety: the collectors' full orphan check before and after a deletion PR opens.
+        deletion_orphan_checker=DeletionOrphanChecker(),
     )
     api_plan_service = RuntimePlanService(
         recommendation_repository=recommendation_repository,
@@ -1584,10 +2016,14 @@ async def create_plan_runtime(
         snapshot_resolver=snapshot_resolver,
         plan_service=plan_service,
         worker=worker,
-        rollback_renderer=rollback_renderer,
+        # Kustomize rollbacks render through the same isolated sandbox backend as planning (D14).
+        rollback_renderer=rollback_renderer
+        or kustomize_rollback_renderer(plan_service, snapshot_limits=snapshot_limits),
         snapshot_limits=snapshot_limits,
         policy_config=selected_policy_config,
         policy_repository=gitops_repository,
+        resource_binding_repository=resource_bindings,
+        controller_status_reader=argo_application_status_reader(),
     )
     return PlanRuntime(
         providers=providers,
@@ -1605,19 +2041,68 @@ async def create_plan_runtime(
     )
 
 
-async def get_plan_service(**runtime_options: Any) -> RuntimePlanService:
-    """Create the source-safe plan API service from the production repositories."""
-    runtime = await create_plan_runtime(**runtime_options)
-    return runtime.plan_service
+def argo_application_status_reader(custom_objects_api: Any = None) -> ControllerStatusReader:
+    """Read an Argo CD ``Application.status`` live, for the controller health gate.
+
+    Used only when the binding evidence already reports the Application unhealthy; any
+    failure returns ``None`` and the gate keeps failing closed.
+    """
+
+    async def read(source: WorkloadSource) -> Mapping[str, Any] | None:
+        if source.controller_kind is not ControllerKind.ARGOCD:
+            return None
+        api = custom_objects_api
+        if api is None:
+            from greenkube.core.k8s_client import get_custom_objects_api
+
+            api = await get_custom_objects_api()
+        if api is None:
+            return None
+        try:
+            application = await api.get_namespaced_custom_object(
+                "argoproj.io", "v1alpha1", source.controller_namespace, "applications", source.controller_name
+            )
+        except Exception as exc:
+            logger.info(
+                "Argo CD Application %s/%s status unavailable: %s",
+                source.controller_namespace,
+                source.controller_name,
+                type(exc).__name__,
+            )
+            return None
+        if not isinstance(application, Mapping):
+            return None
+        metadata = application.get("metadata")
+        uid = metadata.get("uid") if isinstance(metadata, Mapping) else None
+        if source.controller_uid and uid != source.controller_uid:
+            return None
+        status = application.get("status")
+        return status if isinstance(status, Mapping) else None
+
+    return read
+
+
+def kustomize_rollback_renderer(
+    plan_service: Any,
+    *,
+    snapshot_limits: SnapshotLimits | None = None,
+) -> KustomizeRollbackRenderer | None:
+    """Exact-target Kustomize rollback adapter over the plan service's own Kustomize renderer.
+
+    Reusing the planner's renderer keeps rollback renders on the same sandboxed backend and
+    pinned Kustomize version as forward plans (D14, BUG-54).
+    """
+    planners = getattr(plan_service, "planners", None)
+    planner = planners.get(RendererKind.KUSTOMIZE) if isinstance(planners, Mapping) else None
+    renderer = getattr(planner, "renderer", None)
+    if not isinstance(renderer, KustomizeRenderer):
+        return None
+    return KustomizeRollbackRenderer(renderer, snapshot_limits=snapshot_limits)
 
 
 async def build_plan_api_service(**runtime_options: Any) -> RuntimePlanService:
-    """Build the API plan facade from persisted recommendations and bindings."""
-    return await get_plan_service(**runtime_options)
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    """Build the source-safe API plan facade from the production repositories."""
+    return (await create_plan_runtime(**runtime_options)).plan_service
 
 
 def _with_binding_policy_evidence(source: WorkloadSource, binding: WorkloadBinding) -> WorkloadSource:
@@ -1659,12 +2144,13 @@ def _with_one_time_helm_values_mapping(
             AutomationErrorCode.UNSUPPORTED_SOURCE,
             "a configured Application mapping takes precedence over a one-time plan mapping",
         )
-    if len(action.operations) != 1 or not isinstance(action.operations[0], SetContainerResources):
+    containers = operation_subjects(action)
+    if len(action.operations) != 1 or len(containers) != 1:
         raise AutomationPlanError(
             AutomationErrorCode.UNSUPPORTED_SOURCE,
             "one-time Helm values mappings require a single container-resource operation",
         )
-    operation = action.operations[0]
+    (operation_container,) = containers
     if not isinstance(mapping, Mapping) or set(mapping) != {"file_path", "container", "path"}:
         raise AutomationPlanError(
             AutomationErrorCode.UNSUPPORTED_SOURCE,
@@ -1679,7 +2165,7 @@ def _with_one_time_helm_values_mapping(
         not isinstance(file_path, str)
         or file_path != allowed_file
         or not isinstance(container, str)
-        or container != operation.container
+        or container != operation_container
         or not isinstance(path, (list, tuple))
         or not path
         or len(path) > 32
@@ -1732,13 +2218,24 @@ def _helm_values_mapping_options(
     }
     if file_path is None or file_path not in available_paths:
         return None
-    operation = action.operations[0]
-    if not isinstance(operation, SetContainerResources):
+    containers = operation_subjects(action)
+    if len(containers) != 1:
         return None
-    container = operation.container
-    if not isinstance(container, str) or not container:
+    (container,) = containers
+    if not container:
         return None
     return {"files": [file_path], "containers": [container]}
+
+
+def _pending_without_number(record: Any) -> bool:
+    """A PENDING (or already failed) pull-request record that never received a provider number."""
+    status = getattr(record, "status", None)
+    status = getattr(status, "value", status)
+    return (
+        hasattr(record, "pr_number")
+        and record.pr_number is None
+        and status in {PullRequestStatus.PENDING.value, PullRequestStatus.ERROR.value}
+    )
 
 
 def _same_workload_source_version(expected: WorkloadSource, current: WorkloadSource) -> bool:
@@ -1777,6 +2274,19 @@ def _same_provider_configuration(left: GitOpsProviderConfig, right: GitOpsProvid
         and left.secret_key == right.secret_key
         and left.enabled == right.enabled
         and left.capabilities == right.capabilities
+    )
+
+
+def _same_provider_connection(left: GitOpsProviderConfig, right: GitOpsProviderConfig) -> bool:
+    """Whether a verification of ``left`` still holds for ``right`` (same endpoint and credential)."""
+    return (
+        left.enabled
+        and right.enabled
+        and left.provider_type == right.provider_type
+        and left.api_base_url == right.api_base_url
+        and left.secret_namespace == right.secret_namespace
+        and left.secret_name == right.secret_name
+        and left.secret_key == right.secret_key
     )
 
 

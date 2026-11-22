@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from greenkube.collectors.boavizta_collector import BoaviztaLookup
 from greenkube.core.config import Config
 from greenkube.core.embodied_service import EmbodiedEmissionsService
+from greenkube.models.boavizta import BoaviztaResponse
 from greenkube.models.node import NodeInfo
 
 
@@ -27,7 +29,7 @@ def mock_config():
 def service(mock_config):
     """EmbodiedEmissionsService wired with mocks."""
     boavizta = MagicMock()
-    boavizta.get_server_impact = AsyncMock(return_value=None)
+    boavizta.lookup_server_impact = AsyncMock(return_value=BoaviztaLookup(None, "HTTP error: boom"))
     embodied_repo = MagicMock()
     embodied_repo.get_profile = AsyncMock(return_value=None)
     embodied_repo.save_profile = AsyncMock()
@@ -56,8 +58,8 @@ def service(mock_config):
 
 @pytest.mark.asyncio
 async def test_prepare_embodied_data_injects_fallback_when_api_returns_none(service, mock_config):
-    """When Boavizta API returns None (unknown provider/instance),
-    prepare_embodied_data should inject a fallback profile with is_fallback=True."""
+    """When Boavizta API returns None (unknown provider/instance), the failure is cached
+    (negative entry) and the node resolves to a flagged fallback (NRG-01)."""
     nodes_info = {
         "node-1": NodeInfo(
             name="node-1",
@@ -70,21 +72,23 @@ async def test_prepare_embodied_data_injects_fallback_when_api_returns_none(serv
     cache = await service.prepare_embodied_data(nodes_info)
 
     key = ("unknowncloud", "x1.mystery")
-    assert key in cache, "Fallback profile should be injected into cache"
-    profile = cache[key]
-    assert profile["is_fallback"] is True
-    assert profile["gwp_manufacture"] == mock_config.DEFAULT_EMBODIED_EMISSIONS_KG
-    assert profile["lifespan_hours"] == mock_config.DEFAULT_HARDWARE_LIFESPAN_YEARS * 8760
+    assert key not in cache, "a failed lookup is not a Boavizta profile"
+    saved = service.embodied_repository.save_profile.call_args.kwargs
+    assert saved["source"] == "fallback" and saved["error"]
+    embodied = service.resolve(nodes_info["node-1"], cache)
+    assert embodied.is_fallback
+    assert embodied.gwp_kg == mock_config.DEFAULT_EMBODIED_EMISSIONS_KG
+    assert embodied.lifespan_hours == mock_config.DEFAULT_HARDWARE_LIFESPAN_YEARS * 8760
+    assert service.is_embodied_fallback(nodes_info["node-1"], cache) is True
 
 
 @pytest.mark.asyncio
 async def test_prepare_embodied_data_no_fallback_when_api_succeeds(mock_config):
     """When Boavizta API returns real data, no fallback flag should be set."""
-    impact = MagicMock()
-    impact.impacts.gwp.manufacture = 500.0
+    impact = BoaviztaResponse.model_validate({"impacts": {"gwp": {"unit": "kgCO2eq", "embedded": {"value": 500.0}}}})
 
     boavizta = MagicMock()
-    boavizta.get_server_impact = AsyncMock(return_value=impact)
+    boavizta.lookup_server_impact = AsyncMock(return_value=BoaviztaLookup(impact, None))
     embodied_repo = MagicMock()
     embodied_repo.get_profile = AsyncMock(return_value=None)
     embodied_repo.save_profile = AsyncMock()
@@ -122,7 +126,7 @@ async def test_prepare_embodied_data_no_fallback_when_api_succeeds(mock_config):
 async def test_prepare_embodied_data_no_fallback_when_cached_in_db(mock_config):
     """When the profile exists in the DB cache, no fallback should be used."""
     boavizta = MagicMock()
-    boavizta.get_server_impact = AsyncMock()
+    boavizta.lookup_server_impact = AsyncMock()
     embodied_repo = MagicMock()
     embodied_repo.get_profile = AsyncMock(return_value={"gwp_manufacture": 400.0, "lifespan_hours": 35040})
     node_repo = MagicMock()
@@ -154,7 +158,7 @@ async def test_prepare_embodied_data_no_fallback_when_cached_in_db(mock_config):
     assert key in cache
     assert cache[key].get("is_fallback") is not True
     # API should NOT have been called
-    boavizta.get_server_impact.assert_not_called()
+    boavizta.lookup_server_impact.assert_not_called()
 
 
 # ------------------------------------------------------------------

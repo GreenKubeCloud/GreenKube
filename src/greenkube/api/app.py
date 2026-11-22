@@ -9,14 +9,15 @@ directory is present in the image.
 """
 
 import asyncio
-import ipaddress
 import logging
 import os
 import re
 import time
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import uvicorn
 from fastapi import Depends, FastAPI, Request
@@ -33,28 +34,40 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.routing import Match
 
 from greenkube import __version__
+from greenkube.api.dependencies import authenticate as authenticate_request
 from greenkube.api.dependencies import (
     get_combined_metrics_repository,
     get_gitops_binding_repository,
-    get_node_repository,
-    get_recommendation_repository,
-    verify_api_key,
 )
 from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_from_db
+from greenkube.api.routers import auth as auth_router
 from greenkube.api.routers import automation as automation_router
+from greenkube.api.routers import automation_repositories as automation_repositories_router
+from greenkube.api.routers import changes as changes_router
+from greenkube.api.routers import collection as collection_router
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import gitops as gitops_router
 from greenkube.api.routers import health as health_router
+from greenkube.api.routers import ledger as ledger_router
+from greenkube.api.routers import manual_apply as manual_apply_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report, repository_bindings
+from greenkube.api.routers import optimization as optimization_router
+from greenkube.api.routers import plan_delivery as plan_delivery_router
 from greenkube.api.routers import plans as plans_router
+from greenkube.api.routers import recommendations_v2 as recommendations_v2_router
+from greenkube.api.routers import setup as setup_router
+from greenkube.api.routers import signals as signals_router
+from greenkube.api.routers import sources as sources_router
 from greenkube.api.routers import webhooks as webhooks_router
-from greenkube.api.startup import run_plan_expiry_loop, run_startup_recommendation_scan
+from greenkube.auth.http import client_ip, is_https
+from greenkube.auth.lifecycle import start_auth_runtime
+from greenkube.auth.settings import AuthSettings
 from greenkube.automation.plan_runtime import PlanRuntimeConfigurationError, build_plan_api_service
 from greenkube.automation.pr_lifecycle_runtime import create_pull_request_lifecycle_reconciler
 from greenkube.automation.webhook_runtime import create_webhook_processing_service
 from greenkube.core.config import get_config
-from greenkube.core.factory import get_savings_ledger_repository, get_summary_repository
+from greenkube.core.factory import get_savings_ledger_repository
 
 logger = logging.getLogger(__name__)
 _MANUAL_BINDING_RESOLUTION_PATH = re.compile(r"^/api/v1/gitops/bindings/[^/]+/[^/]+/[^/]+/resolve$")
@@ -62,25 +75,38 @@ _MANUAL_BINDING_RESOLUTION_PATH = re.compile(r"^/api/v1/gitops/bindings/[^/]+/[^
 FRONTEND_DIR = Path("/app/frontend")
 
 
-def _parse_networks(value: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
-    networks = []
-    for item in value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            networks.append(ipaddress.ip_network(item, strict=False))
-        except ValueError:
-            logger.warning("Ignoring invalid trusted proxy network: %s", item)
-    return tuple(networks)
+def _cors_policy(raw_origins: str) -> tuple[list[str], bool]:
+    """Return ``(allowed_origins, allow_credentials)`` for ``CORS_ORIGINS``.
+
+    Empty means same-origin only. Credentials are allowed only for an explicit
+    origin list: a wildcard is never combined with credentials (BUG-59).
+    """
+    origins = [origin.strip() for origin in (raw_origins or "").split(",") if origin.strip()]
+    if "*" in origins:
+        logger.warning("CORS_ORIGINS contains '*': any origin is allowed and credentialed CORS is disabled.")
+        return ["*"], False
+    return origins, bool(origins)
 
 
-def _is_trusted_ip(value: str, networks) -> bool:
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    return any(address in network for network in networks)
+def _hsts_header(request: Request) -> str | None:
+    """``Strict-Transport-Security`` value for this response, or None.
+
+    Sent when the browser reached GreenKube over HTTPS (directly, or per
+    ``X-Forwarded-Proto`` from ``TRUSTED_PROXY_IPS``) and whenever the deployment
+    declares HTTPS with ``SESSION_COOKIE_SECURE=always``: browsers ignore the
+    header on plain-HTTP responses, so the latter is harmless on a port-forward.
+    """
+    cfg = get_config()
+    max_age = getattr(cfg, "HSTS_MAX_AGE", 0)
+    if not isinstance(max_age, int) or isinstance(max_age, bool) or max_age <= 0:
+        return None
+    settings = AuthSettings.from_config(cfg)
+    if settings.cookie_secure != "always" and not is_https(request, settings):
+        return None
+    value = f"max-age={max_age}"
+    if getattr(cfg, "HSTS_INCLUDE_SUBDOMAINS", False) is True:
+        value += "; includeSubDomains"
+    return value
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -100,6 +126,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Common security headers for all responses
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        hsts = _hsts_header(request)
+        if hsts:
+            response.headers.setdefault("Strict-Transport-Security", hsts)
 
         # Document-only headers — only meaningful for HTML pages, not for
         # JSON API responses or static assets.  Setting them on every response
@@ -133,7 +162,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         elif is_static_asset:
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         elif is_api:
-            response.headers["Cache-Control"] = "no-cache"
+            # Credential responses (sign-in, API-key creation) set no-store themselves.
+            response.headers.setdefault("Cache-Control", "no-cache")
         return response
 
 
@@ -161,12 +191,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not (path.startswith(self._LIMITED_PREFIXES) or path in self._LIMITED_EXACT):
             return await call_next(request)
 
-        client = request.client.host if request.client else "unknown"
-        trusted_proxies = _parse_networks(getattr(get_config(), "TRUSTED_PROXY_IPS", ""))
-        if _is_trusted_ip(client, trusted_proxies):
-            forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-            if forwarded:
-                client = forwarded
+        # The rightmost X-Forwarded-For hop that is not a trusted proxy, and only from a
+        # trusted peer: the leftmost entry is whatever the client chose to send.
+        client = client_ip(request, AuthSettings.from_config(get_config()))
         identifiers = (client, self._route_key(request))
         for limit in self._limits:
             if not self._limiter.hit(limit, *identifiers):
@@ -181,13 +208,42 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _route_key(request: Request) -> str:
-        """Use the registered route template instead of untrusted path parameters."""
+        """The registered route template (``/api/v1/plans/{plan_id}``), never the raw path.
+
+        The middleware runs before routing, so the template is resolved here. Routers
+        included with ``include_router`` are ``_IncludedRouter`` objects (FastAPI >=
+        0.121) without a ``path``: their effective routes, which carry the full
+        prefixed template, are matched instead. Untrusted path parameters therefore
+        never create buckets, and distinct routes never share one.
+        """
         router = getattr(request.app, "router", None)
-        for route in getattr(router, "routes", ()):
-            match, _ = route.matches(request.scope)
+        partial: str | None = None
+        for route in _flat_routes(getattr(router, "routes", ())):
+            try:
+                match, _ = route.matches(request.scope)
+            except Exception:
+                continue
+            path = getattr(route, "path", None)
+            if not isinstance(path, str):
+                continue
             if match is Match.FULL:
-                return getattr(route, "path", "<matched-route>")
-        return "<unmatched-route>"
+                return path
+            if match is Match.PARTIAL and partial is None:
+                # Path matches, method does not (405): still that route's bucket.
+                partial = path
+        return partial or "<unmatched-route>"
+
+
+def _flat_routes(routes):
+    """Routes in matching order, with included routers expanded to their effective routes."""
+    for route in routes:
+        effective = getattr(route, "effective_route_contexts", None)
+        if callable(effective):
+            yield from cast(Iterable[Any], effective())
+        elif getattr(route, "path", None) is None and isinstance(getattr(route, "routes", None), list):
+            yield from _flat_routes(route.routes)
+        else:
+            yield route
 
 
 @asynccontextmanager
@@ -198,9 +254,14 @@ async def lifespan(app: FastAPI):
 
     await get_db_manager().connect()
     logger.info("✅ Database connection established.")
+    # Readiness (/api/v1/health) waits for the controller's migrations (F11).
+    app.state.check_schema = True
+    # Account store and first-admin bootstrap (F14); the session purge runs in the controller.
+    app.state._auth_tasks = start_auth_runtime(app, get_db_manager())
 
     app.state.automation_plan_service = None
-    app.state._plan_worker_task = None
+    # No in-process automation loop runs in the API since M8; kept for the status routes.
+    app.state.automation_loop_supervisor = None
     app.state.webhook_processing_service = None
     app.state.pull_request_lifecycle_reconciler = None
     webhook_secret_dir = os.getenv("GITOPS_WEBHOOK_SECRET_DIR") or os.getenv("GITOPS_WEBHOOK_SECRET_FILE")
@@ -215,7 +276,7 @@ async def lifespan(app: FastAPI):
             logger.warning("Webhook processor is unavailable (%s).", type(error).__name__)
 
     try:
-        plan_service = await build_plan_api_service(connect_db=False)
+        plan_service = await build_plan_api_service(connect_db=False, allow_empty=True, reconcile_providers=False)
     except PlanRuntimeConfigurationError as exc:
         logger.warning("Automation plan API is unavailable: %s", exc)
     except Exception:
@@ -224,33 +285,12 @@ async def lifespan(app: FastAPI):
         app.state.automation_plan_service = plan_service
         if webhook_secret_dir and plan_service.worker is not None:
             app.state.pull_request_lifecycle_reconciler = create_pull_request_lifecycle_reconciler(plan_service.worker)
-        config = get_config()
-        if getattr(config, "AUTOMATION_ENABLED", False) and getattr(config, "AUTOMATION_MODE", "disabled") == "inline":
-            worker = plan_service.worker
-            if worker is not None:
-                from greenkube.cli.automation_worker import run_worker
 
-                app.state._plan_worker_task = asyncio.create_task(run_worker(queue="plans", plan_worker=worker))
-
-    # Start tracked background startup tasks so we can cancel them on shutdown.
+    # The API is stateless request handling (M8): it starts no periodic job. Plan
+    # execution, plan expiry and retention, the webhook outbox, PR polling and the
+    # recommendation scans run in the controller's loop registry, so API replicas
+    # are safe to scale. Only the first-admin bootstrap above runs as a startup task.
     app.state._startup_tasks = []
-    app.state._startup_tasks.append(asyncio.create_task(run_startup_recommendation_scan()))
-    plan_api_service = getattr(app.state, "automation_plan_service", None)
-    if plan_api_service is not None:
-        if callable(getattr(plan_api_service, "expire_due_plans", None)) and callable(
-            getattr(plan_api_service, "prune_retained_history", None)
-        ):
-            app.state._startup_tasks.append(
-                asyncio.create_task(
-                    run_plan_expiry_loop(plan_api_service),
-                    name="gitops-plan-expiry",
-                )
-            )
-        else:
-            logger.warning("Automation plan expiry and retention maintenance are unavailable.")
-    plan_worker_task = getattr(app.state, "_plan_worker_task", None)
-    if plan_worker_task is not None:
-        app.state._startup_tasks.append(plan_worker_task)
     app.state.ready = True
 
     yield
@@ -258,16 +298,18 @@ async def lifespan(app: FastAPI):
     app.state.ready = False
     # Cancel any tracked startup/background tasks
     try:
-        for t in getattr(app.state, "_startup_tasks", []) or []:
+        background = [*(getattr(app.state, "_startup_tasks", []) or []), *(getattr(app.state, "_auth_tasks", []) or [])]
+        for t in background:
             if not t.done():
                 t.cancel()
         # Wait a short time for tasks to cancel
-        await asyncio.gather(*(t for t in getattr(app.state, "_startup_tasks", []) or []), return_exceptions=True)
+        await asyncio.gather(*background, return_exceptions=True)
     except Exception:
         logger.exception("Error while cancelling startup tasks")
 
     await get_db_manager().close()
     app.state.automation_plan_service = None
+    app.state.automation_loop_supervisor = None
     app.state.webhook_processing_service = None
     app.state.pull_request_lifecycle_reconciler = None
     logger.info("Database connection closed.")
@@ -292,9 +334,11 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         A configured FastAPI application instance.
     """
     cfg = get_config()
+    # Session mode (the default) bootstraps an admin account, so only the
+    # machine-only api_key mode still needs the bootstrap key in production.
     if (
         getattr(cfg, "ENVIRONMENT", "development") == "production"
-        and getattr(cfg, "API_AUTH_MODE", "api_key") == "api_key"
+        and getattr(cfg, "API_AUTH_MODE", "session") == "api_key"
         and not getattr(cfg, "API_KEY", "")
     ):
         raise ValueError("GREENKUBE_API_KEY must be configured in production.")
@@ -307,9 +351,10 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         docs_url="/api/v1/docs",
         openapi_url="/api/v1/openapi.json",
         lifespan=lifespan if use_lifespan else None,
-        dependencies=[Depends(verify_api_key)],
+        dependencies=[Depends(authenticate_request)],
         root_path=root_path,
     )
+    app.state.auth_service = None
 
     @app.exception_handler(RequestValidationError)
     async def handle_request_validation_error(request: Request, error: RequestValidationError):
@@ -328,13 +373,14 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
 
     # CORS is closed by default. Explicit origins are required for cross-origin
     # browser clients; same-origin SPA requests do not need CORS headers.
-    cors_origins = [o.strip() for o in (getattr(cfg, "CORS_ORIGINS", "") or "").split(",") if o.strip()]
+    cors_origins, cors_allow_credentials = _cors_policy(getattr(cfg, "CORS_ORIGINS", "") or "")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=True,
+        allow_credentials=cors_allow_credentials,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
+        expose_headers=["X-GreenKube-Run-Id"],
     )
     trusted_hosts = [h.strip() for h in getattr(cfg, "TRUSTED_HOSTS", "*").split(",") if h.strip()]
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts or ["*"])
@@ -348,42 +394,51 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(namespaces.router, prefix="/api/v1", tags=["Namespaces"])
     app.include_router(nodes.router, prefix="/api/v1", tags=["Nodes"])
     app.include_router(recommendations.router, prefix="/api/v1", tags=["Recommendations"])
+    app.include_router(optimization_router.router, prefix="/api/v1", tags=["Optimization runs"])
+    app.include_router(sources_router.router, prefix="/api/v1", tags=["Sources"])
+    app.include_router(signals_router.router, prefix="/api/v1", tags=["Sources"])
+    app.include_router(setup_router.router, prefix="/api/v1", tags=["Setup"])
+    app.include_router(automation_repositories_router.router, prefix="/api/v1", tags=["Automation"])
     app.include_router(automation_router.router, prefix="/api/v1", tags=["Automation"])
+    app.include_router(plan_delivery_router.router, prefix="/api/v1", tags=["Automation plans"])
     app.include_router(plans_router.router, prefix="/api/v1", tags=["Automation plans"])
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])
     app.include_router(health_router.router, prefix="/api/v1", tags=["Health"])
+    app.include_router(collection_router.router, prefix="/api/v1", tags=["Health"])
     app.include_router(report.router, prefix="/api/v1", tags=["Report"])
     app.include_router(repository_bindings.router, prefix="/api/v1", tags=["Repository bindings"])
     app.include_router(gitops_router.router, prefix="/api/v1", tags=["GitOps"])
     app.include_router(webhooks_router.router, prefix="/api/v1", tags=["Webhooks"])
+    app.include_router(changes_router.router, prefix="/api/v2", tags=["Changes"])
+    app.include_router(recommendations_v2_router.router, prefix="/api/v2", tags=["Recommendations v2"])
+    app.include_router(ledger_router.router, prefix="/api/v2", tags=["Savings ledger"])
+    app.include_router(auth_router.router, prefix="/api/v1", tags=["Authentication"])
+    # Manual mode (H9): kubectl snippets and "Mark as applied".
+    app.include_router(manual_apply_router.router, prefix="/api/v1", tags=["Recommendations"])
 
     @app.get("/api/v1/health/heartbeat", include_in_schema=False)
     async def heartbeat():
         """Return a lightweight liveness response without probing dependencies."""
+        supervisor = getattr(app.state, "automation_loop_supervisor", None)
+        loops_ready = supervisor is None or supervisor.health.ready()
         return {
             "status": "ok",
-            "ready": bool(getattr(app.state, "ready", True)),
+            "ready": bool(getattr(app.state, "ready", True)) and loops_ready,
             "timestamp": datetime.now(timezone.utc),
         }
 
-    # Prometheus metrics endpoint for Grafana dashboards
+    # Prometheus metrics endpoint (operational metrics and ledger savings counters).
     # Exposed at /prometheus/metrics to avoid collision with the SPA /metrics route.
     @app.get("/prometheus/metrics", include_in_schema=False)
     async def prometheus_metrics(
         combined_repo=Depends(get_combined_metrics_repository),
-        node_repo=Depends(get_node_repository),
-        reco_repo=Depends(get_recommendation_repository),
-        summary_repo=Depends(get_summary_repository),
         gitops_repository=Depends(get_gitops_binding_repository),
     ):
         """Expose Prometheus-compatible metrics for scraping."""
         # The scheduler writes data to the DB in a separate container/process,
         await refresh_metrics_from_db(
             combined_repo,
-            node_repo,
-            reco_repo,
             savings_repo=get_savings_ledger_repository(),
-            summary_repo=summary_repo,
             gitops_repository=gitops_repository,
         )
         return Response(
@@ -423,6 +478,16 @@ def _mount_frontend(app: FastAPI) -> None:
     # Serve other static files (favicon, etc.)
     app.mount("/static-frontend", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend-root")
 
+    # Files the catch-all may serve, listed once: the frontend is a static build
+    # baked into the image. A request path is only a key into this map, so it
+    # never becomes a filesystem path (no traversal, symlinks are skipped).
+    frontend_files: dict[str, str] = {}
+    for directory, _subdirs, names in os.walk(FRONTEND_DIR):
+        for name in names:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                frontend_files[Path(path).relative_to(FRONTEND_DIR).as_posix()] = path
+
     # SPA catch-all: any route not matched by /api/* returns index.html.
     # Excludes well-known proxy/ingress paths so they return 404 instead
     # of serving the SPA when the reverse proxy misroutes them.
@@ -448,17 +513,12 @@ def _mount_frontend(app: FastAPI) -> None:
         if any(("/" + full_path).startswith(p) for p in _PROXY_PATHS):
             return Response(status_code=404)
 
-        # Resolve the candidate path and refuse anything outside the
-        # frontend directory (path traversal).
-        frontend_root = FRONTEND_DIR.resolve()
-        candidate = (frontend_root / full_path).resolve()
-        try:
-            candidate.relative_to(frontend_root)
-        except ValueError:
+        # A built file is served as is; a path outside the build, including
+        # any traversal attempt, is refused rather than answered with the SPA.
+        if full_path in frontend_files:
+            return FileResponse(frontend_files[full_path])
+        if ".." in full_path.replace("\\", "/").split("/"):
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
-        if candidate.is_file():
-            return FileResponse(str(candidate))
         return FileResponse(str(index_html))
 
 
@@ -470,10 +530,18 @@ def main():
     configure_logging(level=cfg.LOG_LEVEL, log_format=cfg.LOG_FORMAT)
     app = create_app(use_lifespan=True)
     uvicorn.run(
-        app,
+        server_app(app, cfg.TRUSTED_PROXY_IPS),
         host=cfg.API_HOST,
         port=cfg.API_PORT,
-        proxy_headers=bool(cfg.TRUSTED_PROXY_IPS),
-        forwarded_allow_ips=cfg.TRUSTED_PROXY_IPS,
+        # Forwarded headers of TRUSTED_PROXY_IPS are applied by server_app, which
+        # first records the TCP peer for the trusted-proxy checks (F16).
+        proxy_headers=False,
         timeout_keep_alive=65,
     )
+
+
+def server_app(app, trusted_proxy_ips: str):
+    """The ASGI app served by greenkube-api: the TCP peer is recorded before X-Forwarded-For is applied."""
+    from greenkube.auth.peer import TransportPeerMiddleware
+
+    return TransportPeerMiddleware(app, trusted_proxy_ips or "")

@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import lzma
-import re
 import stat
 import struct
 import tarfile
@@ -17,6 +16,7 @@ from collections.abc import Iterable, Mapping, Set
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import IO
 
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.gitops.snapshots.models import (
     RepositorySnapshot,
     SnapshotFile,
@@ -24,7 +24,6 @@ from greenkube.gitops.snapshots.models import (
     SnapshotMetadata,
 )
 
-_COMMIT_SHA_PATTERN = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 _CHUNK_SIZE = 64 * 1024
 _ARCHIVE_ERRORS = (
     EOFError,
@@ -413,7 +412,7 @@ def extract_archive(
         raise SnapshotIdentityError("provider_id must not be blank")
     if not isinstance(repo_url, str) or not repo_url.strip():
         raise SnapshotIdentityError("repo_url must not be blank")
-    if not isinstance(commit_sha, str) or not _COMMIT_SHA_PATTERN.fullmatch(commit_sha):
+    if not isinstance(commit_sha, str) or not GIT_OBJECT_SHA.fullmatch(commit_sha):
         raise SnapshotIdentityError("commit_sha must be a full 40- or 64-character hexadecimal SHA")
     commit_sha = commit_sha.lower()
     effective_limits = limits if limits is not None else SnapshotLimits()
@@ -496,7 +495,7 @@ def snapshot_from_files(
         raise SnapshotIdentityError("provider_id must not be blank")
     if not isinstance(repo_url, str) or not repo_url.strip():
         raise SnapshotIdentityError("repo_url must not be blank")
-    if not isinstance(commit_sha, str) or not _COMMIT_SHA_PATTERN.fullmatch(commit_sha):
+    if not isinstance(commit_sha, str) or not GIT_OBJECT_SHA.fullmatch(commit_sha):
         raise SnapshotIdentityError("commit_sha must be a full 40- or 64-character hexadecimal SHA")
     commit_sha = commit_sha.lower()
     effective_limits = limits if limits is not None else SnapshotLimits()

@@ -111,9 +111,3 @@ class SQLiteRepositoryBindingRepository(RepositoryBindingRepository):
             query += " ORDER BY namespace, workload_kind, workload_name, priority DESC"
             rows = await (await conn.execute(query, params)).fetchall()
             return [_binding(row) for row in rows]
-
-    async def delete_binding(self, binding_id: int) -> bool:
-        async with self.db_manager.connection_scope() as conn:
-            cursor = await conn.execute("DELETE FROM repository_bindings WHERE id = ?", (binding_id,))
-            await conn.commit()
-            return cursor.rowcount > 0

@@ -241,6 +241,7 @@ def _application(repo_url: str = "https://github.example.test/acme/gitops.git") 
         },
         "status": {
             "sync": {"revision": "a" * 40},
+            "sourceType": "Directory",
             "resources": [
                 {
                     "group": "apps",

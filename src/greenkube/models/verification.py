@@ -1,9 +1,10 @@
 """Typed inputs produced by the Phase 5 verification pipeline."""
 
 from datetime import datetime, timezone
-from typing import Optional
+from enum import Enum
+from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class KubernetesHealthObservation(BaseModel):
@@ -25,22 +26,54 @@ class KubernetesHealthObservation(BaseModel):
         return self.ready_pods / self.total_pods
 
 
-class TrafficSeasonalityControl(BaseModel):
-    """Factors used to make before/after measurements comparable."""
+class WorkloadHealthObservation(BaseModel):
+    """Health signals observed over a verification window (C0.9).
 
-    before_traffic: Optional[float] = None
-    after_traffic: Optional[float] = None
-    seasonality_factor: float = Field(1.0, gt=0)
+    ``None`` means the signal was not available (no kube-state-metrics, no CPU
+    limit, Prometheus unreachable...). It is reported as ``not_available`` by
+    the matching health gate, never silently treated as a pass.
+    """
 
-    @property
-    def traffic_ratio(self) -> Optional[float]:
-        if self.before_traffic is None or self.before_traffic <= 0 or self.after_traffic is None:
-            return None
-        return self.after_traffic / self.before_traffic
+    oom_kill_count: Optional[int] = None
+    #: Container restarts whose termination was ``OOMKilled``, summed over pods (the unit of
+    #: ``evidence.oom_events``); ``oom_kill_count`` counts pods with a kill (H1).
+    oom_restart_count: Optional[int] = None
+    readiness_ratio: Optional[float] = None
+    throttling_ratio: Optional[float] = None
+    source: str = "prometheus"
+    pod_count: int = 0
+    notes: List[str] = Field(default_factory=list)
+
+
+class HealthGateStatus(str, Enum):
+    """Result of one verification health gate."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_AVAILABLE = "not_available"
+
+
+class HealthGateResult(BaseModel):
+    """One evaluated health gate, persisted with the measurement and the event payload."""
+
+    gate: str
+    status: HealthGateStatus
+    value: Optional[float] = None
+    threshold: Optional[float] = None
+    detail: str = ""
+    #: The same signal over the baseline window, when the gate was compared with it (MEA-07).
+    baseline_value: Optional[float] = None
 
 
 class MeasuredLedgerInput(BaseModel):
-    """Auditable, measured values used when attributing verified savings."""
+    """Auditable, measured values used when attributing verified savings.
+
+    ``traffic_ratio`` is no longer written since network collection was removed
+    (B.4); it stays so that older ledger inputs still load. ``before_*`` and
+    ``after_*`` rates are the claimed basis of the recommendation (its cost
+    component or its share of an attribution group), not necessarily the whole
+    workload.
+    """
 
     before_cost_per_hour: Optional[float] = None
     after_cost_per_hour: Optional[float] = None
@@ -49,4 +82,35 @@ class MeasuredLedgerInput(BaseModel):
     sample_count: int = 0
     readiness_ratio: Optional[float] = None
     traffic_ratio: Optional[float] = None
-    seasonality_factor: float = 1.0
+    measurement_id: Optional[str] = None
+    group_id: Optional[str] = None
+    outcome: Optional[str] = None
+    cost_outcome: Optional[str] = None
+    co2e_outcome: Optional[str] = None
+    cost_basis: Optional[str] = None
+    measurement_scope: Optional[str] = None
+    baseline_window_start: Optional[datetime] = None
+    baseline_window_end: Optional[datetime] = None
+    after_window_start: Optional[datetime] = None
+    after_window_end: Optional[datetime] = None
+
+
+class RemeasureRequest(BaseModel):
+    """Body of ``POST /recommendations/{id}/remeasure`` (C0.5)."""
+
+    reason: Optional[str] = Field(None, max_length=500, description="Why a new measurement is requested.")
+
+
+class DismissRollbackReviewRequest(BaseModel):
+    """Body of ``POST /recommendations/{id}/rollback-review/dismiss`` (C0.11)."""
+
+    reason: str = Field(..., min_length=1, max_length=500, description="Why the health finding is a false positive.")
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        """A whitespace-only reason is no reason: reject it (422) and store the trimmed text."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("reason must not be blank")
+        return stripped

@@ -77,24 +77,6 @@ def lifecycle_client(sqlite_repos):
         app.dependency_overrides.clear()
 
 
-def _make_zombie_metrics() -> list[CombinedMetric]:
-    """Build metrics that will generate a ZOMBIE_POD recommendation."""
-    now = datetime.now(timezone.utc)
-    return [
-        CombinedMetric(
-            pod_name="zombie-pod",
-            namespace="staging",
-            total_cost=0.50,
-            co2e_grams=0.1,
-            joules=50.0,  # Very low energy despite cost → zombie
-            timestamp=now,
-            pue=1.2,
-            grid_intensity=100.0,
-            cpu_usage_millicores=0,
-        )
-    ]
-
-
 def _make_oversized_cpu_metrics() -> list[CombinedMetric]:
     """Build a time-series of metrics for a CPU-oversized pod."""
     now = datetime.now(timezone.utc)
@@ -102,6 +84,7 @@ def _make_oversized_cpu_metrics() -> list[CombinedMetric]:
 
     return [
         CombinedMetric(
+            restart_count=0,
             pod_name="oversized-cpu",
             namespace="production",
             total_cost=1.0,
@@ -124,18 +107,6 @@ def _make_oversized_cpu_metrics() -> list[CombinedMetric]:
 
 class TestNativeAnalyzersGenerateFromMetrics:
     """The native analyzers correctly identify issues in CombinedMetric data."""
-
-    def test_zombie_detected_from_combined_metrics(self):
-        """ZOMBIE_POD recommendation is generated from metrics with cost but no energy."""
-        recommender = NativeRecommender()
-        recs = recommender.generate_recommendations(_make_zombie_metrics())
-
-        zombie_recs = [r for r in recs if r.type == RecommendationType.ZOMBIE_POD]
-        assert len(zombie_recs) == 1
-        assert zombie_recs[0].pod_name == "zombie-pod"
-        assert zombie_recs[0].namespace == "staging"
-        assert zombie_recs[0].potential_savings_cost is not None
-        assert zombie_recs[0].potential_savings_cost > 0
 
     def test_cpu_rightsizing_detected_from_combined_metrics(self):
         """RIGHTSIZING_CPU recommendation is generated from consistently low-usage metrics."""
@@ -160,22 +131,22 @@ class TestRecommendationRecordConversion:
     def test_record_carries_all_recommendation_fields(self):
         """All fields from Recommendation are reflected in RecommendationRecord."""
         recommender = NativeRecommender()
-        recs = recommender.generate_recommendations(_make_zombie_metrics())
-        zombie_rec = next(r for r in recs if r.type == RecommendationType.ZOMBIE_POD)
+        recs = recommender.generate_recommendations(_make_oversized_cpu_metrics())
+        cpu_rec = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU)
 
-        record = RecommendationRecord.from_recommendation(zombie_rec)
+        record = RecommendationRecord.from_recommendation(cpu_rec)
 
-        assert record.pod_name == zombie_rec.pod_name
-        assert record.namespace == zombie_rec.namespace
-        assert record.type == zombie_rec.type
-        assert record.priority == zombie_rec.priority
-        assert record.potential_savings_cost == zombie_rec.potential_savings_cost
+        assert record.pod_name == cpu_rec.pod_name
+        assert record.namespace == cpu_rec.namespace
+        assert record.type == cpu_rec.type
+        assert record.priority == cpu_rec.priority
+        assert record.potential_savings_cost == cpu_rec.potential_savings_cost
         assert record.status == RecommendationStatus.ACTIVE
 
     def test_record_default_status_is_active(self):
         """Freshly created records must have ACTIVE status."""
         recommender = NativeRecommender()
-        recs = recommender.generate_recommendations(_make_zombie_metrics())
+        recs = recommender.generate_recommendations(_make_oversized_cpu_metrics())
         record = RecommendationRecord.from_recommendation(recs[0])
 
         assert record.status == RecommendationStatus.ACTIVE
@@ -183,7 +154,7 @@ class TestRecommendationRecordConversion:
     def test_record_has_created_at_timestamp(self):
         """created_at is set and UTC-aware."""
         recommender = NativeRecommender()
-        recs = recommender.generate_recommendations(_make_zombie_metrics())
+        recs = recommender.generate_recommendations(_make_oversized_cpu_metrics())
         record = RecommendationRecord.from_recommendation(recs[0])
 
         assert record.created_at is not None
@@ -204,7 +175,7 @@ class TestRecommendationPersistence:
         _, _, _, reco_repo = sqlite_repos
 
         recommender = NativeRecommender()
-        recs = recommender.generate_recommendations(_make_zombie_metrics())
+        recs = recommender.generate_recommendations(_make_oversized_cpu_metrics())
         records = [RecommendationRecord.from_recommendation(r) for r in recs]
 
         count = await reco_repo.save_recommendations(records)
@@ -563,3 +534,12 @@ class TestRecommendationLifecycleTransitions:
         # Check that savings summary reflects the applied data
         resp = client.get("/api/v1/recommendations/savings")
         assert resp.status_code == 200
+
+
+@pytest.fixture(autouse=True)
+def _no_decrease_coverage_gate(monkeypatch):
+    """These fixtures span hours, not weeks: disable the one-week coverage gate for
+    request decreases (E9), which tests/core/optimization/test_two_way_rightsizing.py covers."""
+    monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")
+    # Same for the observed-idle span of zombie deletions (tests/core/optimization/test_deletion_safety.py).
+    monkeypatch.setenv("DELETION_MIN_UNUSED_DAYS", "0")

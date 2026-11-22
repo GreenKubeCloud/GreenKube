@@ -41,6 +41,7 @@ from greenkube.automation.plan_runtime import (
 )
 from greenkube.automation.plan_worker import GitProviderTarget, RegistryPlanProviderResolver
 from greenkube.automation.plans import AutomationPlanError, AutomationPlanService, GitBlobFile
+from greenkube.automation.policy import AutomationPolicyConfig as _PolicyConfig
 from greenkube.automation.rollback import ONE_TIME_HELM_VALUES_MAPPING_EVIDENCE_KEY
 from greenkube.core.optimization.applied_detector import K8sWorkloadReader
 from greenkube.gitops.contracts import (
@@ -64,7 +65,15 @@ from greenkube.gitops.renderers.raw import render_raw
 from greenkube.gitops.snapshots import RepositorySnapshot, SnapshotLimits
 from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
-from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, WorkloadBinding
+from greenkube.storage.base_gitops_repository import (
+    GitOpsProviderConfig,
+    WorkloadBinding,
+    WorkloadPlanConflictError,
+    WorkloadPlanGuard,
+)
+
+#: These tests run without live discovery evidence; the default fails closed (D13).
+WARN_ON_MISSING_EVIDENCE = _PolicyConfig(missing_evidence="warn")
 
 TOKEN = "never-log-this-provider-token"
 REVISION = "a" * 40
@@ -142,6 +151,37 @@ def test_chart_provider_json_accepts_only_the_derived_token_file_path():
         parse_gitops_providers_json(json.dumps([provider]))
 
 
+def test_provider_json_accepts_a_public_gitea_web_base_url():
+    value = json.loads(_provider_json())
+    value["providers"][0].update(
+        {
+            "type": "gitea",
+            "webBaseUrl": "https://gitea.example.test",
+        }
+    )
+
+    parsed = parse_gitops_providers_json(json.dumps(value))
+
+    assert parsed[0].web_base_url == "https://gitea.example.test"
+
+
+@pytest.mark.parametrize(
+    "web_base_url",
+    [
+        "ftp://gitea.example.test",
+        "https://user:password@gitea.example.test",
+        "https://gitea.example.test/greenkube",
+        "https://gitea.example.test?token=secret",
+    ],
+)
+def test_provider_json_rejects_invalid_gitea_web_base_urls(web_base_url):
+    value = json.loads(_provider_json())
+    value["providers"][0].update({"type": "gitea", "webBaseUrl": web_base_url})
+
+    with pytest.raises(PlanRuntimeConfigurationError, match="web base URL"):
+        parse_gitops_providers_json(json.dumps(value))
+
+
 def test_unresolved_discovery_provider_id_is_reserved():
     value = json.loads(_provider_json())
     value["providers"][0]["id"] = "unresolved"
@@ -150,9 +190,10 @@ def test_unresolved_discovery_provider_id_is_reserved():
         parse_gitops_providers_json(json.dumps(value))
 
 
-def test_pull_request_options_use_documented_defaults_and_validate_the_schema():
+def test_pull_request_options_use_repository_agnostic_defaults_and_validate_the_schema():
     defaults = parse_pull_request_options_json(None)
     assert defaults == PullRequestOptions()
+    assert defaults.labels == ()
 
     configured = parse_pull_request_options_json(
         json.dumps(
@@ -281,6 +322,14 @@ async def test_production_composition_shares_typed_repositories_and_authorized_s
     )
     assert runtime.plan_service.worker is runtime.worker
     assert isinstance(runtime.plan_service._plan_service.planner, RawManifestPlanner)
+    # D14 / BUG-54: Kustomize rollback is wired to the planner's sandboxed renderer.
+    from greenkube.automation.rollback import KustomizeRollbackRenderer
+    from greenkube.gitops.renderers.sandbox import SandboxRunner
+
+    rollback_renderer = runtime.plan_service._rollback_renderer
+    assert isinstance(rollback_renderer, KustomizeRollbackRenderer)
+    assert rollback_renderer._renderer is runtime.plan_service._plan_service.kustomize_planner.renderer
+    assert isinstance(rollback_renderer._renderer._runner, SandboxRunner)
     assert runtime.plan_service._plan_service.operation_enqueuer is operations
     assert gitops.allowlists["github-main"] == {"acme/gitops", "acme/platform"}
 
@@ -357,6 +406,34 @@ async def test_empty_provider_registry_disables_and_clears_removed_providers():
     assert result == ()
     assert repository.configs[configured.config.id].enabled is False
     assert repository.allowlists[configured.config.id] == set()
+
+
+def test_inferred_provider_ids_are_reserved():
+    raw = json.loads(_provider_json())
+    raw["providers"][0]["id"] = "inferred-github.com"
+
+    with pytest.raises(PlanRuntimeConfigurationError, match="reserved"):
+        parse_gitops_providers_json(json.dumps(raw))
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_leaves_inferred_providers_to_the_readiness_reconciler():
+    """F12: a controller restart must not disable the providers inferred from discovery,
+    or previews fail until the next readiness tick."""
+    repository = MemoryGitOpsRepository()
+    inferred = GitOpsProviderConfig(
+        id="inferred-github.com",
+        provider_type="github",
+        secret_name="greenkube-git-credentials",
+        secret_key="token",
+    )
+    await repository.save_provider_config(inferred)
+    repository.allowlists[inferred.id].add("acme/gitops")
+
+    await initialize_gitops_provider_configs(repository=repository, config_json='{"providers":[]}')
+
+    assert repository.configs[inferred.id].enabled is True
+    assert repository.allowlists[inferred.id] == {"acme/gitops"}
 
 
 def test_mounted_secret_resolver_names_the_expected_scoped_mount_without_reading_values():
@@ -835,6 +912,7 @@ async def test_api_plan_service_uses_only_persisted_recommendation_and_resolved_
     snapshot_resolver = SnapshotResolver()
     plan_service = PlanService()
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=Bindings(),
         cluster="prod",
@@ -854,7 +932,7 @@ async def test_api_plan_service_uses_only_persisted_recommendation_and_resolved_
         "path": ["app", "resources"],
     }
     assert (
-        await service.create_plan(
+        await service.prepare_plan(
             [41],
             values_mapping=mapping if renderer is RendererKind.HELM_VALUES else None,
         )
@@ -876,13 +954,13 @@ async def test_api_plan_service_uses_only_persisted_recommendation_and_resolved_
             current_source.model_copy(update={"renderer_config": {"values_files": ["apps/payments/other.yaml"]}}),
         )
         with pytest.raises(AutomationPlanError) as invalid_file:
-            await service.create_plan(
+            await service.prepare_plan(
                 [41],
                 values_mapping={**mapping, "file_path": "apps/payments/other.yaml"},
             )
         assert invalid_file.value.code is AutomationErrorCode.UNSUPPORTED_SOURCE
         with pytest.raises(AutomationPlanError) as forged_identity:
-            await service.create_plan([41], values_mapping={**mapping, "repo_url": "https://attacker.invalid/repo"})
+            await service.prepare_plan([41], values_mapping={**mapping, "repo_url": "https://attacker.invalid/repo"})
         assert forged_identity.value.code is AutomationErrorCode.UNSUPPORTED_SOURCE
         assert len(snapshot_resolver.snapshots) == 1
 
@@ -891,7 +969,7 @@ async def test_api_plan_service_uses_only_persisted_recommendation_and_resolved_
             "mapping needed",
         )
         with pytest.raises(AutomationPlanError) as error:
-            await service.create_plan([41])
+            await service.prepare_plan([41])
         assert error.value.code is AutomationErrorCode.NEEDS_CHART_MAPPING
         assert error.value.mapping_options == {
             "files": ["apps/payments/values.yaml"],
@@ -899,7 +977,7 @@ async def test_api_plan_service_uses_only_persisted_recommendation_and_resolved_
         }
         assert snapshot_resolver.snapshots[-1].closed
     with pytest.raises(TypeError):
-        await service.create_plan([41], source=source)  # type: ignore[call-arg]
+        await service.prepare_plan([41], source=source)  # type: ignore[call-arg]
 
 
 @pytest.mark.asyncio
@@ -984,6 +1062,7 @@ async def test_single_requested_recommendation_resolves_full_persisted_group():
 
     recommendation_repository = Recommendations()
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, recommendation_repository),
         binding_repository=Bindings(),
         cluster="prod",
@@ -1096,6 +1175,7 @@ async def test_api_plan_service_snapshots_helm_sources_and_dispatches_to_plan_se
 
     plan_service = PlanService()
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=Bindings(),
         cluster="prod",
@@ -1129,6 +1209,7 @@ async def test_runtime_plan_service_forwards_transition_audit_metadata():
             return None
 
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, object()),
         binding_repository=cast(Any, object()),
         cluster="prod",
@@ -1326,6 +1407,7 @@ spec:
     plan_service = PlanService()
     snapshot_resolver = SnapshotResolver()
     unconfigured_service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=Bindings(),
         cluster="prod",
@@ -1337,7 +1419,19 @@ spec:
     assert error.value.code is AutomationErrorCode.ROLLBACK_UNSUPPORTED
     assert snapshot_resolver.calls == 0
 
+    # A plan service with a Kustomize planner supplies the exact adapter itself (D14).
+    from greenkube.automation.plan_runtime import kustomize_rollback_renderer
+    from greenkube.automation.rollback import KustomizeRollbackRenderer
+    from greenkube.gitops.planning.kustomize import KustomizePlanner
+
+    planner_backed = SimpleNamespace(planners={RendererKind.KUSTOMIZE: KustomizePlanner()})
+    derived = kustomize_rollback_renderer(planner_backed)
+    assert isinstance(derived, KustomizeRollbackRenderer)
+    assert derived._renderer is planner_backed.planners[RendererKind.KUSTOMIZE].renderer
+    assert kustomize_rollback_renderer(SimpleNamespace(planners={})) is None
+
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=Bindings(),
         cluster="prod",
@@ -1524,6 +1618,7 @@ spec:
     class PlanRepository:
         def __init__(self):
             self.plans = {original_plan.plan_id: original_plan}
+            self.guards: list[WorkloadPlanGuard] = []
 
         async def get_plan(self, plan_id: str):
             return self.plans.get(plan_id)
@@ -1556,6 +1651,21 @@ spec:
             if existing is not None:
                 return existing
             return await self.save_plan(plan, policy_result=policy_result)
+
+        async def save_plan_if_workload_idle(
+            self,
+            plan: Plan,
+            guard: WorkloadPlanGuard,
+            *,
+            policy_result: dict[str, Any] | None = None,
+            actor: str = "system",
+        ) -> Plan:
+            # Rollback creation repeats the busy check atomically with the insert.
+            self.guards.append(guard)
+            for other in self.plans.values():
+                if other.plan_id != plan.plan_id and guard.blocks(other.plan_id, other.status):
+                    raise WorkloadPlanConflictError(other.plan_id, other.status)
+            return await self.save_plan_if_absent(plan, policy_result=policy_result)
 
         async def set_plan_status(
             self,
@@ -1617,6 +1727,7 @@ spec:
     )
     snapshot_resolver = SnapshotResolver()
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=Bindings(),
         cluster="prod",
@@ -1639,6 +1750,10 @@ spec:
     assert rollback_plan.file_plan.base_revision == current_revision
     assert rollback_plan.file_plan.files[0].content == original_content
     assert blobs.calls == [(source.id, path, original_revision)]
+    # The SYNCED original is tolerated by the atomic per-workload guard; any other busy plan is not.
+    assert len(repository.guards) == 1
+    assert not repository.guards[0].blocks(original_plan.plan_id, PlanStatus.SYNCED)
+    assert repository.guards[0].blocks("other-plan", PlanStatus.APPLYING)
     assert snapshot.closed
     assert queue.keys == []
 
@@ -1654,3 +1769,28 @@ spec:
     assert error.value.code is AutomationErrorCode.ROLLBACK_NOT_READY
     assert blobs.calls == [(source.id, path, original_revision)]
     assert snapshot_resolver.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_the_verification_of_an_unchanged_connection():
+    repository = MemoryGitOpsRepository()
+    configured = parse_gitops_providers_json(_provider_json())[0]
+    checked_at = datetime.now(timezone.utc)
+    await repository.save_provider_config(
+        replace(configured.config, capabilities={"stale": True}, status="verified", last_checked_at=checked_at)
+    )
+
+    # Only the capabilities changed: the endpoint and credential that were verified are the same.
+    await reconcile_gitops_providers(repository, [configured])
+    kept = repository.configs[configured.config.id]
+    assert (kept.status, kept.last_checked_at, kept.capabilities) == (
+        "verified",
+        checked_at,
+        configured.config.capabilities,
+    )
+
+    # A new endpoint must be verified again by a real call.
+    moved = replace(configured, config=replace(configured.config, api_base_url="https://api.other.test"))
+    await reconcile_gitops_providers(repository, [moved])
+    reset = repository.configs[configured.config.id]
+    assert (reset.status, reset.last_checked_at) == ("unverified", None)

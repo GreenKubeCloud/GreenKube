@@ -47,6 +47,106 @@ tests:
       - matchRegex:
           path: spec.groups[0].rules[0].expr
           pattern: 'queue="operations",state="stuck"'
+      - lengthEqual:
+          path: spec.groups
+          count: 2
+
+  - it: should render the controller loop alerts when the controller is scraped
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/prometheusrule.yaml
+    asserts:
+      - equal:
+          path: spec.groups[1].name
+          value: greenkube.controller
+      - equal:
+          path: spec.groups[1].rules[0].alert
+          value: GreenKubeControllerLoopFailing
+      - equal:
+          path: spec.groups[1].rules[1].alert
+          value: GreenKubeAutomationLoopStale
+      - equal:
+          path: spec.groups[1].rules[2].alert
+          value: GreenKubeNoActiveController
+      - matchRegex:
+          path: spec.groups[1].rules[0].annotations.description
+          pattern: '\{\{ \$labels.loop \}\}'
+      - equal:
+          path: spec.groups[3].rules[0].alert
+          value: GreenKubeLedgerChainVerificationFailed
+      - equal:
+          path: spec.groups[3].rules[0].expr
+          value: min by (cluster_uid) (greenkube_ledger_chain_ok) == 0
+      - equal:
+          path: spec.groups[3].rules[1].alert
+          value: GreenKubeLedgerProjectionBacklog
+      - equal:
+          path: spec.groups[3].rules[1].expr
+          value: max by (source_table) (greenkube_ledger_unprojected_rows) > 0
+      - matchRegex:
+          path: spec.groups[3].rules[1].annotations.description
+          pattern: '\{\{ \$labels.source_table \}\}'
+      - equal:
+          path: spec.groups[3].rules[2].alert
+          value: GreenKubeLedgerReconciliationFailed
+      - equal:
+          path: spec.groups[3].rules[2].expr
+          value: min by (cluster_uid) (greenkube_ledger_reconciliation_ok) == 0
+      - equal:
+          path: spec.groups[3].rules[3].alert
+          value: GreenKubeAttributionClockSkew
+      - equal:
+          path: spec.groups[3].rules[3].expr
+          value: sum(increase(greenkube_attribution_errors_total{reason="clock_skew"}[1h])) > 0
+      - equal:
+          path: spec.groups[3].rules[4].alert
+          value: GreenKubeAccrualWatermarkAhead
+      - equal:
+          path: spec.groups[3].rules[4].expr
+          value: max by (cluster_name) (greenkube_accrual_watermark_ahead_seconds) > 0
+      - equal:
+          path: spec.groups[3].rules[5].alert
+          value: GreenKubeLedgerChainKeyDropped
+      - equal:
+          path: spec.groups[3].rules[5].expr
+          value: max_over_time(greenkube_ledger_chain_head_keyed[30d]) == 1 and greenkube_ledger_chain_head_keyed == 0
+      - equal:
+          path: spec.groups[3].rules[5].labels.severity
+          value: critical
+
+  - it: should leave the controller loop alerts out when disabled
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.controllerAlerts: false
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/prometheusrule.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.groups
+          count: 3
+      # The ledger integrity group renders whenever a process is scraped.
+      - equal:
+          path: spec.groups[1].name
+          value: greenkube.ledger
+
+  - it: should leave the controller loop alerts out when the controller metrics port is off
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: true
+      collector.metricsPort: 0
+    templates:
+      - templates/prometheusrule.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.groups
+          count: 3
+      # The ledger integrity group renders whenever a process is scraped.
+      - equal:
+          path: spec.groups[1].name
+          value: greenkube.ledger
 
   - it: should render ServiceMonitor when enabled
     set:
@@ -89,28 +189,47 @@ tests:
           path: spec.endpoints[0].interval
           value: 1m
 
-  - it: ServiceMonitor should include the label relabeling rules
+  - it: ServiceMonitor restores only the exported cluster label and defaults an empty one
     set:
       monitoring.serviceMonitor.enabled: true
     templates:
       - templates/servicemonitor.yaml
     asserts:
-      - isNotEmpty:
+      - lengthEqual:
           path: spec.endpoints[0].metricRelabelings
+          count: 3
+      - equal:
+          path: spec.endpoints[0].metricRelabelings[0]
+          value:
+            sourceLabels: [exported_cluster]
+            targetLabel: cluster
+            regex: (.+)
+            action: replace
+      - equal:
+          path: spec.endpoints[0].metricRelabelings[1]
+          value:
+            regex: exported_cluster
+            action: labeldrop
+      - equal:
+          path: spec.endpoints[0].metricRelabelings[2].replacement
+          value: default
+      - notMatchRegexRaw:
+          pattern: exported_(namespace|pod|region)
 
-  - it: ServiceMonitor should authenticate with the generated API key by default
+  - it: ServiceMonitor should authenticate with the generated scrape token by default
     set:
       monitoring.serviceMonitor.enabled: true
     templates:
       - templates/servicemonitor.yaml
     asserts:
-      - isNotEmpty:
+      - equal:
           path: spec.endpoints[0].authorization.credentials.name
+          value: RELEASE-NAME-greenkube
       - equal:
           path: spec.endpoints[0].authorization.credentials.key
-          value: GREENKUBE_API_KEY
+          value: GREENKUBE_METRICS_TOKEN
 
-  - it: ServiceMonitor should not render when API is disabled
+  - it: ServiceMonitor still renders with the deprecated config.api.enabled false (the API is always deployed)
     set:
       monitoring.serviceMonitor.enabled: true
       config.api.enabled: false
@@ -118,9 +237,9 @@ tests:
       - templates/servicemonitor.yaml
     asserts:
       - hasDocuments:
-          count: 0
+          count: 1
 
-  - it: ServiceMonitor should use the API key as bearer token when configured
+  - it: ServiceMonitor never scrapes with a supplied admin API key when a scrape token exists
     set:
       monitoring.serviceMonitor.enabled: true
       secrets.apiKey: test-key
@@ -132,7 +251,35 @@ tests:
           value: Bearer
       - equal:
           path: spec.endpoints[0].authorization.credentials.key
-          value: GREENKUBE_API_KEY
+          value: GREENKUBE_METRICS_TOKEN
+
+  - it: ServiceMonitor uses a scrape token supplied in values
+    set:
+      monitoring.serviceMonitor.enabled: true
+      secrets.metricsToken: scrape
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: RELEASE-NAME-greenkube-values
+            key: GREENKUBE_METRICS_TOKEN
+
+  - it: ServiceMonitor falls back to the API key without RBAC to generate a scrape token
+    set:
+      monitoring.serviceMonitor.enabled: true
+      rbac.create: false
+      secrets.apiKey: test-key
+      postgres.auth.password: pw
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: RELEASE-NAME-greenkube-values
+            key: GREENKUBE_API_KEY
 
   - it: ServiceMonitor should use existingSecret for bearer credentials
     set:
@@ -205,6 +352,7 @@ tests:
       monitoring.networkPolicy.enabled: true
     templates:
       - templates/networkpolicy.yaml
+    documentIndex: 0
     asserts:
       - equal:
           path: spec.ingress[0].ports[0].port
@@ -223,9 +371,10 @@ tests:
               port: 8000
     templates:
       - templates/networkpolicy.yaml
+    documentIndex: 0
     asserts:
       - equal:
-          path: spec.ingress[2].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          path: spec.ingress[1].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
           value: ingress-nginx
 
   - it: NetworkPolicy should allow DNS and bundled PostgreSQL egress without broad internet access
@@ -267,20 +416,19 @@ tests:
               port: 443
     templates:
       - templates/networkpolicy.yaml
+    documentIndex: 0
     asserts:
       - equal:
-          path: spec.egress[2].to[0].ipBlock.cidr
+          path: spec.egress[3].to[0].ipBlock.cidr
           value: 203.0.113.0/24
       - equal:
-          path: spec.egress[2].ports[0].port
+          path: spec.egress[3].ports[0].port
           value: 443
 
-  - it: NetworkPolicy should cover production API, controller, and worker pods
+  - it: NetworkPolicy should cover the API, controller and worker pods
     set:
-      profile: production
-      automation.enabled: true
+      worker.replicas: 1
       monitoring.networkPolicy.enabled: true
-      automation.mode: worker
     templates:
       - templates/networkpolicy.yaml
     asserts:
@@ -297,7 +445,7 @@ tests:
       - documentIndex: 2
         equal:
           path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
-          value: automation
+          value: worker
       - documentIndex: 2
         equal:
           path: spec.ingress[0].ports[0].port
@@ -306,53 +454,16 @@ tests:
         equal:
           path: spec.egress[1].to[0].podSelector.matchLabels["app.kubernetes.io/component"]
           value: postgres
-
-  - it: NetworkPolicy should include standalone worker pods without requiring an API
-    set:
-      monitoring.networkPolicy.enabled: true
-      automation.enabled: true
-      automation.mode: worker
-      config.api.enabled: false
-    templates:
-      - templates/networkpolicy.yaml
-    asserts:
-      - hasDocuments:
-          count: 2
-      - documentIndex: 0
+      - documentIndex: 2
         equal:
-          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
-          value: app
-      - documentIndex: 1
-        equal:
-          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
-          value: automation-worker
-      - documentIndex: 1
-        equal:
-          path: spec.ingress[0].ports[0].port
-          value: 8001
-
-  - it: NetworkPolicy should still protect the production controller when API is disabled
-    set:
-      monitoring.networkPolicy.enabled: true
-      profile: production
-      config.api.enabled: false
-      automation.enabled: false
-    templates:
-      - templates/networkpolicy.yaml
-    asserts:
-      - hasDocuments:
-          count: 1
-      - equal:
-          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
-          value: controller
+          path: spec.egress[2].to[0].podSelector.matchLabels["app.kubernetes.io/component"]
+          value: renderer-sandbox
 
   - it: NetworkPolicy names should remain unique with a long release name
     set:
-      profile: production
       fullnameOverride: greenkube-component-networkpolicy-name-long-long-long-long-long
       monitoring.networkPolicy.enabled: true
-      automation.enabled: true
-      automation.mode: worker
+      worker.replicas: 1
     templates:
       - templates/networkpolicy.yaml
     asserts:
@@ -367,4 +478,4 @@ tests:
       - documentIndex: 2
         matchRegex:
           path: metadata.name
-          pattern: "-automation-netpol$"
+          pattern: "-worker-netpol$"

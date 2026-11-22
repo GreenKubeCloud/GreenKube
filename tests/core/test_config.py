@@ -3,7 +3,9 @@
 Tests for the Config class, particularly the _get_secret method.
 """
 
+import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -58,11 +60,37 @@ class TestElectricityProviderConfig:
 
 
 class TestAutomationRuntimeConfig:
-    def test_automation_defaults_to_disabled(self):
+    def test_automation_is_always_on_by_default(self):
+        """F12: no feature flag; delivery is on unless pauseDelivery is set."""
         with patch.dict(os.environ, {}, clear=True):
             cfg = Config()
-        assert not cfg.AUTOMATION_ENABLED
-        assert cfg.AUTOMATION_MODE == "disabled"
+        assert cfg.AUTOMATION_ENABLED is None
+        assert cfg.AUTOMATION_MODE is None
+        assert cfg.automation_delivery_paused is False
+        assert cfg.automation_repository_allowlist == ("@discovered",)
+        assert cfg.GITOPS_DEFAULT_CREDENTIALS_SECRET == "greenkube-git-credentials"
+        assert cfg.DB_RUN_MIGRATIONS is True
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"AUTOMATION_PAUSE_DELIVERY": "true"},
+            {"AUTOMATION_ENABLED": "false"},
+            {"AUTOMATION_ENABLED": "true", "AUTOMATION_MODE": "disabled"},
+        ],
+    )
+    def test_pause_delivery_and_its_deprecated_aliases(self, env):
+        with patch.dict(os.environ, env, clear=True):
+            assert Config().automation_delivery_paused is True
+
+    def test_repository_allowlist_accepts_json_and_comma_lists(self):
+        with patch.dict(os.environ, {"AUTOMATION_REPOSITORY_ALLOWLIST": '["acme/*", "@discovered"]'}, clear=True):
+            assert Config().automation_repository_allowlist == ("acme/*", "@discovered")
+        with patch.dict(os.environ, {"AUTOMATION_REPOSITORY_ALLOWLIST": "acme/a, acme/b"}, clear=True):
+            assert Config().automation_repository_allowlist == ("acme/a", "acme/b")
+        with patch.dict(os.environ, {"AUTOMATION_REPOSITORY_ALLOWLIST": '["bad pattern"]'}, clear=True):
+            with pytest.raises(ValueError, match="AUTOMATION_REPOSITORY_ALLOWLIST"):
+                Config()
 
     def test_inline_mode_is_normalized(self):
         with patch.dict(
@@ -108,6 +136,89 @@ class TestLeaderElectionConfig:
             cfg = Config(_env_file=None)
         assert cfg.LEADER_ELECTION_LEASE_NAME == "greenkube-leader"
         assert cfg.LEADER_ELECTION_LEASE_NAMESPACE == "greenkube"
+
+
+class TestChangeMeasurementWindowConfig:
+    """Windows below the minimum are clamped up with a warning, never a startup failure (MEA-10 review)."""
+
+    @pytest.mark.parametrize("value", ["3", "6.9"])
+    def test_a_baseline_shorter_than_a_week_is_clamped(self, value, caplog):
+        with patch.dict(os.environ, {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value}, clear=True):
+            with caplog.at_level(logging.WARNING):
+                assert Config(_env_file=None).CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == 7.0
+        assert "CHANGE_MEASUREMENT_PRE_WINDOW_DAYS" in caplog.text
+
+    def test_a_zero_baseline_is_still_invalid(self):
+        with patch.dict(os.environ, {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": "0"}, clear=True):
+            with pytest.raises(ValueError):
+                Config(_env_file=None)
+
+    @pytest.mark.parametrize("value", ["7", "14"])
+    def test_a_baseline_of_at_least_a_week_is_accepted(self, value):
+        with patch.dict(os.environ, {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value}, clear=True):
+            assert Config(_env_file=None).CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == float(value)
+
+    @pytest.mark.parametrize("value", ["0.25", "0.0417", "1"])
+    def test_accelerated_demo_windows_accept_a_baseline_of_at_least_an_hour(self, value):
+        env = {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value, "CHANGE_MEASUREMENT_ACCELERATED": "true"}
+        with patch.dict(os.environ, env, clear=True):
+            assert Config(_env_file=None).CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == float(value)
+
+    @pytest.mark.parametrize("value", ["0.01", "0.04"])
+    def test_accelerated_demo_windows_clamp_less_than_an_hour(self, value):
+        env = {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value, "CHANGE_MEASUREMENT_ACCELERATED": "true"}
+        with patch.dict(os.environ, env, clear=True):
+            assert Config(_env_file=None).CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == pytest.approx(1 / 24)
+
+    @pytest.mark.parametrize("value", ["0.025", "1", "3", "4.9"])
+    def test_a_post_window_too_short_for_a_verdict_is_clamped(self, value, caplog):
+        """MEA-10: a verdict needs 5 days of aligned post-window hours; a shorter window is raised to 5 days."""
+        with patch.dict(os.environ, {"CHANGE_MEASUREMENT_POST_WINDOW_DAYS": value}, clear=True):
+            with caplog.at_level(logging.WARNING):
+                assert Config(_env_file=None).CHANGE_MEASUREMENT_POST_WINDOW_DAYS == 5.0
+        assert "CHANGE_MEASUREMENT_POST_WINDOW_DAYS" in caplog.text
+
+    @pytest.mark.parametrize(("value", "expected"), [("0.025", 0.025), ("0.05", 0.05), ("0.01", 1 / 48)])
+    def test_accelerated_post_windows_need_thirty_minutes(self, value, expected):
+        env = {
+            "CHANGE_MEASUREMENT_POST_WINDOW_DAYS": value,
+            "CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": "0.25",
+            "CHANGE_MEASUREMENT_ACCELERATED": "true",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            assert Config(_env_file=None).CHANGE_MEASUREMENT_POST_WINDOW_DAYS == pytest.approx(expected)
+
+    def test_importing_the_config_with_a_three_day_post_window_starts(self):
+        """The module-level ``config = Config()`` runs at import: a once-valid value must not stop GreenKube."""
+        import subprocess
+
+        env = {key: value for key, value in os.environ.items() if not key.startswith("CHANGE_MEASUREMENT_")}
+        env["CHANGE_MEASUREMENT_POST_WINDOW_DAYS"] = "3"
+        code = "from greenkube.core.config import config; print(config.CHANGE_MEASUREMENT_POST_WINDOW_DAYS)"
+        result = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120, check=False
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert result.stdout.strip().splitlines()[-1] == "5.0"
+        assert "CHANGE_MEASUREMENT_POST_WINDOW_DAYS" in result.stderr
+
+    def test_acceleration_is_off_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config(_env_file=None)
+        assert cfg.CHANGE_MEASUREMENT_ACCELERATED is False
+        assert cfg.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == 7.0
+
+
+class TestLedgerConfig:
+    def test_chain_verification_runs_hourly_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            assert Config(_env_file=None).LEDGER_CHAIN_VERIFY_INTERVAL == "1h"
+
+    @pytest.mark.parametrize("value", ["30s", "25h", "1d", "soon"])
+    def test_invalid_chain_verification_intervals_are_rejected(self, value):
+        with patch.dict(os.environ, {"LEDGER_CHAIN_VERIFY_INTERVAL": value}, clear=True):
+            with pytest.raises(ValueError, match="LEDGER_CHAIN_VERIFY_INTERVAL"):
+                Config(_env_file=None)
 
 
 class TestRecommendationApplyToleranceConfig:
@@ -274,3 +385,39 @@ class TestGitOpsDiscoveryConfig:
         with patch.dict(os.environ, {"GITOPS_BINDING_TTL": "25h"}, clear=True):
             with pytest.raises(ValueError, match="GITOPS_BINDING_TTL"):
                 Config(_env_file=None)
+
+
+class TestSecretFilesForAliasedFields:
+    """Secret files reach fields declared with a validation alias (e2e: scrape token ignored)."""
+
+    def test_metrics_token_and_api_key_are_read_from_secret_files(self):
+        files = {"GREENKUBE_METRICS_TOKEN": "scrape-token", "GREENKUBE_API_KEY": "bootstrap-key"}
+
+        def read_secret(key, default=None):
+            return files.get(key, default)
+
+        with patch.dict(os.environ, {}, clear=True), patch("greenkube.core.config._read_secret", read_secret):
+            cfg = Config(_env_file=None)
+
+        assert cfg.METRICS_TOKEN == "scrape-token"
+        assert cfg.API_KEY == "bootstrap-key"
+
+
+def test_gpu_assumed_utilization_defaults_to_half(monkeypatch):
+    monkeypatch.delenv("GPU_ASSUMED_UTILIZATION_PCT", raising=False)
+    assert Config().GPU_ASSUMED_UTILIZATION_PCT == 50.0
+    monkeypatch.setenv("GPU_ASSUMED_UTILIZATION_PCT", "80")
+    assert Config().GPU_ASSUMED_UTILIZATION_PCT == 80.0
+
+
+def test_a_leftover_setting_of_a_removed_feature_does_not_break_startup():
+    """Settings of removed features no longer exist: a leftover variable is ignored (extra="ignore")."""
+    with patch.dict(
+        os.environ,
+        {"ZOMBIE_COST_THRESHOLD": "0.5", "RECOMMENDATION_CONSENSUS_POLICY": "median", "LOG_LEVEL": "DEBUG"},
+        clear=True,
+    ):
+        cfg = Config(_env_file=None)
+    assert cfg.LOG_LEVEL == "DEBUG"
+    assert not hasattr(cfg, "ZOMBIE_COST_THRESHOLD")
+    assert not hasattr(cfg, "RECOMMENDATION_CONSENSUS_POLICY")

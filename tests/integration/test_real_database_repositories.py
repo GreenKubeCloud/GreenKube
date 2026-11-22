@@ -186,10 +186,6 @@ def _metric(
         memory_request=512 * 1024 * 1024,
         cpu_usage_millicores=120,
         memory_usage_bytes=256 * 1024 * 1024,
-        network_receive_bytes=10.0,
-        network_transmit_bytes=20.0,
-        disk_read_bytes=30.0,
-        disk_write_bytes=40.0,
         restart_count=1,
         owner_kind="Deployment",
         owner_name=f"{pod_name}-deployment",
@@ -336,7 +332,7 @@ async def _insert_hourly_metric(
             (
                 pod_name,
                 namespace,
-                hour_bucket.isoformat(),
+                hour_bucket.strftime("%Y-%m-%dT%H:%M:%SZ"),  # the stored format of hour buckets
                 3,
                 total_cost,
                 co2e_grams,
@@ -532,8 +528,8 @@ async def test_container_metrics_compression_keeps_sibling_containers_separate(r
         ]
     )
 
-    await MetricsCompressor(real_database.manager)._compress_to_hourly()
-    hourly = await repo.read_container_metrics_smart(timestamp, timestamp, namespace="prod")
+    await MetricsCompressor(real_database.manager, collection_watermark_provider=None)._compress_to_hourly()
+    hourly = await repo.read_container_metrics_smart(timestamp, timestamp + timedelta(hours=1), namespace="prod")
 
     assert {metric.container_name for metric in hourly} == {"web", "telemetry-sidecar"}
     assert {metric.container_name: metric.cpu_request for metric in hourly} == {"web": 500, "telemetry-sidecar": 100}
@@ -598,17 +594,19 @@ async def test_combined_metrics_repository_reads_hourly_rollups(real_database: R
     invalid_json_row = next(metric for metric in all_hourly if metric.pod_name == "worker-hourly")
     assert invalid_json_row.estimation_reasons == []
 
-    summary = await repo.aggregate_summary(old_window_start, old_window_end, namespace="prod")
+    summary = await repo.aggregate_summary(old_hour, old_hour + timedelta(hours=1), namespace="prod")
     assert summary["total_co2e_grams"] == pytest.approx(12.0)
     assert summary["total_embodied_co2e_grams"] == pytest.approx(1.5)
     assert summary["pod_count"] == 1
 
-    timeseries = await repo.aggregate_timeseries(old_window_start, old_window_end, granularity="week", namespace="prod")
+    timeseries = await repo.aggregate_timeseries(
+        old_hour, old_hour + timedelta(hours=1), granularity="week", namespace="prod"
+    )
     assert len(timeseries) == 1
     assert timeseries[0]["co2e_grams"] == pytest.approx(12.0)
     assert timeseries[0]["energy_joules"] == pytest.approx(1200.0)
 
-    by_namespace = await repo.aggregate_by_namespace(old_window_start, old_window_end, namespace="prod")
+    by_namespace = await repo.aggregate_by_namespace(old_hour, old_hour + timedelta(hours=1), namespace="prod")
     assert by_namespace == [
         {
             "namespace": "prod",
@@ -619,7 +617,7 @@ async def test_combined_metrics_repository_reads_hourly_rollups(real_database: R
         }
     ]
 
-    top_pods = await repo.aggregate_top_pods(old_window_start, old_window_end, namespace="prod", limit=5)
+    top_pods = await repo.aggregate_top_pods(old_hour, old_hour + timedelta(hours=1), namespace="prod", limit=5)
     assert len(top_pods) == 1
     assert top_pods[0]["pod_name"] == "api-hourly"
     assert top_pods[0]["co2e_grams"] == pytest.approx(12.0)
@@ -714,28 +712,36 @@ async def test_recommendation_repository_lifecycle_round_trip(real_database: Rea
     assert savings.total_carbon_saved_co2e_grams == pytest.approx(30.0)
     assert savings.total_cost_saved == pytest.approx(2.0)
 
-    drifted_observation = record.model_copy(
+    # A later scan regenerating the same identity (from the hourly rollup, which
+    # can still carry the pre-change request) never rewrites the applied change.
+    regenerated = record.model_copy(
         update={
-            "description": "Observed after drift",
+            "description": "Regenerated after the change",
             "current_cpu_request_millicores": 400,
             "recommended_cpu_request_millicores": 250,
         }
     )
-    assert await repo.upsert_recommendations([drifted_observation]) == 1
+    # Absorbed by the applied change: nothing is written (REC-01).
+    assert await repo.upsert_recommendations([regenerated]) == 0
     assert await repo.get_active_recommendations(namespace="prod") == []
+    assert applied.id is not None
+    kept = await repo.get_recommendation_by_id(applied.id)
+    assert kept is not None
+    assert kept.actual_cpu_request_millicores == 300
+    assert kept.current_cpu_request_millicores == applied.current_cpu_request_millicores
 
     refreshed_savings = await repo.get_savings_summary(
         namespace="prod", start=now - timedelta(hours=1), end=now + timedelta(hours=1)
     )
     assert refreshed_savings.applied_count == 1
-    assert refreshed_savings.total_carbon_saved_co2e_grams == pytest.approx(16.8)
-    assert refreshed_savings.total_cost_saved == pytest.approx(1.4)
+    assert refreshed_savings.total_carbon_saved_co2e_grams == pytest.approx(30.0)
+    assert refreshed_savings.total_cost_saved == pytest.approx(2.0)
 
     future_savings = await repo.get_savings_summary(
         namespace="prod", start=now + timedelta(days=30), end=now + timedelta(days=31)
     )
     assert future_savings.applied_count == 1
-    assert future_savings.total_carbon_saved_co2e_grams == pytest.approx(16.8)
+    assert future_savings.total_carbon_saved_co2e_grams == pytest.approx(30.0)
 
     ignored_seed = _recommendation_record(
         pod_name="worker-pod",
@@ -910,7 +916,8 @@ async def test_summary_and_timeseries_cache_repositories_upsert(real_database: R
 
 @pytest.mark.asyncio
 @pytest.mark.database
-async def test_savings_ledger_repository_keeps_totals_across_compression(real_database: RealDatabase):
+async def test_savings_ledger_repository_keeps_every_row(real_database: RealDatabase):
+    """The ledger is append-only: old rows stay readable and totals never shrink (C0.6, BUG-32)."""
     repo = real_database.savings_repository()
     now = datetime.now(timezone.utc).replace(microsecond=0)
     records = [
@@ -921,7 +928,7 @@ async def test_savings_ledger_repository_keeps_totals_across_compression(real_da
             recommendation_type="RIGHTSIZING_CPU",
             co2e_saved_grams=4.0,
             cost_saved_dollars=1.0,
-            timestamp=now - timedelta(hours=30),
+            timestamp=now - timedelta(days=30),
         ),
         SavingsLedgerRecord(
             recommendation_id=2,
@@ -935,16 +942,13 @@ async def test_savings_ledger_repository_keeps_totals_across_compression(real_da
     ]
 
     assert await repo.save_records(records) == 2
+    assert await repo.save_records(records) == 0
     totals = await repo.get_cumulative_totals("contract-cluster")
     assert totals["RIGHTSIZING_CPU"]["co2e_saved_grams"] == pytest.approx(10.0)
 
-    assert await repo.compress_to_hourly(cutoff_hours=24) >= 1
-    compressed_totals = await repo.get_cumulative_totals("contract-cluster")
-    assert compressed_totals["RIGHTSIZING_CPU"]["co2e_saved_grams"] == pytest.approx(10.0)
-
     window_totals = await repo.get_window_totals(
         "contract-cluster",
-        now - timedelta(hours=48),
+        now - timedelta(days=31),
         now,
         namespace="prod",
     )

@@ -16,6 +16,7 @@ from greenkube.gitops.contracts import (
     ResourceTarget,
     WorkloadSource,
     canonical_repository_identity,
+    same_repository,
 )
 from greenkube.gitops.discovery.common import (
     SUPPORTED_WORKLOAD_KINDS,
@@ -30,6 +31,7 @@ from greenkube.gitops.discovery.common import (
     text,
     workload_source,
 )
+from greenkube.gitops.sha import SHA256_DIGEST
 
 _API_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
 _KIND_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
@@ -37,6 +39,7 @@ _DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _DNS_SUBDOMAIN_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 _SOURCE_KINDS = frozenset({"Bucket", "GitRepository", "HelmRepository", "OCIRepository"})
 _VALUES_KINDS = frozenset({"ConfigMap", "Secret"})
+_REMOTE_CHART_SOURCE_KINDS = frozenset({"HelmRepository", "OCIRepository"})
 
 
 @dataclass(frozen=True)
@@ -177,6 +180,7 @@ def discover_flux_kustomization(
     target_namespace = text(spec.get("targetNamespace"))
     if target_namespace is not None:
         renderer_config["target_namespace"] = target_namespace
+    renderer_config.update(_flux_build_overrides(spec))
 
     candidates: list[WorkloadSource] = []
     seen_inventory_ids: set[str] = set()
@@ -284,6 +288,28 @@ def discover_flux_kustomization(
                 )
             )
     return candidates
+
+
+def _flux_build_overrides(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Report the Kustomization fields that change Flux's build output.
+
+    The Kustomize planner reproduces ``namePrefix``/``nameSuffix`` and guards
+    ``postBuild`` substitution; it fails closed on Flux ``patches``, ``images`` and
+    ``components``, which Flux applies after GreenKube's overlay patch.
+    """
+    overrides: dict[str, Any] = {}
+    for spec_field, key in (("namePrefix", "name_prefix"), ("nameSuffix", "name_suffix")):
+        value = spec.get(spec_field)
+        if value is not None and value != "":
+            overrides[key] = value
+    post_build = spec.get("postBuild")
+    if post_build is not None and post_build != {}:
+        overrides["post_build"] = True
+    for spec_field in ("patches", "images", "components"):
+        value = spec.get(spec_field)
+        if value not in (None, [], {}, ""):
+            overrides[spec_field] = deepcopy(value)
+    return overrides
 
 
 def discover_flux_helm_release_manifest_source(
@@ -733,6 +759,8 @@ def discover_flux_helm_release(
         "values_from": values_from,
         "post_renderers": post_renderers,
     }
+    if len(source_resolution.sources) == 1 and source_resolution.sources[0].kind in _REMOTE_CHART_SOURCE_KINDS:
+        config["chart"].update(_remote_chart_deployment(status, source_resolution.sources[0]))
     if chart_source.chart_ref is not None:
         chart_ref_config = deepcopy(chart_source.chart_ref)
         if chart_source.chart_ref_uid is not None:
@@ -990,12 +1018,34 @@ def _source_stub(
     )
 
 
+def _remote_chart_deployment(status: Mapping[str, Any], flux_source: _FluxSource) -> dict[str, str]:
+    """The exact chart version (and OCI digest) Flux last deployed, so plans render exactly that chart."""
+    result: dict[str, str] = {}
+    history = status.get("history")
+    latest = as_mapping(history[0]) if isinstance(history, list) and history else None
+    version = text(latest.get("chartVersion")) if latest is not None else None
+    version = version or text(status.get("lastAttemptedRevision"))
+    if version is None and flux_source.kind == "OCIRepository" and flux_source.ref not in ("HEAD", "UNRESOLVED"):
+        version = flux_source.ref  # the OCIRepository tag; the planner renders it only when exact
+    if version is not None:
+        result["resolved_version"] = version.partition("@")[0]
+    digest = text(status.get("lastAttemptedRevisionDigest"))
+    if digest is None and flux_source.kind == "OCIRepository" and flux_source.artifact_revision is not None:
+        digest = flux_source.artifact_revision.rpartition("@")[2]
+    if digest is not None and SHA256_DIGEST.fullmatch(digest.lower()) and flux_source.kind == "OCIRepository":
+        result["digest"] = digest.lower()
+    return result
+
+
 def _chart_source_snapshot_reason(flux_source: _FluxSource, owner: Mapping[str, str]) -> str | None:
+    if flux_source.kind in _REMOTE_CHART_SOURCE_KINDS:
+        # Remote charts are pre-fetched by the controller and digest-verified at plan time (H2).
+        return None if flux_source.repo_url is not None else "chart-source-url-unresolved"
     if flux_source.kind != "GitRepository":
         return "remote-chart-not-in-snapshot"
     if flux_source.repo_url is None:
         return "chart-source-url-unresolved"
-    if canonical_repository_identity(flux_source.repo_url) != canonical_repository_identity(owner["repo_url"]):
+    if not same_repository(flux_source.repo_url, owner["repo_url"]):
         return "chart-source-not-in-snapshot"
     source_revision = flux_source.revision
     owner_revision = immutable_revision(owner.get("revision"))
@@ -1015,9 +1065,7 @@ def _validate_values_from_snapshot_locations(
         if value_source.get("git_managed") is not True:
             continue
         repo_url = text(value_source.get("repo_url"))
-        if repo_url is None or canonical_repository_identity(repo_url) != canonical_repository_identity(
-            manifest_location["repo_url"]
-        ):
+        if repo_url is None or not same_repository(repo_url, manifest_location["repo_url"]):
             return "values-source-not-in-snapshot"
         if value_source.get("ref") != manifest_location.get("ref"):
             return "values-source-ref-mismatch"

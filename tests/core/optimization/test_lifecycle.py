@@ -128,6 +128,7 @@ class TestLifecycleVerification:
         await repo.save_recommendations([_record()])
         rec_id = (await repo.get_active_recommendations())[0].id
         lifecycle = RecommendationLifecycle(repo)
+        await lifecycle.apply(rec_id, actual_cpu=300)
         now = datetime.now(timezone.utc)
 
         updated = await lifecycle.mark_verified(
@@ -185,7 +186,10 @@ class TestLifecycleVerification:
         assert updated.baseline is not None
         baseline = updated.baseline.model_dump()
         assert baseline["restart_count"] == 0
-        assert "measured_ledger_input" not in baseline
+        # The measured input is kept for audit (C0.13, BUG-37).
+        assert baseline["measured_ledger_input"] == {"sample_count": 10}
+        events = await repo.get_events(record.id)
+        assert events[-1].event_type == "inconclusive"
 
 
 class TestLifecycleRollback:

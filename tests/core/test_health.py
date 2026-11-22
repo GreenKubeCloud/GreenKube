@@ -236,7 +236,7 @@ class TestCheckOpenCost:
             result = await check_opencost(config)
 
         assert result.discovered is True
-        probe.assert_awaited_once_with("http://discovered-opencost:9003", configured=False, discovered=True)
+        probe.assert_awaited_once_with("http://discovered-opencost:9003", configured=False, discovered=True, cfg=config)
 
     @pytest.mark.asyncio
     async def test_discovery_exception_returns_unconfigured(self, monkeypatch):

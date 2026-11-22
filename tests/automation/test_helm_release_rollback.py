@@ -11,6 +11,7 @@ from ruamel.yaml import YAML
 
 from greenkube.automation.plan_runtime import RuntimePlanService
 from greenkube.automation.plans import AutomationPlanService, GitBlobFile
+from greenkube.automation.policy import AutomationPolicyConfig as _PolicyConfig
 from greenkube.automation.rollback import (
     FluxHelmReleaseRollbackRenderer,
     RollbackConflictError,
@@ -38,6 +39,9 @@ from greenkube.gitops.snapshots import RepositorySnapshot, snapshot_from_files
 from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.storage.base_gitops_repository import WorkloadBinding
+
+#: These tests run without live discovery evidence; the default fails closed (D13).
+WARN_ON_MISSING_EVIDENCE = _PolicyConfig(missing_evidence="warn")
 
 BASE_REVISION = "a" * 40
 CURRENT_REVISION = "b" * 40
@@ -607,6 +611,7 @@ async def test_flux_helm_release_runtime_persists_a_revision_bound_rollback_prev
         operation_enqueuer=cast(Any, queue),
     )
     runtime = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=cast(Any, Bindings()),
         cluster=current_source.cluster,

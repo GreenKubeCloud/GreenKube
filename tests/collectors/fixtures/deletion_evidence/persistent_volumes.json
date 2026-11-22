@@ -1,0 +1,125 @@
+{
+    "apiVersion": "v1",
+    "kind": "List",
+    "metadata": {"resourceVersion": ""},
+    "items": [
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolume",
+            "metadata": {
+                "annotations": {"pv.kubernetes.io/provisioned-by": "ebs.csi.aws.com"},
+                "finalizers": ["kubernetes.io/pv-protection"],
+                "name": "pvc-0b7f6c1e-3d2a-4e9b-a1c8-5f4d3e2b1a09",
+                "uid": "e1d2c3b4-a596-4877-8695-a4b3c2d1e0f9"
+            },
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "capacity": {"storage": "100Gi"},
+                "claimRef": {"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "reports-archive", "namespace": "finance", "uid": "0b7f6c1e-3d2a-4e9b-a1c8-5f4d3e2b1a09"},
+                "csi": {"driver": "ebs.csi.aws.com", "fsType": "ext4", "volumeHandle": "vol-0a1b2c3d4e5f60718"},
+                "persistentVolumeReclaimPolicy": "Retain",
+                "storageClassName": "gp3-retain",
+                "volumeMode": "Filesystem"
+            },
+            "status": {"phase": "Released"}
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolume",
+            "metadata": {"name": "nfs-reserved-for-ci", "uid": "a0a0a0a0-1111-4222-8333-444455556666"},
+            "spec": {
+                "accessModes": ["ReadWriteMany"],
+                "capacity": {"storage": "500Gi"},
+                "claimRef": {"name": "ci-cache", "namespace": "ci"},
+                "nfs": {"path": "/exports/ci", "server": "10.0.0.20"},
+                "persistentVolumeReclaimPolicy": "Retain",
+                "storageClassName": ""
+            },
+            "status": {"phase": "Available"}
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolume",
+            "metadata": {"name": "pvc-5a5a5a5a-6b6b-4c7c-8d8d-9e9e9e9e9e9e", "uid": "b1b1b1b1-2222-4333-8444-555566667777"},
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "capacity": {"storage": "20Gi"},
+                "claimRef": {"name": "data-postgres-0", "namespace": "db"},
+                "csi": {"driver": "pd.csi.storage.gke.io", "volumeHandle": "projects/p/zones/europe-west1-b/disks/pvc-5a5a"},
+                "persistentVolumeReclaimPolicy": "Retain",
+                "storageClassName": "standard-rwo"
+            },
+            "status": {"phase": "Released"}
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolume",
+            "metadata": {"name": "pvc-6c6c6c6c-7d7d-4e8e-9f9f-0a0a0a0a0a0a", "uid": "c2c2c2c2-3333-4444-8555-666677778888"},
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "capacity": {"storage": "50Gi"},
+                "claimRef": {"name": "ledger", "namespace": "finance"},
+                "csi": {"driver": "ebs.csi.aws.com", "volumeHandle": "vol-0ffeeddccbbaa9988"},
+                "persistentVolumeReclaimPolicy": "Retain",
+                "storageClassName": "gp3-retain"
+            },
+            "status": {"phase": "Released"}
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolume",
+            "metadata": {
+                "annotations": {"local.path.provisioner/selected-node": "worker-1", "pv.kubernetes.io/provisioned-by": "rancher.io/local-path"},
+                "name": "pvc-7e7e7e7e-8f8f-4a9a-8b0b-1c1c1c1c1c1c",
+                "uid": "d3d3d3d3-4444-4555-8666-777788889999"
+            },
+            "spec": {
+                "capacity": {"storage": "8Gi"},
+                "claimRef": {"name": "scratch", "namespace": "dev"},
+                "hostPath": {"path": "/opt/local-path-provisioner/pvc-7e7e_dev_scratch", "type": "DirectoryOrCreate"},
+                "persistentVolumeReclaimPolicy": "Retain",
+                "storageClassName": "local-path"
+            },
+            "status": {"phase": "Released"}
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolume",
+            "metadata": {"name": "pvc-8f8f8f8f-9a9a-4b0b-8c1c-2d2d2d2d2d2d", "uid": "e4e4e4e4-5555-4666-8777-88889999aaaa"},
+            "spec": {
+                "capacity": {"storage": "10Gi"},
+                "claimRef": {"name": "web-cache", "namespace": "shop"},
+                "csi": {"driver": "ebs.csi.aws.com", "volumeHandle": "vol-0123456789abcdef0"},
+                "persistentVolumeReclaimPolicy": "Delete",
+                "storageClassName": "gp3"
+            },
+            "status": {"phase": "Bound"}
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {"name": "web-cache", "namespace": "shop"},
+            "spec": {"volumeName": "pvc-8f8f8f8f-9a9a-4b0b-8c1c-2d2d2d2d2d2d"},
+            "status": {"phase": "Bound"}
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "StatefulSet",
+            "metadata": {"name": "postgres", "namespace": "db"},
+            "spec": {
+                "persistentVolumeClaimRetentionPolicy": {"whenDeleted": "Retain", "whenScaled": "Delete"},
+                "replicas": 0,
+                "serviceName": "postgres",
+                "template": {"metadata": {"labels": {"app": "postgres"}}},
+                "volumeClaimTemplates": [{"metadata": {"name": "data"}, "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "20Gi"}}}}]
+            }
+        },
+        {
+            "apiVersion": "snapshot.storage.k8s.io/v1",
+            "kind": "VolumeSnapshot",
+            "metadata": {"name": "ledger-2026-10-31", "namespace": "finance"},
+            "spec": {"source": {"persistentVolumeClaimName": "ledger"}, "volumeSnapshotClassName": "ebs-snapclass"},
+            "status": {"boundVolumeSnapshotContentName": "snapcontent-31a2", "readyToUse": true}
+        }
+    ]
+}

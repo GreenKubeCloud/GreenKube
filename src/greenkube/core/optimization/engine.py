@@ -1,29 +1,125 @@
 # src/greenkube/core/optimization/engine.py
 """The unified optimization engine.
 
-Single orchestration path for recommendation generation and persistence. API,
-startup scan and CLI all delegate here; only the CLI skips persistence.
+Single orchestration path for recommendation generation and persistence. The
+controller's scheduled ``recommendation_scan`` job (see
+:mod:`greenkube.core.optimization.scan_service`) is the only production caller
+that persists; API requests only enqueue runs.
+
+Sources are Source SDK sources (:mod:`greenkube.signals`, roadmap E5): one per
+native analyzer, VPA and third-party plugins. v1
+``RecommendationSource`` connectors passed by callers are wrapped by the SDK
+adapter. Every source runs in isolation (E8) through the
+:class:`~greenkube.signals.runtime.SourceRunner`: a source that raises, times
+out, is unavailable, rate limited, circuit-broken or reports an incomplete
+result never blocks persistence of the others and never marks its previous
+recommendations stale. Each source's run and signals are recorded in
+``source_runs``/``source_signals`` when a signal repository is configured.
 """
 
+import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, List, Optional, Sequence
+import weakref
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
 
-from greenkube.core.optimization.actions import build_action_plans
+from greenkube.core.optimization.actions import build_action_plans, may_build_action_plans
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.context_builder import ContextBuilder
-from greenkube.core.optimization.dedup import finalize_recommendations
-from greenkube.core.optimization.enrich import enrich_recommendations
+from greenkube.core.optimization.dedup import (
+    RESOURCE_FIELDS,
+    apply_consensus_assessment,
+    apply_revision_hysteresis,
+    consensus_refiner,
+    entries_for_reports,
+    finalize_entries,
+)
+from greenkube.core.optimization.enrich import enrich_recommendations, rescore_with_track_record
 from greenkube.core.optimization.evidence import build_patch
 from greenkube.core.optimization.providers.base import RecommendationSource
-from greenkube.core.optimization.registry import build_sources
-from greenkube.models.metrics import Recommendation, RecommendationPatchV2, RecommendationRecord, RecommendationType
+from greenkube.core.optimization.registry import build_signal_sources, cluster_uid
+from greenkube.core.optimization.targeting import is_static_pod_kind
+from greenkube.core.recommendation_reconciliation import RecommendationDiff, compute_diff, supporting_sources
+from greenkube.models.metrics import (
+    RETIRED_RECOMMENDATION_TYPES,
+    Recommendation,
+    RecommendationPatchV2,
+    RecommendationRecord,
+    RecommendationType,
+)
+from greenkube.models.optimization_run import (
+    OptimizationRun,
+    OptimizationRunCompletion,
+    OptimizationRunStatus,
+    OptimizationRunTrigger,
+    SourceRunOutcome,
+    SourceRunStatus,
+)
+from greenkube.models.recommendation_v2 import with_v2_fields
+from greenkube.models.workload_usage import POD_LEVEL
+from greenkube.signals.adapters import adapt_recommendation_source, observed_window, workload_inventory
+from greenkube.signals.consensus import KIND_REQUEST_RESOURCES
+from greenkube.signals.runtime import SourceReport, SourceRunner, SourceRunRecord, legacy_outcomes
+from greenkube.signals.sdk import CollectContext, Source, SourceDeps
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
-    from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
+    from greenkube.storage.base_optimization_run_repository import OptimizationRunRepository
+    from greenkube.storage.base_repository import (
+        CombinedMetricsRepository,
+        NodeRepository,
+        RecommendationRepository,
+        UpsertOutcome,
+    )
+    from greenkube.storage.base_signal_repository import SignalRepository
 
 logger = logging.getLogger(__name__)
+
+#: Bound on a source availability probe (Kubernetes discovery calls).
+SOURCE_PROBE_TIMEOUT_SECONDS = 30.0
+#: Bound on one source's collection; a hung connector must not stall the scan.
+SOURCE_COLLECT_TIMEOUT_SECONDS = 300.0
+
+#: Cluster uids whose v2 backfill completed, per recommendation repository (E4).
+_V2_BACKFILLED: "weakref.WeakKeyDictionary[object, set]" = weakref.WeakKeyDictionary()
+
+
+@dataclass
+class GenerationResult:
+    """Finalized recommendations plus the health of every source that produced them."""
+
+    recommendations: List[Recommendation]
+    source_outcomes: List[SourceRunOutcome] = field(default_factory=list)
+    #: Per-source run records and signals (Source SDK granularity).
+    source_reports: List[SourceReport] = field(default_factory=list)
+
+    @property
+    def incomplete_sources(self) -> FrozenSet[str]:
+        """Sources whose result is not authoritative for reconciliation."""
+        return frozenset(outcome.source for outcome in self.source_outcomes if not outcome.complete)
+
+    @property
+    def failed_sources(self) -> List[str]:
+        """Sources that raised, timed out or returned a partial result."""
+        return [
+            outcome.source
+            for outcome in self.source_outcomes
+            if outcome.status in (SourceRunStatus.FAILED, SourceRunStatus.INCOMPLETE)
+        ]
+
+
+@dataclass
+class ScanResult:
+    """Outcome of one persisted optimization scan."""
+
+    status: OptimizationRunStatus
+    recommendations: List[Recommendation] = field(default_factory=list)
+    source_outcomes: List[SourceRunOutcome] = field(default_factory=list)
+    diff: Optional[RecommendationDiff] = None
+    run: Optional[OptimizationRun] = None
+    error: Optional[str] = None
+    source_reports: List[SourceReport] = field(default_factory=list)
 
 
 class OptimizationEngine:
@@ -32,37 +128,110 @@ class OptimizationEngine:
     def __init__(
         self,
         config: Optional["Config"] = None,
-        sources: Optional[Sequence[RecommendationSource]] = None,
-        run_repository=None,
+        sources: Optional[Sequence[Union[Source, RecommendationSource]]] = None,
+        run_repository: Optional["OptimizationRunRepository"] = None,
+        *,
+        probe_timeout_seconds: float = SOURCE_PROBE_TIMEOUT_SECONDS,
+        collect_timeout_seconds: float = SOURCE_COLLECT_TIMEOUT_SECONDS,
+        signal_repository: Optional["SignalRepository"] = None,
     ):
         from greenkube.core.config import get_config
 
         self.config = config if config is not None else get_config()
+        self.cluster_uid = cluster_uid(self.config)
+        deps = SourceDeps(config=self.config, cluster_uid=self.cluster_uid)
         if sources is None:
-            sources = build_sources(self.config)
-        self.sources: List[RecommendationSource] = list(sources)
+            sources = build_signal_sources(self.config)
+        # v1 connectors keep working: the SDK adapter wraps them.
+        self.sources: List[Source] = [
+            source if isinstance(source, Source) else adapt_recommendation_source(source, deps) for source in sources
+        ]
         self.run_repository = run_repository
+        self.signal_repository = signal_repository
+        self.probe_timeout_seconds = probe_timeout_seconds
+        self.collect_timeout_seconds = collect_timeout_seconds
+        self.runner = SourceRunner(
+            probe_timeout_cap=probe_timeout_seconds,
+            collect_timeout_cap=collect_timeout_seconds,
+            on_failure=self._record_source_failure,
+        )
+        # Compatibility view of the last ``generate`` call; scans use the
+        # returned ``GenerationResult`` instead of shared instance state.
         self.failed_sources: List[str] = []
+        self.source_outcomes: List[SourceRunOutcome] = []
 
     async def generate(self, context: OptimizationContext) -> List[Recommendation]:
         """Runs every available source and returns deduplicated recommendations."""
-        recs: List[Recommendation] = []
-        self.failed_sources = []
-        for source in self.sources:
-            source_name = getattr(source, "name", repr(source))
-            try:
-                if not await source.is_available():
-                    logger.debug("Recommendation source '%s' is not available; skipping.", source_name)
-                    continue
-                recs.extend(await source.collect(context))
-            except Exception:
-                logger.exception("Recommendation source '%s' failed; continuing without it.", source_name)
-                self.failed_sources.append(source_name)
-                from greenkube.core.observability import record_analyzer_failure
+        result = await self.collect(context)
+        self.failed_sources = result.failed_sources
+        self.source_outcomes = result.source_outcomes
+        return result.recommendations
 
-                record_analyzer_failure(source_name)
-        finalized = finalize_recommendations(recs, self.config)
-        return enrich_recommendations(finalized, context, self.config)
+    @property
+    def source_group_count(self) -> int:
+        """Number of v1 sources (native analyzers count as one: ``greenkube``)."""
+        return len({type(source).legacy_source or source.source_id for source in self.sources})
+
+    def collect_context(self, context: OptimizationContext) -> CollectContext:
+        """What every source receives for this scan."""
+        # The inventory walks the usage snapshot: build it only for sources
+        # that do not already read the optimization context (plugins).
+        needs_inventory = any(type(source).legacy_source is None for source in self.sources)
+        return CollectContext(
+            cluster_uid=self.cluster_uid,
+            namespace=context.namespace,
+            window=observed_window(context),
+            deadline=datetime.now(timezone.utc) + timedelta(seconds=self.collect_timeout_seconds),
+            inventory=workload_inventory(context, self.cluster_uid)
+            if needs_inventory
+            else workload_inventory(None, ""),
+            optimization=context,
+        )
+
+    async def collect(self, context: OptimizationContext) -> GenerationResult:
+        """Runs every source in isolation and builds one recommendation per target by consensus (E6)."""
+        previous = await self._previous_source_runs()
+        reports = await self.runner.run_all(self.sources, self.collect_context(context), previous)
+        finalized = finalize_entries(
+            entries_for_reports(reports, self.cluster_uid),
+            self.config,
+            refine=consensus_refiner(context),
+        )
+        enriched = apply_consensus_assessment(enrich_recommendations(finalized, context, self.config), self.config)
+        return GenerationResult(
+            enriched,
+            legacy_outcomes(reports),
+            reports,
+        )
+
+    async def _previous_source_runs(self) -> Dict[str, SourceRunRecord]:
+        """Each source's last persisted run (circuit breaker and rate limit across scans and restarts)."""
+        if self.signal_repository is None:
+            return {}
+        try:
+            summaries = await self.signal_repository.latest_runs()
+        except Exception as exc:
+            logger.warning("Could not read previous source runs (%s); using in-process state.", type(exc).__name__)
+            return {}
+        return {source_id: summary.latest for source_id, summary in summaries.items()}
+
+    async def record_source_runs(self, reports: List[SourceReport], run: Optional[OptimizationRun]) -> None:
+        """Persist each source's run and signals; a storage error never fails the scan."""
+        if self.signal_repository is None:
+            return
+        run_id = run.id if run is not None else None
+        for report in reports:
+            record = report.run.model_copy(update={"optimization_run_id": run_id})
+            try:
+                report.run = await self.signal_repository.record_run(record, report.signals)
+            except Exception as exc:
+                logger.warning("Could not record the run of source '%s' (%s).", report.source_id, type(exc).__name__)
+
+    @staticmethod
+    def _record_source_failure(source_name: str) -> None:
+        from greenkube.core.observability import record_analyzer_failure
+
+        record_analyzer_failure(source_name)
 
     async def build_context(
         self,
@@ -79,102 +248,355 @@ class OptimizationEngine:
         node_repo: "NodeRepository",
         reco_repo: "RecommendationRepository",
         namespace: Optional[str] = None,
+        run: Optional[OptimizationRun] = None,
     ) -> List[Recommendation]:
-        """Generates recommendations and reconciles persisted active records."""
-        context = await self.build_context(combined_repo, node_repo, namespace=namespace)
-        from greenkube.core.observability import (
-            elapsed,
-            record_recommendation_scan_resources,
-            record_run,
-            start_timer,
-        )
+        """Generates recommendations, persists them and reconciles active records.
 
-        record_recommendation_scan_resources(
-            context.analysis_window_seconds or 0.0,
-            len(context.metrics) + len(context.container_metrics),
-            _peak_resident_memory_bytes(),
-        )
+        Raises when the scan fails (context, persistence); the run, when one is
+        tracked, is marked failed first.
+        """
+        result = await self.run_scan(combined_repo, node_repo, reco_repo, namespace=namespace, run=run)
+        return result.recommendations
+
+    async def run_scan(
+        self,
+        combined_repo: "CombinedMetricsRepository",
+        node_repo: "NodeRepository",
+        reco_repo: "RecommendationRepository",
+        namespace: Optional[str] = None,
+        run: Optional[OptimizationRun] = None,
+    ) -> ScanResult:
+        """Executes one scan and records its outcome on ``run``.
+
+        ``run`` is a claimed (``running``) queue entry. Without one, a direct run
+        is recorded when the engine has a run repository.
+        """
+        from greenkube.core.observability import elapsed, record_run, start_timer
 
         timer = start_timer()
-        run = None
-        run_repository = self.run_repository
-        if run_repository is not None:
-            from greenkube.models.optimization_run import OptimizationRun
-
-            run = await run_repository.create(
-                OptimizationRun(
-                    started_at=datetime.now(timezone.utc),
-                    namespace=namespace,
-                    analyzer_count=len(self.sources),
-                )
-            )
+        await _restore_realization(reco_repo)
+        run = await self._start_run(run, namespace)
+        outcomes: List[SourceRunOutcome] = []
+        reports: List[SourceReport] = []
         try:
-            recommendations = await self.generate(context)
-            # A partial run must not mark previously valid recommendations stale.
-            if not self.failed_sources:
-                recommendations = await self.persist(recommendations, reco_repo, namespace=namespace)
-            if run is not None and run_repository is not None:
-                await run_repository.complete(
-                    run.id,
-                    status="succeeded" if not self.failed_sources else "failed",
-                    completed_at=datetime.now(timezone.utc),
-                    recommendation_count=len(recommendations),
-                    analyzer_count=len(self.sources),
-                    failed_analyzer_count=len(self.failed_sources),
-                    error=", ".join(self.failed_sources) if self.failed_sources else None,
-                )
-            record_run(
-                "succeeded" if not self.failed_sources else "failed",
-                elapsed(timer),
-                len(recommendations),
+            context = await self.build_context(combined_repo, node_repo, namespace=namespace)
+            from greenkube.core.observability import record_recommendation_scan_resources
+
+            record_recommendation_scan_resources(
+                context.analysis_window_seconds or 0.0,
+                len(context.metrics) + len(context.container_metrics),
+                _peak_resident_memory_bytes(),
             )
-        except Exception as exc:
-            if run is not None and run_repository is not None:
-                await run_repository.complete(
-                    run.id,
-                    status="failed",
-                    completed_at=datetime.now(timezone.utc),
-                    recommendation_count=0,
-                    analyzer_count=len(self.sources),
-                    failed_analyzer_count=len(self.sources),
-                    error=str(exc),
-                )
-            record_run("failed", elapsed(timer))
+            generation = await self.collect(context)
+            outcomes = generation.source_outcomes
+            reports = generation.source_reports
+            await self.record_source_runs(reports, run)
+            # Scans score with priors; fold in each source's measured track record (I3).
+            scored = await rescore_with_track_record(generation.recommendations, reco_repo, self.config)
+            diff, persisted = await self._persist(
+                scored,
+                reco_repo,
+                namespace=namespace,
+                incomplete_sources=generation.incomplete_sources,
+                reliability=ReliabilityGuard.from_context(context),
+            )
+        except BaseException as exc:
+            error = _error_text(exc)
+            run = await self._finish_run(
+                run,
+                OptimizationRunStatus.FAILED,
+                recommendations=[],
+                outcomes=outcomes,
+                diff=None,
+                error=error,
+            )
+            record_run(OptimizationRunStatus.FAILED.value, elapsed(timer))
             raise
-        return recommendations
+
+        status = _run_status(outcomes)
+        failed = [o.source for o in outcomes if o.status in (SourceRunStatus.FAILED, SourceRunStatus.INCOMPLETE)]
+        error = None
+        if failed:
+            error = "Sources failed or incomplete: " + ", ".join(sorted(failed))
+        run = await self._finish_run(
+            run,
+            status,
+            recommendations=persisted,
+            outcomes=outcomes,
+            diff=diff,
+            error=error,
+        )
+        record_run(status.value, elapsed(timer), len(persisted))
+        return ScanResult(
+            status=status,
+            recommendations=persisted,
+            source_outcomes=outcomes,
+            diff=diff,
+            run=run,
+            error=error,
+            source_reports=reports,
+        )
+
+    async def _start_run(self, run: Optional[OptimizationRun], namespace: Optional[str]) -> Optional[OptimizationRun]:
+        if run is not None or self.run_repository is None:
+            return run
+        now = datetime.now(timezone.utc)
+        return await self.run_repository.create(
+            OptimizationRun(
+                status=OptimizationRunStatus.RUNNING,
+                trigger=OptimizationRunTrigger.DIRECT,
+                requested_at=now,
+                started_at=now,
+                namespace=namespace,
+                analyzer_count=self.source_group_count,
+            )
+        )
+
+    async def _finish_run(
+        self,
+        run: Optional[OptimizationRun],
+        status: OptimizationRunStatus,
+        *,
+        recommendations: List[Recommendation],
+        outcomes: List[SourceRunOutcome],
+        diff: Optional[RecommendationDiff],
+        error: Optional[str],
+    ) -> Optional[OptimizationRun]:
+        if run is None or run.id is None or self.run_repository is None:
+            return run
+        failed_count = sum(1 for o in outcomes if o.status in (SourceRunStatus.FAILED, SourceRunStatus.INCOMPLETE))
+        if status == OptimizationRunStatus.FAILED and not outcomes:
+            failed_count = self.source_group_count
+        completion = OptimizationRunCompletion(
+            status=status,
+            completed_at=datetime.now(timezone.utc),
+            recommendation_count=len(recommendations),
+            analyzer_count=self.source_group_count,
+            failed_analyzer_count=failed_count,
+            new_count=len(diff.new) if diff is not None else None,
+            changed_count=len(diff.changed) if diff is not None else None,
+            resolved_count=len(diff.resolved) if diff is not None else None,
+            unchanged_count=len(diff.unchanged) + len(diff.retained) if diff is not None else None,
+            source_outcomes=outcomes,
+            diff=diff.to_run_diff() if diff is not None else None,
+            error=error,
+        )
+        try:
+            return await self.run_repository.finish(run.id, completion)
+        except Exception as exc:
+            logger.error("Could not record the outcome of optimization run %s: %s", run.id, exc)
+            return run
 
     async def persist(
         self,
         recommendations: List[Recommendation],
         reco_repo: "RecommendationRepository",
         namespace: Optional[str] = None,
+        incomplete_sources: FrozenSet[str] = frozenset(),
     ) -> List[Recommendation]:
-        """Upserts generated recommendations, expires overdue actives and reconciles stale ones."""
+        """Best-effort persistence for callers outside a tracked scan; errors are logged."""
         try:
-            # Expire actives whose TTL elapsed before reconciling so they are not
-            # accidentally reported as stale.
-            try:
-                from greenkube.core.optimization.lifecycle import RecommendationLifecycle
-
-                await RecommendationLifecycle(reco_repo).expire()
-            except Exception as e:
-                logger.warning("Failed to expire overdue recommendations: %s", e)
-
-            records = [RecommendationRecord.from_recommendation(r) for r in recommendations]
-            if records:
-                await reco_repo.upsert_recommendations(records)
-                await self._attach_persisted_actions(recommendations, reco_repo, namespace)
-                action_records = [
-                    RecommendationRecord.from_recommendation(recommendation)
-                    for recommendation in recommendations
-                    if recommendation.action is not None
-                ]
-                if action_records:
-                    await reco_repo.upsert_recommendations(action_records)
-            await reco_repo.reconcile_active_recommendations(records, namespace=namespace)
+            await self._persist(recommendations, reco_repo, namespace=namespace, incomplete_sources=incomplete_sources)
         except Exception as e:
             logger.error("Failed to upsert recommendation history: %s", e)
         return recommendations
+
+    async def _persist(
+        self,
+        recommendations: List[Recommendation],
+        reco_repo: "RecommendationRepository",
+        namespace: Optional[str] = None,
+        incomplete_sources: FrozenSet[str] = frozenset(),
+        reliability: Optional["ReliabilityGuard"] = None,
+    ) -> Tuple[RecommendationDiff, List[Recommendation]]:
+        """Upserts generated recommendations, expires overdue actives and reconciles stale ones.
+
+        ``reliability`` names the containers whose restart/OOM history this scan
+        could not read (REC-04). Only their records are treated specially, never
+        the whole native source group: a missing rightsizing decrease of a
+        withheld target is retired with the reason ``reliability_signals_unknown``,
+        and a missing memory increase of a container whose OOM kills are unknown
+        is kept (it may have been sized from kills this scan cannot see). Every
+        other record reconciles normally.
+
+        Returns the diff against the active set of the scanned scope and the
+        recommendations actually written (a last known record is kept instead
+        of a more aggressive proposal while one of its sources is incomplete,
+        see :meth:`_preserve_last_known`). A record the repository did not
+        write as an active row (absorbed by an applied change, held behind an
+        open pull request, or ignored) is neither returned nor in the diff
+        (REC-01). Raises on
+        repository errors so the run can be recorded as failed.
+        """
+        # Expire actives whose TTL elapsed before reconciling so they are not
+        # accidentally reported as stale.
+        try:
+            from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+
+            await RecommendationLifecycle(reco_repo).expire()
+        except Exception as e:
+            logger.warning("Failed to expire overdue recommendations: %s", e)
+
+        await self._backfill_v2_fields(reco_repo)
+        previous = await self._active_snapshot(reco_repo, namespace)
+        # Static (mirror) pods never get advice, whatever the source (F-04, REC-09); the records
+        # stored before this rule are retired with a reason, never deleted.
+        recommendations = _without_retired_types(_without_static_pods(recommendations))
+        await self._retire_withheld_decreases(
+            reco_repo, [record for record in previous if is_static_pod_kind(record.owner_kind)], reason="static_pod"
+        )
+        previous = [record for record in previous if not is_static_pod_kind(record.owner_kind)]
+        kept = self._preserve_last_known(recommendations, previous, incomplete_sources)
+        # Usage jitter below the hysteresis keeps the stored advice (no new revision, one shared action).
+        kept = apply_revision_hysteresis(kept, previous, config=self.config)
+        records = [self._record(r) for r in kept]
+        if records:
+            outcomes: List["UpsertOutcome"] = []
+            await reco_repo.upsert_recommendations(records, outcomes=outcomes)
+            kept, records = _written_only(kept, records, outcomes)
+            await self._attach_persisted_actions(kept, reco_repo, namespace)
+            action_records = [
+                self._record(recommendation) for recommendation in kept if recommendation.action is not None
+            ]
+            if action_records:
+                await reco_repo.upsert_recommendations(action_records)
+        protected: List[RecommendationRecord] = []
+        if reliability is not None:
+            retire, protected = reliability.split(previous, records)
+            await self._retire_withheld_decreases(reco_repo, retire)
+            gone, not_running = reliability.split_targets(previous, records)
+            await self._retire_withheld_decreases(reco_repo, gone, reason="target_gone")
+            protected = [*protected, *not_running]
+        await reco_repo.reconcile_active_recommendations(
+            [*records, *protected],
+            namespace=namespace,
+            incomplete_sources=sorted(incomplete_sources),
+        )
+        # A namespaced scan snapshots and reconciles that namespace only; any
+        # cluster-scoped record it emits is outside the baseline, not "new".
+        in_scope = records if namespace is None else [record for record in records if record.namespace == namespace]
+        diff = compute_diff(previous, in_scope, incomplete_sources)
+        kept_fingerprints = {record.fingerprint for record in protected}
+        if kept_fingerprints:
+            diff.retained = sorted({*diff.retained, *(fp for fp in diff.resolved if fp in kept_fingerprints)})
+            diff.resolved = [fp for fp in diff.resolved if fp not in kept_fingerprints]
+        return diff, kept
+
+    @staticmethod
+    async def _retire_withheld_decreases(
+        reco_repo: "RecommendationRepository",
+        records: Sequence[RecommendationRecord],
+        reason: str = "reliability_signals_unknown",
+    ) -> None:
+        """Marks stale, with ``reason``, the decreases withheld this scan (REC-04) or the records of
+        targets gone from the cluster (``target_gone``, REC-05), or of static pods (``static_pod``, F-04)."""
+        from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+
+        lifecycle = RecommendationLifecycle(reco_repo)
+        for record in records:
+            if record.id is None:
+                continue
+            try:
+                await lifecycle.transition(
+                    record.id,
+                    "stale",
+                    event_type="stale",
+                    payload={"reason": reason},
+                    expected_statuses=("active",),
+                )
+                logger.info("Retired recommendation %s (%s).", record.id, reason)
+            except Exception as exc:
+                logger.warning("Could not retire recommendation %s (%s): %s", record.id, reason, exc)
+
+    def _record(self, recommendation: Recommendation) -> RecommendationRecord:
+        """The persisted form of a recommendation, with its v2 identity, target and proposal (E4)."""
+        return with_v2_fields(RecommendationRecord.from_recommendation(recommendation), self.cluster_uid)
+
+    async def _backfill_v2_fields(self, reco_repo: "RecommendationRepository") -> None:
+        """Give rows written before Recommendation v2 their v2 columns (once per repository and cluster).
+
+        The engine writes the v2 columns with every record, so one successful
+        pass per process is enough; rows whose v2 view cannot be derived are
+        not scanned again on every scan.
+        """
+        try:
+            done = _V2_BACKFILLED.setdefault(reco_repo, set())
+        except TypeError:
+            done = set()
+        if self.cluster_uid in done:
+            return
+        try:
+            filled = await reco_repo.backfill_v2_fields(self.cluster_uid)
+        except Exception as exc:
+            logger.warning("Could not backfill the v2 recommendation columns (%s).", type(exc).__name__)
+            return
+        done.add(self.cluster_uid)
+        if isinstance(filled, int) and filled:
+            logger.info("Backfilled the v2 columns of %d recommendation(s).", filled)
+
+    @staticmethod
+    async def _active_snapshot(
+        reco_repo: "RecommendationRepository", namespace: Optional[str]
+    ) -> List[RecommendationRecord]:
+        """Active records before this run's writes (diff baseline and last-known lookup)."""
+        try:
+            snapshot = await reco_repo.get_active_recommendations(namespace=namespace)
+        except Exception as exc:
+            logger.warning("Could not snapshot active recommendations before persisting: %s", exc)
+            return []
+        if not isinstance(snapshot, list):
+            return []
+        return [record for record in snapshot if isinstance(record, RecommendationRecord)]
+
+    def _preserve_last_known(
+        self,
+        recommendations: List[Recommendation],
+        previous: List[RecommendationRecord],
+        incomplete_sources: FrozenSet[str],
+    ) -> List[Recommendation]:
+        """Account for the last known vote of a supporting source that is incomplete (E6, E8).
+
+        When a source that supported an active recommendation did not complete
+        this run, it is missing from the new consensus. Its last known
+        proposal (stored in the record's consensus votes) still counts, so the
+        advice does not flap with every transient outage of one connector, but
+        it never holds back a safer value:
+
+        * the new proposal is at least the previous one (a higher request, or
+          an increase replacing a decrease): the new recommendation is written;
+        * every incomplete supporter is an external source: GreenKube's
+          measured value decides the size (B.3), so their last known votes
+          could only move the confidence, and the new proposal is written;
+        * otherwise (a native supporter is incomplete and the new proposal is
+          more aggressive, or a non-numeric proposal) the last known record
+          stays until that source completes again (or expires).
+
+        A written recommendation keeps the incomplete sources among its
+        supporting sources, with their last known values in ``consensus.last_known``.
+        """
+        if not incomplete_sources or not previous:
+            return recommendations
+        previous_by_fp = {record.fingerprint: record for record in previous if record.fingerprint}
+        kept: List[Recommendation] = []
+        for recommendation in recommendations:
+            fingerprint = RecommendationRecord.from_recommendation(recommendation).fingerprint
+            before = previous_by_fp.get(fingerprint) if fingerprint else None
+            if before is not None:
+                previous_support = supporting_sources(before.source, before.sources)
+                current_support = supporting_sources(recommendation.source, recommendation.sources)
+                missing = sorted((previous_support - current_support) & set(incomplete_sources))
+                if missing:
+                    merged = _with_last_known_votes(recommendation, before, missing)
+                    if merged is None:
+                        logger.info(
+                            "Keeping last known recommendation %s while %s is incomplete.",
+                            fingerprint,
+                            ", ".join(missing),
+                        )
+                        continue
+                    recommendation = merged
+            kept.append(recommendation)
+        return kept
 
     async def _attach_persisted_actions(
         self,
@@ -183,14 +605,7 @@ class OptimizationEngine:
         namespace: Optional[str],
     ) -> None:
         """Attach v3 actions only after recommendation IDs are assigned by persistence."""
-        has_candidates = any(
-            recommendation.type in (RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY)
-            and recommendation.container_name
-            and recommendation.evidence is not None
-            and recommendation.evidence.proposed_patch is not None
-            for recommendation in recommendations
-        )
-        if not has_candidates:
+        if not may_build_action_plans(recommendations):
             return
 
         get_active = getattr(reco_repo, "get_active_recommendations", None)
@@ -227,6 +642,269 @@ class OptimizationEngine:
             recommendation.action = plan
             patch = build_patch(recommendation, plan)
             recommendation.patch = RecommendationPatchV2.model_validate(patch) if patch is not None else None
+
+
+def _last_known_values(before: RecommendationRecord, missing: Sequence[str], resource: str) -> Dict[str, int]:
+    """``{source_id: value}`` of the incomplete sources' votes in ``before``'s consensus."""
+    consensus = before.consensus if isinstance(before.consensus, dict) else {}
+    if consensus.get("resource") != resource:
+        return {}
+    values: Dict[str, int] = {}
+    for vote in consensus.get("votes") or []:
+        if not isinstance(vote, dict) or vote.get("source") not in missing:
+            continue
+        value = vote.get("value")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            source_id = str(vote.get("source_id") or vote.get("source"))
+            values[source_id] = max(int(value), values.get(source_id, int(value)))
+    return values
+
+
+def _with_last_known_votes(
+    recommendation: Recommendation,
+    before: RecommendationRecord,
+    missing: Sequence[str],
+) -> Optional[Recommendation]:
+    """``recommendation`` supported by the incomplete sources' last known votes, or None to keep ``before``.
+
+    A higher request is always the safer one (a smaller decrease, or an
+    increase that protects reliability), so it is written. A lower one is
+    written when only external sources are incomplete: their votes never set
+    the value (B.3).
+    """
+    resource = KIND_REQUEST_RESOURCES.get(str(getattr(recommendation.type, "value", recommendation.type)))
+    if resource is None:
+        return None
+    _current_field, proposed_field = RESOURCE_FIELDS[resource]
+    new_value = getattr(recommendation, proposed_field)
+    old_value = getattr(before, proposed_field)
+    if new_value is None or old_value is None:
+        return None
+    last_known = _last_known_values(before, missing, resource)
+    safer_or_equal = int(new_value) >= int(old_value)
+    externals_only = not any(unit == "greenkube" or unit.startswith("greenkube.") for unit in missing)
+    if not (safer_or_equal or externals_only):
+        return None
+    sources = list(recommendation.sources or [])
+    for unit in missing:
+        if unit not in sources:
+            sources.append(unit)
+    update: Dict[str, object] = {"sources": sources}
+    if isinstance(recommendation.consensus, dict):
+        consensus = {**recommendation.consensus, "last_known": last_known}
+        update["consensus"] = consensus
+        if recommendation.evidence is not None and recommendation.evidence.consensus is not None:
+            update["evidence"] = recommendation.evidence.model_copy(update={"consensus": consensus})
+    logger.info(
+        "Recommendation %s follows the new proposal (%s) while %s is incomplete; last known votes: %s.",
+        before.fingerprint,
+        new_value,
+        ", ".join(missing),
+        last_known or "unknown",
+    )
+    return recommendation.model_copy(update=update)
+
+
+ContainerKey = Tuple[str, str, str, str]
+
+
+def _without_static_pods(recommendations: List[Recommendation]) -> List[Recommendation]:
+    """Drops the recommendations of static (mirror) pods, from any source (F-04)."""
+    kept = [rec for rec in recommendations if not is_static_pod_kind(rec.owner_kind)]
+    if len(kept) != len(recommendations):
+        logger.info(
+            "Dropped %d recommendation(s) of static (mirror) pods: their manifests live on the node, not in Git.",
+            len(recommendations) - len(kept),
+        )
+    return kept
+
+
+def _without_retired_types(recommendations: List[Recommendation]) -> List[Recommendation]:
+    """Drops the recommendations of retired types (a plugin may still emit them): never stored again."""
+    kept = [rec for rec in recommendations if rec.type not in RETIRED_RECOMMENDATION_TYPES]
+    if len(kept) != len(recommendations):
+        logger.info("Dropped %d recommendation(s) of retired types.", len(recommendations) - len(kept))
+    return kept
+
+
+def _record_container(record: RecommendationRecord) -> ContainerKey:
+    """``(namespace, target_kind, target_name, container)`` of a rightsizing record."""
+    kind = record.owner_kind or "Pod"
+    name = record.owner_name or record.pod_name or ""
+    return (record.namespace or "", kind, name, record.container_name or "")
+
+
+def _native(record: RecommendationRecord) -> bool:
+    return any(
+        name == "greenkube" or name.startswith("greenkube.")
+        for name in supporting_sources(record.source, record.sources)
+    )
+
+
+@dataclass(frozen=True)
+class ReliabilityGuard:
+    """What a scan could not judge for lack of restart/OOM history (REC-04).
+
+    ``withheld`` holds the ``(container key, resource)`` pairs whose decrease the
+    usage called for but the analyzers withheld; ``oom_unknown`` the containers
+    whose OOM-kill count is unknown and not proven zero by the rollup.
+    """
+
+    withheld: FrozenSet[Tuple[ContainerKey, str]] = frozenset()
+    oom_unknown: FrozenSet[ContainerKey] = frozenset()
+    #: Targets confirmed gone from the cluster (REC-05): their records are retired (``target_gone``).
+    gone: FrozenSet[Tuple[str, str, str]] = frozenset()
+    #: Targets not running (scaled to zero, or liveness unknown): their native records are kept.
+    not_running: FrozenSet[Tuple[str, str, str]] = frozenset()
+
+    @classmethod
+    def from_context(cls, context: OptimizationContext) -> "ReliabilityGuard":
+        """Reads the withheld decreases and the unknown OOM histories of a scan's context."""
+        from greenkube.core.optimization.analyzers.rightsizing import known_oom_events
+
+        withheld = frozenset(
+            ((ns, kind, name, container), resource)
+            for ns, kind, name, container, resource in context.withheld_decreases
+        )
+        unknown = set()
+        try:
+            snapshot = context.usage_snapshot()
+        except Exception as exc:
+            # No snapshot: no memory increase is protected, records reconcile as usual.
+            logger.warning("Could not read the usage snapshot for the reliability guard: %s", exc)
+            snapshot = None
+        if snapshot is not None:
+            for target, containers in snapshot.summaries.items():
+                pod_summary = containers.get(POD_LEVEL)
+                for container, summary in containers.items():
+                    if known_oom_events(summary, pod_summary) is None:
+                        unknown.add((*target, container))
+        return cls(
+            withheld=withheld,
+            oom_unknown=frozenset(unknown),
+            gone=frozenset(getattr(context, "gone_targets", None) or ()),
+            not_running=frozenset(getattr(context, "not_running_targets", None) or ()),
+        )
+
+    def split_targets(
+        self, previous: Sequence[RecommendationRecord], emitted: Sequence[RecommendationRecord]
+    ) -> Tuple[List[RecommendationRecord], List[RecommendationRecord]]:
+        """``(gone, kept)`` among the records this scan did not re-emit (REC-05).
+
+        * gone: any record of a target confirmed gone from the cluster;
+        * kept: native records of a target that is not running (scaled to zero)
+          or whose liveness could not be read.
+        """
+        if not self.gone and not self.not_running:
+            return [], []
+        fingerprints = {record.fingerprint for record in emitted if record.fingerprint}
+        gone: List[RecommendationRecord] = []
+        kept: List[RecommendationRecord] = []
+        for record in previous:
+            if not record.fingerprint or record.fingerprint in fingerprints:
+                continue
+            target = _record_container(record)[:3]
+            if target in self.gone:
+                gone.append(record)
+            elif target in self.not_running and _native(record):
+                kept.append(record)
+        return gone, kept
+
+    def split(
+        self, previous: Sequence[RecommendationRecord], emitted: Sequence[RecommendationRecord]
+    ) -> Tuple[List[RecommendationRecord], List[RecommendationRecord]]:
+        """``(retire, protect)`` among the native rightsizing records this scan did not re-emit.
+
+        * retire: decreases of a withheld target (unsafe to keep, retired with
+          the reason ``reliability_signals_unknown``);
+        * protect: memory increases of a container whose OOM kills are unknown
+          (kept active instead of being marked stale).
+        """
+        fingerprints = {record.fingerprint for record in emitted if record.fingerprint}
+        retire: List[RecommendationRecord] = []
+        protect: List[RecommendationRecord] = []
+        for record in previous:
+            if not record.fingerprint or record.fingerprint in fingerprints or not _native(record):
+                continue
+            if record.type == RecommendationType.RIGHTSIZING_CPU:
+                resource = "cpu"
+                current, proposed = record.current_cpu_request_millicores, record.recommended_cpu_request_millicores
+            elif record.type == RecommendationType.RIGHTSIZING_MEMORY:
+                resource = "memory"
+                current, proposed = record.current_memory_request_bytes, record.recommended_memory_request_bytes
+            else:
+                continue
+            if current is None or proposed is None:
+                continue
+            key = _record_container(record)
+            if proposed < current and (key, resource) in self.withheld:
+                retire.append(record)
+            elif proposed > current and resource == "memory" and key in self.oom_unknown:
+                protect.append(record)
+        return retire, protect
+
+
+def _written_only(
+    kept: List[Recommendation], records: List[RecommendationRecord], outcomes: Sequence["UpsertOutcome"]
+) -> Tuple[List[Recommendation], List[RecommendationRecord]]:
+    """The recommendations and records the repository really wrote as active rows (REC-01).
+
+    A record absorbed by an applied change, held behind an open pull request
+    or ignored by the user is not written: it must not be reported as kept,
+    counted in the run, or shown as ``new`` by the run diff. A repository that
+    reports no outcome per record (an older implementation) keeps everything.
+    """
+    if len(outcomes) != len(records):
+        return kept, records
+    pairs = [(rec, record) for rec, record, outcome in zip(kept, records, outcomes) if outcome.written]
+    for record, outcome in zip(records, outcomes):
+        if not outcome.written:
+            logger.info(
+                "%s recommendation for %s/%s not written (%s): %s.",
+                record.type.value if hasattr(record.type, "value") else record.type,
+                record.namespace,
+                record.pod_name or record.owner_name,
+                outcome.action,
+                outcome.reason or "matched an existing row",
+            )
+    return [rec for rec, _ in pairs], [record for _, record in pairs]
+
+
+def _run_status(outcomes: List[SourceRunOutcome]) -> OptimizationRunStatus:
+    """A run fails only when every source that was attempted failed or was incomplete."""
+    attempted = [o for o in outcomes if o.status != SourceRunStatus.UNAVAILABLE]
+    if attempted and not any(o.status == SourceRunStatus.SUCCEEDED for o in attempted):
+        return OptimizationRunStatus.FAILED
+    return OptimizationRunStatus.SUCCEEDED
+
+
+def _error_text(exc: BaseException) -> str:
+    """API-safe run error: the exception type, plus the message only for GreenKube's own scan bound."""
+    from greenkube.core.optimization.context_builder import RecommendationScanLimitError
+
+    if isinstance(exc, asyncio.CancelledError):
+        return "cancelled"
+    if isinstance(exc, RecommendationScanLimitError):
+        return f"{type(exc).__name__}: {exc}"[:500]
+    return type(exc).__name__
+
+
+async def _restore_realization(reco_repo: Any) -> None:
+    """Persist and restore the realization context through the scan's database (IMP-12).
+
+    A scan right after a restart projects with the last stored context
+    (younger than 24 h) instead of the unobserved factor 1.0. Repositories
+    without a database manager (tests, fakes) leave the process state alone.
+    """
+    db_manager = getattr(reco_repo, "db_manager", None)
+    if db_manager is None or getattr(db_manager, "db_type", None) not in ("sqlite", "postgres"):
+        return
+    from greenkube.impact.realization import register_realization_store, restore_realization_context
+    from greenkube.storage.realization_repository import RealizationContextRepository
+
+    store = RealizationContextRepository(db_manager)
+    register_realization_store(store)
+    await restore_realization_context(store)
 
 
 def _peak_resident_memory_bytes() -> int:

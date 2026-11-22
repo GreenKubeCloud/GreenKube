@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
-from greenkube.automation.git.base import PullRequestInfo
+from greenkube.automation.git.base import GitRepository, PullRequestInfo, normalize_pull_request
 from greenkube.automation.pr_lifecycle import (
     PullRequestLifecycleOutcome,
     PullRequestLifecyclePlan,
@@ -71,6 +73,7 @@ class MemoryLifecycleRepository:
         self.plan_lookups: list[str] = []
         self.pull_request_updates: list[tuple[int, dict[str, object]]] = []
         self.plan_updates: list[tuple[str, PlanStatus]] = []
+        self.reason_codes: list[str | None] = []
         self.action_updates: list[tuple[list[int], ActionStatus]] = []
 
     async def get_pull_request_by_provider_reference(
@@ -133,6 +136,7 @@ class MemoryLifecycleRepository:
         if plan is None:
             return None
         self.plan_updates.append((plan_id, status))
+        self.reason_codes.append(reason_code)
         plan.status = status
         return plan
 
@@ -593,3 +597,157 @@ async def test_poll_reconciliation_ignores_currently_open_pr_without_mutation():
     assert repository.pull_request_updates == []
     assert repository.plan_updates == []
     assert repository.action_updates == []
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "github"
+
+
+def _github_closed_unmerged_payload() -> dict:
+    """A GitHub ``pull_request`` webhook for a request closed without merging (BUG-45).
+
+    GitHub keeps the test-merge ``merge_commit_sha`` on such requests.
+    """
+    return json.loads((FIXTURES / "pull_request_closed_unmerged.webhook.json").read_text())
+
+
+def _github_closed_unmerged_state() -> PullRequestInfo:
+    """The REST ``GET /pulls/42`` body of the same request (identical schema)."""
+    pull_request = _github_closed_unmerged_payload()["pull_request"]
+    return normalize_pull_request(pull_request, repo=GitRepository(provider="github", owner="acme", name="platform"))
+
+
+def test_github_closed_unmerged_fixture_keeps_a_test_merge_sha():
+    pull_request = _github_closed_unmerged_payload()["pull_request"]
+
+    assert pull_request["merged"] is False and pull_request["merged_at"] is None
+    assert isinstance(pull_request["merge_commit_sha"], str)
+    state = _github_closed_unmerged_state()
+    assert state.merged is False
+    assert state.merge_commit_sha is None
+
+
+@pytest.mark.asyncio
+async def test_bug_45_webhook_for_pr_closed_without_merge_closes_the_plan():
+    repository = MemoryLifecycleRepository()
+    provider = MemoryGitProvider(_github_closed_unmerged_state())
+    reconciler = _reconciler(repository, provider)
+    pull_request = _github_closed_unmerged_payload()["pull_request"]
+    # The event exactly as webhooks produced it before the fix: merged=false, test-merge SHA present.
+    event = PullRequestEvent(
+        provider_id=PROVIDER_ID,
+        delivery_id="delivery-closed-unmerged",
+        repo=REPO,
+        number=PR_NUMBER,
+        action="closed",
+        merged=False,
+        merge_commit_sha=pull_request["merge_commit_sha"],
+        occurred_at=CLOSED_AT,
+    )
+
+    result = await reconciler.reconcile(event, newly_deduplicated=True)
+
+    assert result.outcome is PullRequestLifecycleOutcome.CLOSED
+    assert repository.plans[PLAN_ID].status is PlanStatus.CLOSED
+    assert repository.plan_updates == [(PLAN_ID, PlanStatus.CLOSED)]
+    assert repository.action_updates == [([1001, 1002], ActionStatus.CLOSED)]
+    assert all(record.status == "closed" for record in repository.records)
+    assert all(record.merge_commit_sha is None for record in repository.records)
+    assert all(record.closed_at == datetime(2026, 10, 21, 12, 45, tzinfo=timezone.utc) for record in repository.records)
+
+
+@pytest.mark.asyncio
+async def test_bug_45_polled_pr_closed_without_merge_closes_the_plan():
+    repository = MemoryLifecycleRepository()
+    raw_state = _github_closed_unmerged_state()
+    # Provider adapters that predate normalization still expose the raw test-merge SHA.
+    provider = MemoryGitProvider(
+        PullRequestInfo(
+            number=raw_state.number,
+            url=raw_state.url,
+            status=raw_state.status,
+            merged=False,
+            raw=raw_state.raw,
+        )
+    )
+    reconciler = _reconciler(repository, provider)
+
+    result = await reconciler.reconcile_polled(PROVIDER_ID, REPO, PR_NUMBER)
+
+    assert result.outcome is PullRequestLifecycleOutcome.CLOSED
+    assert repository.plans[PLAN_ID].status is PlanStatus.CLOSED
+    assert all(record.merge_commit_sha is None for record in repository.records)
+
+
+FAST_FORWARD_HEAD = "e" * 40
+SQUASH_COMMIT = "5" * 40
+
+
+def _gitlab_merged_state(landed_sha: str | None, source: str | None) -> PullRequestInfo:
+    """GitLab merge request merged without a merge commit, as the adapter normalizes it."""
+    raw: dict[str, object] = {
+        "iid": PR_NUMBER,
+        "state": "merged",
+        "merged_at": MERGED_AT.isoformat(),
+        "merge_commit_sha": None,
+        "squash_commit_sha": SQUASH_COMMIT if source == "squash_commit" else None,
+        "sha": FAST_FORWARD_HEAD,
+    }
+    return PullRequestInfo(
+        number=PR_NUMBER,
+        url=f"https://gitlab.com/{REPO}/-/merge_requests/{PR_NUMBER}",
+        status="merged",
+        merged=True,
+        raw=raw,
+        merge_commit_sha=landed_sha,
+        merge_commit_source=source,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("landed_sha", "source", "reason_code"),
+    [
+        (FAST_FORWARD_HEAD, "fast_forward_head", "pull_request_merged_fast_forward_head"),
+        (SQUASH_COMMIT, "squash_commit", "pull_request_merged_squash_commit"),
+    ],
+)
+async def test_bug_46_gitlab_merge_without_merge_commit_moves_to_merged_and_records_the_source(
+    landed_sha, source, reason_code
+):
+    repository = MemoryLifecycleRepository()
+    provider = MemoryGitProvider(_gitlab_merged_state(landed_sha, source))
+    reconciler = _reconciler(repository, provider)
+    # GitLab webhooks of fast-forward and squash merges carry no merge commit SHA.
+    event = _event(merged=True).model_copy(update={"merge_commit_sha": None})
+
+    result = await reconciler.reconcile(event, newly_deduplicated=True)
+
+    assert result.outcome is PullRequestLifecycleOutcome.MERGED
+    assert repository.plans[PLAN_ID].status is PlanStatus.MERGED
+    assert repository.reason_codes == [reason_code]
+    assert all(record.merge_commit_sha == landed_sha for record in repository.records)
+    assert all(record.sync_status is None for record in repository.records)
+    assert set(repository.action_statuses.values()) == {ActionStatus.MERGED}
+
+
+@pytest.mark.asyncio
+async def test_polled_gitlab_fast_forward_merge_uses_the_landed_head_commit():
+    repository = MemoryLifecycleRepository()
+    provider = MemoryGitProvider(_gitlab_merged_state(FAST_FORWARD_HEAD, "fast_forward_head"))
+    reconciler = _reconciler(repository, provider)
+
+    result = await reconciler.reconcile_polled(PROVIDER_ID, REPO, PR_NUMBER)
+
+    assert result.outcome is PullRequestLifecycleOutcome.MERGED
+    assert repository.reason_codes == ["pull_request_merged_fast_forward_head"]
+    assert all(record.merge_commit_sha == FAST_FORWARD_HEAD for record in repository.records)
+
+
+@pytest.mark.asyncio
+async def test_merge_commit_reason_code_is_unchanged_for_regular_merges():
+    repository = MemoryLifecycleRepository()
+    reconciler = _reconciler(repository, MemoryGitProvider(_provider_state(merged=True)))
+
+    await reconciler.reconcile(_event(merged=True), newly_deduplicated=True)
+
+    assert repository.reason_codes == ["pull_request_merged"]

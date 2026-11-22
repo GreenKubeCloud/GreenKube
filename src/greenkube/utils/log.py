@@ -47,6 +47,15 @@ _SHARED_PRE_PROCESSORS: list[Any] = [
 ]
 
 
+def log_safe(value: object) -> str:
+    """``value`` as text with CR and LF escaped, for a log line that quotes request data.
+
+    A forged line break would otherwise start a fake log entry in the text format
+    (log injection); the JSON format escapes them already.
+    """
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 def configure_logging(level: str = "INFO", log_format: str = "json") -> None:
     """Set up structlog + stdlib logging.
 

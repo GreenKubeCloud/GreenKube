@@ -5,11 +5,18 @@ Collects VerticalPodAutoscaler recommendations from the Kubernetes API.
 Only VPAs in recommendation-only mode (``updateMode: Off``) are considered:
 GreenKube must never duplicate a controller that already applies its own
 recommendations.
+
+Maturity (roadmap A.5, F-12): the VPA ``status.conditions`` and, where the
+recommender wrote one, the ``VerticalPodAutoscalerCheckpoint`` of each
+container (``totalSamplesCount``, ``firstSampleStart``, ``lastSampleStart``)
+travel with each recommendation, so the VPA source can ignore a target built
+from minutes of samples.
 """
 
 import logging
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_custom_objects_api
@@ -20,6 +27,9 @@ logger = logging.getLogger(__name__)
 VPA_GROUP = "autoscaling.k8s.io"
 VPA_VERSION = "v1"
 VPA_PLURAL = "verticalpodautoscalers"
+VPA_CHECKPOINT_PLURAL = "verticalpodautoscalercheckpoints"
+#: How a VPA without ``updateMode`` is reported: the API defaults it to an active mode, so it is skipped.
+UNSET_UPDATE_MODE = "Auto (default)"
 
 
 @dataclass
@@ -37,9 +47,51 @@ class VPARecommendation:
     memory_lower_bytes: Optional[int] = None
     cpu_upper_millicores: Optional[int] = None
     memory_upper_bytes: Optional[int] = None
+    cpu_uncapped_millicores: Optional[int] = None
+    memory_uncapped_bytes: Optional[int] = None
+    #: Labels of the VPA object (Goldilocks provenance: ``creator=Fairwinds``, ``source=goldilocks``).
+    labels: Dict[str, str] = field(default_factory=dict)
+    #: ``status.conditions`` of the VPA object, by type: ``{"RecommendationProvided": "True"}``.
+    conditions: Dict[str, str] = field(default_factory=dict)
+    #: ``totalSamplesCount`` of the container's checkpoint; None when no checkpoint was read.
+    total_samples: Optional[int] = None
+    #: ``firstSampleStart`` / ``lastSampleStart`` of the container's checkpoint.
+    first_sample_start: Optional[datetime] = None
+    last_sample_start: Optional[datetime] = None
+    #: Containers the VPA recommends for: the recommender splits its per-pod minimum between them.
+    containers: Optional[int] = None
 
 
-def _parse_container_recommendation(namespace: str, vpa_name: str, target_ref: dict, container: dict):
+def _parse_time(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _created_recently(value: Any, min_hours: float) -> bool:
+    """Whether a VPA was created less than ``min_hours`` (``VPA_MIN_SAMPLE_HOURS``) ago: its history is shorter."""
+    created = _parse_time(value)
+    if created is None:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - created < timedelta(hours=min_hours)
+
+
+def _conditions(status: dict) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for condition in status.get("conditions") or []:
+        if isinstance(condition, dict) and condition.get("type"):
+            result[str(condition["type"])] = str(condition.get("status") or "")
+    return result
+
+
+def _parse_container_recommendation(
+    namespace: str, vpa_name: str, target_ref: dict, container: dict, labels: Optional[Dict[str, str]] = None
+):
     container_name = container.get("containerName") or ""
     if not container_name:
         return None
@@ -47,6 +99,7 @@ def _parse_container_recommendation(namespace: str, vpa_name: str, target_ref: d
     target = container.get("target") or {}
     lower = container.get("lowerBound") or {}
     upper = container.get("upperBound") or {}
+    uncapped = container.get("uncappedTarget") or {}
 
     return VPARecommendation(
         namespace=namespace,
@@ -60,11 +113,49 @@ def _parse_container_recommendation(namespace: str, vpa_name: str, target_ref: d
         memory_lower_bytes=parse_memory_quantity(lower.get("memory")),
         cpu_upper_millicores=parse_cpu_quantity(upper.get("cpu")),
         memory_upper_bytes=parse_memory_quantity(upper.get("memory")),
+        cpu_uncapped_millicores=parse_cpu_quantity(uncapped.get("cpu")),
+        memory_uncapped_bytes=parse_memory_quantity(uncapped.get("memory")),
+        labels={str(k): str(v) for k, v in (labels or {}).items()},
     )
 
 
 class VPACollector:
     """Collects recommendation-mode VPA container targets."""
+
+    def __init__(self, config: Any = None) -> None:
+        #: Settings of this collector (``VPA_MIN_SAMPLE_HOURS``); the global config when not given.
+        self.config = config if config is not None else global_config
+        #: VPAs skipped by the last ``collect()``, by update mode (``Auto``, ``Recreate``...).
+        self.skipped_by_mode: Dict[str, int] = {}
+        #: Whether the last ``collect()`` could list the VPA checkpoints (None before any collect).
+        self.checkpoints_readable: Optional[bool] = None
+
+    async def _checkpoints(self, api: Any) -> Dict[Tuple[str, str, str], dict]:
+        """Checkpoint status by ``(namespace, VPA name, container)``; empty when unreadable."""
+        try:
+            result = await api.list_cluster_custom_object(
+                group=VPA_GROUP,
+                version=VPA_VERSION,
+                plural=VPA_CHECKPOINT_PLURAL,
+                _request_timeout=global_config.K8S_REQUEST_TIMEOUT or None,
+            )
+        except Exception as exc:
+            self.checkpoints_readable = False
+            logger.warning(
+                "Could not list VPA checkpoints (%s): VPA maturity is unknown and reported as a diagnostic.",
+                getattr(exc, "status", None) or type(exc).__name__,
+            )
+            return {}
+        self.checkpoints_readable = True
+        checkpoints: Dict[Tuple[str, str, str], dict] = {}
+        for item in (result or {}).get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            spec = item.get("spec") or {}
+            namespace = (item.get("metadata") or {}).get("namespace") or ""
+            key = (str(namespace), str(spec.get("vpaObjectName") or ""), str(spec.get("containerName") or ""))
+            checkpoints[key] = item.get("status") or {}
+        return checkpoints
 
     async def collect(self) -> List[VPARecommendation]:
         """Fetches all recommendation-mode VPAs across namespaces.
@@ -74,6 +165,7 @@ class VPACollector:
             error (graceful degradation when the CRD is not installed).
         """
         recommendations: List[VPARecommendation] = []
+        self.skipped_by_mode = {}
 
         api = await get_custom_objects_api()
         if not api:
@@ -96,6 +188,9 @@ class VPACollector:
             return recommendations
 
         items = (result or {}).get("items", []) or []
+        checkpoints = await self._checkpoints(api) if items else {}
+        min_hours = float(getattr(self.config, "VPA_MIN_SAMPLE_HOURS", 24.0) or 0.0)
+        checkpointed_vpas = {(namespace, vpa_name) for namespace, vpa_name, _container in checkpoints}
         for item in items:
             try:
                 metadata = item.get("metadata") or {}
@@ -103,8 +198,10 @@ class VPACollector:
                 status = item.get("status") or {}
 
                 update_policy = spec.get("updatePolicy") or {}
-                update_mode = update_policy.get("updateMode") or spec.get("updateMode") or "Off"
+                # An unset updateMode is the VPA API default, an active mode (Auto), never Off.
+                update_mode = update_policy.get("updateMode") or spec.get("updateMode") or UNSET_UPDATE_MODE
                 if update_mode != "Off":
+                    self.skipped_by_mode[str(update_mode)] = self.skipped_by_mode.get(str(update_mode), 0) + 1
                     logger.debug(
                         "Skipping VPA %s/%s: updateMode is '%s' (GreenKube only reads recommendation mode).",
                         metadata.get("namespace"),
@@ -125,8 +222,26 @@ class VPACollector:
                         metadata.get("name") or "",
                         target_ref,
                         container,
+                        metadata.get("labels") or {},
                     )
                     if parsed:
+                        parsed.conditions = _conditions(status)
+                        parsed.containers = len(containers)
+                        checkpoint = checkpoints.get((parsed.namespace, parsed.vpa_name, parsed.container_name))
+                        if checkpoint is not None:
+                            samples = checkpoint.get("totalSamplesCount")
+                            parsed.total_samples = int(samples) if isinstance(samples, (int, float)) else 0
+                            parsed.first_sample_start = _parse_time(checkpoint.get("firstSampleStart"))
+                            parsed.last_sample_start = _parse_time(checkpoint.get("lastSampleStart"))
+                        elif self.checkpoints_readable and (
+                            (parsed.namespace, parsed.vpa_name) in checkpointed_vpas
+                            or _created_recently(metadata.get("creationTimestamp"), min_hours)
+                        ):
+                            # The recommender checkpoints this VPA's other containers, or the VPA
+                            # is newer than the maturity window: no sample history to trust yet.
+                            # Without either, the recommender may keep no checkpoints at all
+                            # (--storage=prometheus): maturity stays unknown, never "0 samples".
+                            parsed.total_samples = 0
                         recommendations.append(parsed)
             except Exception as e:
                 logger.warning("Skipping malformed VPA object: %s", e)

@@ -1,4 +1,4 @@
-{{- if and .Values.postgres.enabled (eq .Values.config.db.type "postgres") }}
+{{- if include "greenkube.bundledPostgres" . }}
 apiVersion: v1
 kind: Service
 metadata:

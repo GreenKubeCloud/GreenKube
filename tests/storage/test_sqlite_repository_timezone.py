@@ -38,6 +38,7 @@ async def test_save_history_normalizes_timezone(db_connection):
         yield db_connection
 
     db_manager.connection_scope = scope
+    db_manager.transaction = lambda immediate=False: scope()
     repo = SQLiteCarbonIntensityRepository(db_manager)
 
     # Mixed formats: Z and +00:00

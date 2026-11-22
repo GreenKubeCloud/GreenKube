@@ -1,0 +1,202 @@
+{{- /*
+Scheduled logical backup of the GreenKube schema (docs/operations/backup-restore.md).
+pg_dump writes a custom-format archive to a temporary name, pg_restore --list
+proves it is readable, then it is renamed and the oldest dumps beyond "keep"
+are deleted. It reads DB_CONNECTION_STRING, so it backs up the bundled and an
+external PostgreSQL alike.
+*/ -}}
+{{- $backup := (.Values.postgres | default dict).backup | default dict }}
+{{- if $backup.enabled }}
+{{- $_ := include "greenkube.values" . }}
+{{- $persistence := $backup.persistence | default dict }}
+{{- $claim := $persistence.existingClaim | default (printf "%s-postgres-backup" (include "greenkube.fullname" .)) }}
+{{- if not $persistence.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $claim }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-backup
+  annotations:
+    # Dumps outlive the release: helm uninstall keeps this claim.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ "ReadWriteOnce" ]
+  {{- with $persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $persistence.size | default "20Gi" }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "greenkube.fullname" . }}-postgres-backup
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-backup
+spec:
+  schedule: {{ $backup.schedule | default "17 3 * * *" | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: {{ int ($backup.activeDeadlineSeconds | default 3600) }}
+      template:
+        metadata:
+          labels:
+            {{- include "greenkube.podLabels" (dict "context" . "cfg" $backup "component" "postgres-backup") | nindent 12 }}
+          {{- with $backup.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          {{- with include "greenkube.imagePullSecrets" . }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          {{- with include "greenkube.podScheduling" (dict "context" . "cfg" $backup "component" "postgres-backup" "replicas" 1) }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            fsGroup: 70
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pg-dump
+              image: {{ include "greenkube.helperImage" .Values.postgres.image | quote }}
+              imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 70
+                runAsGroup: 70
+                capabilities:
+                  drop:
+                    - ALL
+              env:
+                - name: DB_CONNECTION_STRING
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "greenkube.secretNameFor" (dict "context" . "key" "DB_CONNECTION_STRING") }}
+                      key: DB_CONNECTION_STRING
+                - name: DB_SCHEMA
+                  value: {{ .Values.config.db.schema | default "public" | quote }}
+                # Same TLS mode as the application (DB_SSL_MODE); an sslmode in the
+                # connection string still takes precedence.
+                - name: PGSSLMODE
+                  value: {{ .Values.config.db.sslMode | default "disable" | quote }}
+                - name: BACKUP_KEEP
+                  value: {{ int ($backup.keep | default 7) | quote }}
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  # A dump interrupted by the deadline leaves a partial file behind.
+                  rm -f /backups/*.partial
+                  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+                  target="/backups/greenkube-${stamp}.dump"
+                  pg_dump --dbname="$DB_CONNECTION_STRING" --schema="$DB_SCHEMA" \
+                    --format=custom --no-owner --file="${target}.partial"
+                  pg_restore --list "${target}.partial" > /dev/null
+                  mv "${target}.partial" "$target"
+                  echo "backup written: $target ($(du -h "$target" | cut -f1))"
+                  ls -1 /backups/greenkube-*.dump | sort -r | tail -n "+$((BACKUP_KEEP + 1))" | while read -r old; do
+                    rm -f "$old"
+                    echo "pruned: $old"
+                  done
+              {{- with $backup.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ $claim }}
+            - name: tmp
+              emptyDir:
+                sizeLimit: 64Mi
+{{- if not $persistence.existingClaim }}
+---
+# A claim on a WaitForFirstConsumer StorageClass (kind/k3s local-path, EBS gp3,
+# GKE standard-rwo, AKS managed-csi) stays Pending until a pod mounts it, and
+# `helm install --wait` waits for every claim to be Bound: the first backup is
+# hours away, so this one-shot Job mounts the claim and exits. It carries the
+# release revision in its name (a Job's pod template is immutable): each upgrade
+# replaces it, and it is removed 10 minutes after it finishes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-postgres-backup-bind-%d" (include "greenkube.fullname" . | trunc 40 | trimSuffix "-") (int .Release.Revision) }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-backup
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "greenkube.podLabels" (dict "context" . "cfg" $backup "component" "postgres-backup") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with include "greenkube.imagePullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with include "greenkube.podScheduling" (dict "context" . "cfg" $backup "component" "postgres-backup" "replicas" 1) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bind
+          image: {{ include "greenkube.helperImage" .Values.postgres.image | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            capabilities:
+              drop:
+                - ALL
+          command: ["/bin/sh", "-c", "test -d /backups"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: backups
+              mountPath: /backups
+      volumes:
+        - name: backups
+          persistentVolumeClaim:
+            claimName: {{ $claim }}
+{{- end }}
+{{- end }}

@@ -1,124 +1,34 @@
-import asyncio
-import logging
-import random
+"""Interval arithmetic shared by the controller loops.
+
+The controller schedules every periodic job with
+:class:`greenkube.core.loops.LoopRegistry` (leader gating, timeouts, per-loop
+metrics, health and persisted heartbeats; roadmap M8). The former ``Scheduler``
+class was removed once nothing used it; only these pure helpers remain.
+"""
+
 import re
-from typing import Callable, Coroutine, List
+import time
 
-logger = logging.getLogger(__name__)
-
-# Maximum consecutive failures before capping the backoff delay
-_MAX_BACKOFF_MULTIPLIER = 8
+_INTERVAL_PATTERN = re.compile(r"^(\d+)([smh])$")
+_INTERVAL_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600}
 
 
-class Scheduler:
-    """
-    Manages the scheduling and execution of periodic async tasks using asyncio.
-    """
+def parse_interval_seconds(interval_str: str) -> int:
+    """Parse a Prometheus-style duration such as ``'30s'``, ``'5m'`` or ``'1h'`` into seconds."""
+    match = _INTERVAL_PATTERN.match(str(interval_str).lower())
+    if not match:
+        raise ValueError(f"Invalid interval format: '{interval_str}'. Use 's', 'm', or 'h'.")
+    value, unit = int(match.group(1)), match.group(2)
+    if value <= 0:
+        raise ValueError(f"Interval must be greater than zero: '{interval_str}'.")
+    return value * _INTERVAL_MULTIPLIERS[unit]
 
-    def __init__(self):
-        self.tasks: List[asyncio.Task] = []
-        logger.info("AsyncScheduler initialized.")
 
-    async def _run_periodically(
-        self,
-        interval_seconds: int | float,
-        job_func: Callable[[], Coroutine],
-        skip_initial: bool = False,
-    ):
-        """Internal loop to run a job periodically with jitter and exponential backoff."""
-        consecutive_failures = 0
-        first_run = True
-        loop = asyncio.get_running_loop()
-        try:
-            while True:
-                if first_run and skip_initial:
-                    first_run = False
-                    await asyncio.sleep(interval_seconds)
-                    continue
-                first_run = False
-                start = loop.time()
-                try:
-                    await job_func()
-                    consecutive_failures = 0
-                except Exception as e:
-                    consecutive_failures += 1
-                    logger.exception("Error in scheduled job '%s': %s", job_func.__name__, e)
+def seconds_until_boundary(interval_seconds: float, offset_seconds: float = 0.0, now: float | None = None) -> float:
+    """Seconds until the next ``k × interval + offset`` instant (Unix time), always > 0."""
+    current = time.time() if now is None else now
+    elapsed = (current - offset_seconds) % interval_seconds
+    return interval_seconds - elapsed if elapsed > 0 else interval_seconds
 
-                # Calculate how long to sleep.
-                # On success: sleep until next_run = start + interval (± jitter).
-                # On failure: wait at least interval × 2^failures (capped at
-                # _MAX_BACKOFF_MULTIPLIER × interval) so a failing or overrunning
-                # job cannot degenerate into a 1-second hot loop.
-                elapsed = loop.time() - start
-                sleep_time = max(interval_seconds - elapsed, 0)
 
-                if consecutive_failures > 0:
-                    backoff_multiplier = min(2**consecutive_failures, _MAX_BACKOFF_MULTIPLIER)
-                    sleep_time = max(sleep_time, interval_seconds * backoff_multiplier)
-
-                # Add ±10% jitter to spread load across replicas
-                jitter = sleep_time * 0.1 * (2 * random.random() - 1)
-                sleep_time = max(sleep_time + jitter, 1.0)
-
-                await asyncio.sleep(sleep_time)
-        except asyncio.CancelledError:
-            logger.info("Job '%s' cancelled.", job_func.__name__)
-            raise
-
-    def add_job(
-        self,
-        job_func: Callable[[], Coroutine],
-        interval_hours: int = 0,
-        interval_minutes: int = 0,
-        skip_initial: bool = False,
-    ):
-        """
-        Adds a new async job to the schedule.
-
-        Args:
-            skip_initial: If True, the first execution is skipped (sleep first).
-                          Use this when you manually call the function at startup.
-        """
-        interval_seconds = 0
-        if interval_hours > 0:
-            interval_seconds = interval_hours * 3600
-            logger.info("Scheduled job '%s' to run every %s hour(s).", job_func.__name__, interval_hours)
-        elif interval_minutes > 0:
-            interval_seconds = interval_minutes * 60
-            logger.info("Scheduled job '%s' to run every %s minute(s).", job_func.__name__, interval_minutes)
-
-        if interval_seconds > 0:
-            task = asyncio.create_task(self._run_periodically(interval_seconds, job_func, skip_initial=skip_initial))
-            self.tasks.append(task)
-        else:
-            logger.warning(
-                "Job '%s' was not scheduled: provide a positive interval_hours or interval_minutes.",
-                job_func.__name__,
-            )
-
-    def add_job_from_string(self, job_func: Callable[[], Coroutine], interval_str: str, skip_initial: bool = False):
-        """
-        Adds a job based on a Prometheus-style duration string like '5m' or '1h'.
-        """
-        match = re.match(r"^(\d+)([smh])$", interval_str.lower())
-        if not match:
-            raise ValueError(f"Invalid interval format: '{interval_str}'. Use 's', 'm', or 'h'.")
-
-        value, unit = int(match.group(1)), match.group(2)
-        if value <= 0:
-            raise ValueError(f"Interval must be greater than zero: '{interval_str}'.")
-        multipliers = {"s": 1, "m": 60, "h": 3600}
-        interval_seconds = value * multipliers[unit]
-
-        task = asyncio.create_task(self._run_periodically(interval_seconds, job_func, skip_initial=skip_initial))
-        self.tasks.append(task)
-        logger.info("Scheduled job '%s' to run every %s.", job_func.__name__, interval_str)
-
-    async def stop(self):
-        """Cancels all scheduled tasks."""
-        logger.info("Stopping scheduler...")
-        for task in self.tasks:
-            task.cancel()
-        if self.tasks:
-            await asyncio.gather(*self.tasks, return_exceptions=True)
-        self.tasks.clear()
+__all__ = ["parse_interval_seconds", "seconds_until_boundary"]

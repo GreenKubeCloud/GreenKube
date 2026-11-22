@@ -1,0 +1,23 @@
+# Argo CD Application for the quickstart sample app (raw YAML under apps/).
+# hack/e2e/setup-gitops.sh applies this file after replacing the repository URL
+# when GITEA_* overrides are set.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: greenkube-e2e-quickstart
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: greenkube-quickstart
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/greenkube/greenkube-e2e-quickstart.git
+    targetRevision: main
+    path: apps/oversized-web
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: greenkube-e2e-apps
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

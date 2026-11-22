@@ -6,7 +6,6 @@ import copy
 import difflib
 import hashlib
 import json
-import re
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -16,11 +15,18 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import ValidationError
 
+from greenkube.automation.actions import (
+    ACTION_KINDS,
+    InverseConflictError,
+    InverseUnsupportedError,
+    action_kind_of,
+)
+from greenkube.automation.actions.workloads import POD_SPEC_PATHS
 from greenkube.gitops.contracts import (
+    PLANNABLE_RENDERERS,
     ActionPlanV3,
     BindingStatus,
     ContainerRequestBaseline,
-    ContainerResources,
     ControllerKind,
     FileEdit,
     FilePlan,
@@ -28,7 +34,6 @@ from greenkube.gitops.contracts import (
     PreApplyWorkloadBaseline,
     RendererKind,
     ResourceTarget,
-    SetContainerResources,
     WorkloadSource,
 )
 from greenkube.gitops.planning.helm import (
@@ -40,20 +45,17 @@ from greenkube.gitops.planning.helm import (
     HelmValuesPlanner,
     HelmValuesUnsupportedError,
 )
+from greenkube.gitops.planning.kustomize import controller_supplies_namespace
+from greenkube.gitops.planning.kustomize import render_as_deployed as render_kustomize_as_deployed
 from greenkube.gitops.planning.raw_manifest import RawManifestPlanError, _containers, _pod_spec
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.raw import RawRenderResult, RenderedResource, render_raw
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST, revision_commit
 from greenkube.gitops.snapshots import SnapshotLimits, snapshot_from_files
 from greenkube.gitops.snapshots.models import RepositorySnapshot, SnapshotFile
 from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
 
-_COMMIT_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
-_BLOB_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
-_SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RAW_MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
-_SUPPORTED_RENDERERS = frozenset(
-    {RendererKind.RAW, RendererKind.KUSTOMIZE, RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE}
-)
 ONE_TIME_HELM_VALUES_MAPPING_EVIDENCE_KEY = "_greenkube_plan_one_time_values_mapping"
 
 _ResourceIdentity = tuple[str, str, str, str]
@@ -145,9 +147,9 @@ class KustomizeRollbackRenderer:
         files: Mapping[str, str | bytes],
         source: WorkloadSource,
     ) -> RawRenderResult:
-        """Render every candidate file at the verified current base revision."""
+        """Render every candidate file at the verified current base revision, as the controller builds it."""
         revision = source.revision
-        if not isinstance(revision, str) or not _COMMIT_SHA_PATTERN.fullmatch(revision):
+        if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
             raise RollbackValidationError("Kustomize rollback requires the verified current base revision")
         snapshot = snapshot_from_files(
             files,
@@ -157,7 +159,7 @@ class KustomizeRollbackRenderer:
             limits=self._snapshot_limits,
         )
         try:
-            return self._renderer.render(snapshot, source.path)
+            return render_kustomize_as_deployed(self._renderer, snapshot, source)
         finally:
             snapshot.close()
 
@@ -449,6 +451,7 @@ def build_inverse_plan(
         after,
         original_plan.action.target,
         has_inverse_edits=bool(inverse_files),
+        allow_namespace_less=_allows_namespace_less_target(file_plan.renderer, render_source),
     )
     if file_plan.renderer is RendererKind.HELM_RELEASE:
         _validate_flux_helm_release_rendered_baseline(original_plan, after.resources)
@@ -493,6 +496,11 @@ def _validate_original_plan(plan: Plan) -> FilePlan:
         raise RollbackConflictError("original plan must be a validated persisted Plan")
     file_plan = plan.file_plan
     if file_plan is None:
+        if plan.file_plan_summary is not None:
+            raise UnsupportedRollbackError(
+                "original plan's rendered file contents were removed by retention; preview a new change "
+                "with the desired resources instead of a rollback"
+            )
         raise UnsupportedRollbackError("original plan has no file plan to invert")
     if plan.digest is None or plan.digest != file_plan.digest:
         raise RollbackConflictError("original plan digest does not match its persisted file plan")
@@ -508,9 +516,12 @@ def _validate_original_plan(plan: Plan) -> FilePlan:
         or plan.action.target.name != plan.source.workload_name
     ):
         raise RollbackConflictError("original action target does not match its resolved workload source")
-    if not all(isinstance(operation, SetContainerResources) for operation in plan.action.operations):
-        raise UnsupportedRollbackError("only per-container resource operations have a supported inverse")
-    if file_plan.renderer not in _SUPPORTED_RENDERERS:
+    spec = action_kind_of(plan.action)
+    if spec is None or not spec.supports_rollback(plan.action.operations):
+        raise UnsupportedRollbackError(
+            f"only {ACTION_KINDS.supported_titles()} operations with a baseline-derived inverse can be rolled back"
+        )
+    if file_plan.renderer not in PLANNABLE_RENDERERS:
         raise UnsupportedRollbackError(f"renderer {file_plan.renderer.value!r} does not support exact-target rollback")
     if file_plan.renderer is RendererKind.HELM_VALUES:
         mapping = plan.source.renderer_config.get("values_mapping")
@@ -568,28 +579,15 @@ def flux_helm_release_inverse_baseline(plan: Plan) -> PreApplyWorkloadBaseline:
         or not baseline.container_requests
     ):
         raise RollbackConflictError("the persisted pre-apply workload baseline is invalid")
-    operations: list[SetContainerResources] = []
-    for operation in plan.action.operations:
-        if not isinstance(operation, SetContainerResources):
-            raise UnsupportedRollbackError("Flux HELM_RELEASE rollback requires per-container resource operations")
-        operations.append(operation)
-    if not operations:
-        raise UnsupportedRollbackError("Flux HELM_RELEASE rollback requires per-container resource operations")
-    containers: set[str] = set()
-    for operation in operations:
-        if (
-            not operation.resources.requests
-            or operation.resources.limits
-            or set(operation.resources.requests) - {"cpu", "memory"}
-        ):
-            raise UnsupportedRollbackError(
-                "Flux HELM_RELEASE rollback can restore only CPU and memory requests from the persisted baseline"
-            )
-        if operation.container in containers:
-            raise UnsupportedRollbackError("Flux HELM_RELEASE rollback requires one operation per container")
-        containers.add(operation.container)
-    if not containers.issubset(baseline.container_requests):
-        raise RollbackConflictError("the persisted pre-apply baseline omits an action container")
+    spec = action_kind_of(plan.action)
+    try:
+        if spec is None or not spec.supports_rollback(plan.action.operations):
+            raise InverseUnsupportedError("rollback requires operations of a kind with a baseline-derived inverse")
+        spec.validate_inverse_scope(plan.action.operations, baseline)
+    except InverseUnsupportedError as exc:
+        raise UnsupportedRollbackError(f"Flux HELM_RELEASE {exc}") from exc
+    except InverseConflictError as exc:
+        raise RollbackConflictError(str(exc)) from exc
     return baseline
 
 
@@ -669,13 +667,13 @@ def _rendered_baseline_quantity(value: object, parser: Callable[[object], int | 
 
 
 def _validate_revision(value: str) -> str:
-    if not isinstance(value, str) or not _COMMIT_SHA_PATTERN.fullmatch(value):
+    if not isinstance(value, str) or not GIT_OBJECT_SHA.fullmatch(value):
         raise RollbackConflictError("current base revision must be an immutable 40- or 64-character Git revision")
     return value.lower()
 
 
 def _select_renderer(kind: RendererKind, renderer: RollbackRenderer | None) -> RollbackRenderer:
-    if kind not in _SUPPORTED_RENDERERS:
+    if kind not in PLANNABLE_RENDERERS:
         raise UnsupportedRollbackError(f"renderer {kind.value!r} does not support exact-target rollback")
     selected = renderer
     if selected is None:
@@ -876,42 +874,33 @@ def helm_values_inverse_action(plan: Plan) -> ActionPlanV3:
     baseline = plan.pre_apply_baseline
     if not isinstance(baseline, PreApplyWorkloadBaseline):
         raise RollbackConflictError("the original plan has no persisted pre-apply workload baseline")
-    operations = plan.action.operations
-    if len(operations) != 1 or not isinstance(operations[0], SetContainerResources):
+    if len(plan.action.operations) != 1:
         raise UnsupportedRollbackError("HELM_VALUES rollback requires one explicitly mapped container operation")
-    operation = operations[0]
-    if not operation.resources.requests or operation.resources.limits:
-        raise UnsupportedRollbackError(
-            "HELM_VALUES rollback can restore only CPU and memory requests from the persisted baseline"
-        )
-    if set(operation.resources.requests) - {"cpu", "memory"}:
-        raise UnsupportedRollbackError("the persisted baseline cannot restore this Helm resource request")
-    container_baseline: ContainerRequestBaseline | None = baseline.container_requests.get(operation.container)
-    if container_baseline is None:
-        raise RollbackConflictError("the persisted pre-apply baseline omits the target container")
-
-    requests: dict[str, str] = {}
-    for resource in operation.resources.requests:
-        value = container_baseline.cpu_millicores if resource == "cpu" else container_baseline.memory_bytes
-        if value is None or isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise RollbackConflictError(f"the persisted pre-apply baseline omits the target {resource} request")
-        requests[resource] = f"{value}m" if resource == "cpu" else str(value)
-
     try:
-        inverse_operation = SetContainerResources(
-            container=operation.container,
-            resources=ContainerResources(requests=requests),
-        )
+        inverse_operations = _baseline_inverse(plan.action, baseline)
+    except InverseUnsupportedError as exc:
+        raise UnsupportedRollbackError(f"HELM_VALUES {exc}") from exc
+    except InverseConflictError as exc:
+        raise RollbackConflictError(str(exc)) from exc
+    try:
         return ActionPlanV3(
             action_id=plan.action.action_id,
             recommendation_ids=plan.action.recommendation_ids,
             target=plan.action.target,
-            operations=[inverse_operation],
+            operations=inverse_operations,
             constraints=plan.action.constraints,
             evidence_ref=plan.action.evidence_ref,
         )
     except ValidationError as exc:
         raise RollbackConflictError("the persisted pre-apply baseline cannot form a valid inverse action") from exc
+
+
+def _baseline_inverse(action: ActionPlanV3, baseline: PreApplyWorkloadBaseline) -> list[Any]:
+    """Typed operations restoring the persisted pre-apply baseline, derived by the action kind (H0c)."""
+    spec = action_kind_of(action)
+    if spec is None or not spec.supports_rollback(action.operations):
+        raise InverseUnsupportedError("rollback requires operations of a kind with a baseline-derived inverse")
+    return spec.inverse(action.operations, baseline)
 
 
 def same_rollback_source(left: WorkloadSource, right: WorkloadSource) -> bool:
@@ -991,7 +980,7 @@ def _normalize_flux_helm_release_renderer_config(config: Mapping[str, Any]) -> d
     if isinstance(manifest_source, Mapping):
         source = dict(manifest_source)
         revision = source.get("revision")
-        if revision is not None and (not isinstance(revision, str) or _revision_commit(revision) is None):
+        if revision is not None and (not isinstance(revision, str) or revision_commit(revision) is None):
             return None
         source["revision"] = "__current_immutable_revision__"
         normalized["manifest_source"] = source
@@ -1032,7 +1021,7 @@ def _normalize_helm_renderer_config(config: Mapping[str, Any]) -> dict[str, Any]
 
 
 def _verify_original_blob(path: str, content: bytes, original_sha: str | None) -> None:
-    if original_sha is None or not _BLOB_SHA_PATTERN.fullmatch(original_sha):
+    if original_sha is None or not GIT_OBJECT_SHA.fullmatch(original_sha):
         raise RollbackConflictError(f"{path}: immutable original blob SHA is missing or invalid")
     if _git_blob_sha(content, original_sha) != original_sha.lower():
         raise RollbackConflictError(f"{path}: immutable original content does not match its recorded blob SHA")
@@ -1042,13 +1031,6 @@ def _git_blob_sha(content: bytes, revision_or_sha: str) -> str:
     algorithm = hashlib.sha256 if len(revision_or_sha) == 64 else hashlib.sha1
     header = f"blob {len(content)}\0".encode("ascii")
     return algorithm(header + content).hexdigest()
-
-
-def _revision_commit(value: str) -> str | None:
-    if _COMMIT_SHA_PATTERN.fullmatch(value):
-        return value.lower()
-    match = re.search(r"(?:sha1|sha256):([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$", value)
-    return match.group(1).lower() if match is not None else None
 
 
 def _content_bytes(content: str | bytes, path: str, description: str) -> bytes:
@@ -1083,7 +1065,7 @@ def _render(
         raise RollbackValidationError("rollback renderer rejected the repository snapshot") from exc
     if not isinstance(result, RawRenderResult) or result.renderer is not renderer.renderer:
         raise RollbackValidationError("rollback renderer returned an incompatible render result")
-    if not isinstance(result.output_digest, str) or not _SHA256_PATTERN.fullmatch(result.output_digest):
+    if not isinstance(result.output_digest, str) or not SHA256_DIGEST.fullmatch(result.output_digest):
         raise RollbackValidationError("rollback renderer returned an invalid output digest")
     if not isinstance(result.resources, tuple) or not isinstance(result.warnings, tuple):
         raise RollbackValidationError("rollback renderer returned invalid resource or warning collections")
@@ -1141,14 +1123,36 @@ def _render_payload(resources: Mapping[_ResourceIdentity, dict[str, Any]]) -> li
     return payload
 
 
+def _allows_namespace_less_target(renderer: RendererKind, source: WorkloadSource) -> bool:
+    """Mirror forward planning: raw manifests, and Kustomize overlays a controller namespaces (Argo CD)."""
+    if renderer is RendererKind.RAW:
+        return True
+    return renderer is RendererKind.KUSTOMIZE and controller_supplies_namespace(source)
+
+
+def _rendered_target_identity(
+    resources: Mapping[_ResourceIdentity, dict[str, Any]],
+    target: ResourceTarget,
+    *,
+    allow_namespace_less: bool,
+) -> _ResourceIdentity:
+    """Rendered identity of the live target: exact, or namespace-less when the controller supplies the namespace."""
+    identity = _resource_identity(target)
+    if identity in resources or not allow_namespace_less or not target.namespace or target.kind not in POD_SPEC_PATHS:
+        return identity
+    namespace_less = (target.api_version, target.kind, "", target.name)
+    return namespace_less if namespace_less in resources else identity
+
+
 def _validate_render_pair(
     before: _RenderedState,
     after: _RenderedState,
     target: ResourceTarget,
     *,
     has_inverse_edits: bool,
+    allow_namespace_less: bool = False,
 ) -> None:
-    identity = _resource_identity(target)
+    identity = _rendered_target_identity(before.resources, target, allow_namespace_less=allow_namespace_less)
     if identity not in before.resources or identity not in after.resources:
         raise RollbackValidationError("rollback render did not preserve the original exact resource target")
     if before.resources.keys() != after.resources.keys():

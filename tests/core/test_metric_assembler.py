@@ -1,710 +1,159 @@
 # tests/core/test_metric_assembler.py
-"""
-Tests for MetricAssembler — the core component that builds CombinedMetric objects.
-
-These tests guarantee that:
-1. CombinedMetric is correctly assembled from energy, cost, node context, and pod data.
-2. co2e_grams comes directly from the CarbonCalculator result.
-3. Negative joules are clamped to 0 and co2e set to 0 accordingly.
-4. When no node context exists, DEFAULT_ZONE is used and is_estimated is True.
-5. When the calculator fails, the metric is skipped (no crash, empty list).
-6. When cost data is available, it is applied to total_cost.
-7. The emaps_zone from NodeZoneContext is stored in CombinedMetric.
-
-MetricAssembler is intentionally untested so far — it is the critical bridge
-between collection and storage.
-"""
+"""Tests for the MetricAssembler helpers used by the range collection path."""
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from greenkube.core.calculator import CarbonCalculationResult
+from greenkube.core.config import get_config
 from greenkube.core.metric_assembler import MetricAssembler
-from greenkube.core.prometheus_resource_mapper import PodResourceMaps, PrometheusResourceMapper
-from greenkube.models.metrics import CostMetric, EnergyMetric, PodMetric
-from greenkube.models.node import NodeInfo, NodeZoneContext
-from greenkube.models.prometheus_metrics import (
-    ContainerResourceUsage,
-    PodCPUUsage,
-    PodMemoryUsage,
-    PrometheusMetric,
-)
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_TS = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+from greenkube.core.prometheus_resource_mapper import PodResourceMaps
+from greenkube.models.metrics import CombinedMetric, CostMetric, EnergyMetric, PodMetric
+from greenkube.models.node import NodeZoneContext
 
 
-def _energy(pod="pod-a", namespace="ns-1", joules=1_000_000.0, node="node-1") -> EnergyMetric:
-    return EnergyMetric(pod_name=pod, namespace=namespace, joules=joules, timestamp=_TS, node=node)
-
-
-def _context(emaps_zone="FR", is_estimated=False) -> NodeZoneContext:
-    return NodeZoneContext(node="node-1", emaps_zone=emaps_zone, is_estimated=is_estimated)
-
-
-def _node_info(provider="aws", instance_type="m5.large") -> NodeInfo:
-    return NodeInfo(
-        name="node-1",
-        zone="us-east-1a",
-        region="us-east-1",
-        cloud_provider=provider,
-        instance_type=instance_type,
-        architecture="amd64",
-        node_pool=None,
+def _energy(*, is_estimated: bool = False, reasons: list[str] | None = None) -> EnergyMetric:
+    return EnergyMetric(
+        pod_name="pod-a",
+        namespace="ns-1",
+        joules=1_000_000.0,
+        timestamp=datetime.now(timezone.utc),
+        node="node-1",
+        is_estimated=is_estimated,
+        estimation_reasons=reasons or [],
     )
 
 
-def _empty_resource_maps() -> PodResourceMaps:
-    return PodResourceMaps(
-        cpu_usage_map={},
-        memory_usage_map={},
-        network_rx_map={},
-        network_tx_map={},
-        disk_read_map={},
-        disk_write_map={},
-        restart_map={},
-    )
-
-
-def _carbon_result(co2e=50.0, intensity=100.0) -> CarbonCalculationResult:
-    return CarbonCalculationResult(co2e_grams=co2e, grid_intensity=intensity, grid_intensity_timestamp=_TS)
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+def _known_provider() -> str:
+    profiles = get_config().DATACENTER_PUE_PROFILES
+    return next(key.removeprefix("default_") for key in profiles if key.startswith("default_"))
 
 
 @pytest.fixture
-def mock_calculator():
-    calc = MagicMock()
-    calc.calculate_emissions = AsyncMock(return_value=_carbon_result())
-    calc.prefetch_intensity = AsyncMock()
-    calc.clear_cache = AsyncMock()
-    return calc
-
-
-@pytest.fixture
-def mock_estimator():
-    est = MagicMock()
-    est.query_range_step_sec = 300
-    return est
-
-
-@pytest.fixture
-def mock_repository():
-    repo = MagicMock()
-    repo.get_for_zone_at_time = AsyncMock(return_value=100.0)
-    repo.save_history = AsyncMock()
-    return repo
-
-
-@pytest.fixture
-def mock_electricity_maps():
-    em = MagicMock()
-    em.collect = AsyncMock(return_value=[])
-    return em
-
-
-@pytest.fixture
-def mock_zone_mapper():
-    return MagicMock()
-
-
-@pytest.fixture
-def mock_embodied_service():
-    es = MagicMock()
-    es.calculate_pod_embodied = MagicMock(return_value=10.0)
-    es.is_embodied_fallback = MagicMock(return_value=False)
-    return es
-
-
-@pytest.fixture
-def assembler(
-    mock_calculator,
-    mock_estimator,
-    mock_repository,
-    mock_electricity_maps,
-    mock_zone_mapper,
-    mock_embodied_service,
-) -> MetricAssembler:
+def assembler() -> MetricAssembler:
     return MetricAssembler(
-        calculator=mock_calculator,
-        estimator=mock_estimator,
-        repository=mock_repository,
-        electricity_provider=mock_electricity_maps,
-        zone_mapper=mock_zone_mapper,
-        embodied_service=mock_embodied_service,
+        calculator=MagicMock(),
+        estimator=MagicMock(),
+        repository=MagicMock(),
+        electricity_provider=MagicMock(),
+        zone_mapper=MagicMock(),
+        embodied_service=MagicMock(),
     )
 
 
-async def _assemble_one(assembler, energy_metric, *, context=None, node_info=None, cost_map=None):
-    """Helper to call assemble() with a single energy metric."""
-    node_contexts = {"node-1": context} if context else {}
-    nodes_info = {"node-1": node_info} if node_info else {}
-    return await assembler.assemble(
-        energy_metrics=[energy_metric],
-        cost_map=cost_map or {},
-        pod_request_map={},
-        node_contexts=node_contexts,
-        nodes_info=nodes_info,
-        node_instance_map={"node-1": "m5.large"} if node_info else {},
-        boavizta_cache={},
-        cpu_adjusted_nodes=set(),
-        steps_per_day=288.0,
-        resource_maps=_empty_resource_maps(),
-    )
+def _flags(assembler: MetricAssembler, **overrides):
+    arguments = {
+        "energy_metric": _energy(),
+        "node_context": NodeZoneContext(node="node-1", emaps_zone="FR", is_estimated=False),
+        "cost_metric": CostMetric(pod_name="pod-a", namespace="ns-1", cpu_cost=0.1, ram_cost=0.1, total_cost=0.2),
+        "provider": _known_provider(),
+        "pue": 1.2,
+        "node_name": "node-1",
+        "cpu_adjusted_nodes": set(),
+    }
+    arguments.update(overrides)
+    return assembler.build_estimation_flags(**arguments)
 
 
-# ---------------------------------------------------------------------------
-# Happy path
-# ---------------------------------------------------------------------------
+class TestBuildEstimationFlags:
+    def test_fully_resolved_row_is_not_estimated(self, assembler):
+        assert _flags(assembler) == (False, [])
 
+    def test_missing_node_context_names_the_default_zone(self, assembler):
+        is_estimated, reasons = _flags(assembler, node_context=None, node_name="orphan-node")
 
-class TestMetricAssemblerHappyPath:
-    """Correct CombinedMetric assembly from complete data."""
+        assert is_estimated is True
+        assert any("orphan-node" in reason for reason in reasons)
 
-    @pytest.mark.asyncio
-    async def test_assemble_produces_one_combined_metric(self, assembler):
-        """One energy metric produces exactly one CombinedMetric."""
-        result = await _assemble_one(assembler, _energy(), context=_context(), node_info=_node_info())
+    def test_missing_cost_is_estimated(self, assembler):
+        is_estimated, reasons = _flags(assembler, cost_metric=None)
 
-        assert len(result) == 1
+        assert is_estimated is True
+        assert any("cost" in reason.lower() for reason in reasons)
 
-
-class TestPrometheusResourceProvenance:
-    def test_multi_container_values_keep_observed_and_estimated_cpu_separate(self):
-        observed = PrometheusMetric(
-            pod_cpu_usage=[
-                PodCPUUsage(namespace="ns", pod="pod-a", container="c1", node="node-1", cpu_usage_cores=0.01),
-                PodCPUUsage(namespace="ns", pod="pod-a", container="c2", node="node-1", cpu_usage_cores=0.02),
-            ]
-        )
-        estimated = observed.model_copy(
-            update={
-                "pod_cpu_usage": [
-                    observed.pod_cpu_usage[0].model_copy(
-                        update={
-                            "cpu_usage_cores": 0.1,
-                            "estimated_cpu_usage_cores": 0.1,
-                            "cpu_usage_provenance": "estimated",
-                        }
-                    ),
-                    observed.pod_cpu_usage[1].model_copy(
-                        update={
-                            "cpu_usage_cores": 0.1,
-                            "estimated_cpu_usage_cores": 0.1,
-                            "cpu_usage_provenance": "estimated",
-                        }
-                    ),
-                ]
-            }
-        )
-
-        maps = PrometheusResourceMapper.build(observed, estimated)
-
-        assert maps.cpu_usage_map[("ns", "pod-a")] == 30
-        assert maps.observed_cpu_usage_map[("ns", "pod-a")] == 30
-        assert maps.estimated_cpu_usage_map[("ns", "pod-a")] == 200
-        assert [item.cpu_usage_cores for item in observed.pod_cpu_usage] == [0.01, 0.02]
-
-    def test_mapping_is_idempotent(self):
-        metrics = PrometheusMetric(
-            pod_cpu_usage=[PodCPUUsage(namespace="ns", pod="pod-a", container="c1", node="node-1", cpu_usage_cores=0.1)]
-        )
-
-        first = PrometheusResourceMapper.build(metrics)
-        second = PrometheusResourceMapper.build(metrics)
-
-        assert first == second
-        assert metrics.pod_cpu_usage[0].cpu_usage_provenance == "observed"
-
-    def test_mapping_preserves_cpu_and_memory_by_container(self):
-        metrics = PrometheusMetric(
-            pod_cpu_usage=[
-                PodCPUUsage(namespace="ns", pod="pod-a", container="web", node="node-1", cpu_usage_cores=0.02),
-                PodCPUUsage(
-                    namespace="ns", pod="pod-a", container="telemetry-sidecar", node="node-1", cpu_usage_cores=0.01
-                ),
-            ],
-            pod_memory_usage=[
-                PodMemoryUsage(
-                    namespace="ns", pod="pod-a", container="web", node="node-1", memory_usage_bytes=120 * 1024**2
-                ),
-                PodMemoryUsage(
-                    namespace="ns",
-                    pod="pod-a",
-                    container="telemetry-sidecar",
-                    node="node-1",
-                    memory_usage_bytes=40 * 1024**2,
-                ),
-            ],
-        )
-
-        maps = PrometheusResourceMapper.build(metrics)
-
-        assert maps.container_cpu_usage_map == {
-            ("ns", "pod-a", "telemetry-sidecar"): 10,
-            ("ns", "pod-a", "web"): 20,
-        }
-        assert maps.container_memory_usage_map == {
-            ("ns", "pod-a", "telemetry-sidecar"): 40 * 1024**2,
-            ("ns", "pod-a", "web"): 120 * 1024**2,
-        }
-
-    def test_metrics_api_fills_missing_prometheus_container_labels(self):
-        metrics = PrometheusMetric(
-            pod_cpu_usage=[PodCPUUsage(namespace="ns", pod="pod-a", container="", node="node-1", cpu_usage_cores=0.03)],
-            pod_memory_usage=[
-                PodMemoryUsage(namespace="ns", pod="pod-a", container="", node="node-1", memory_usage_bytes=1000)
-            ],
-        )
-        container_usage = [
-            ContainerResourceUsage(
-                namespace="ns",
-                pod_name="pod-a",
-                container_name="web",
-                cpu_usage_millicores=20,
-                memory_usage_bytes=120 * 1024**2,
-            ),
-            ContainerResourceUsage(
-                namespace="ns",
-                pod_name="pod-a",
-                container_name="telemetry-sidecar",
-                cpu_usage_millicores=10,
-                memory_usage_bytes=40 * 1024**2,
-            ),
-        ]
-
-        maps = PrometheusResourceMapper.build(metrics, container_usages=container_usage)
-
-        assert maps.cpu_usage_map[("ns", "pod-a")] == 30
-        assert maps.memory_usage_map[("ns", "pod-a")] == 1000
-        assert maps.container_cpu_usage_map == {
-            ("ns", "pod-a", "telemetry-sidecar"): 10,
-            ("ns", "pod-a", "web"): 20,
-        }
-        assert maps.container_memory_usage_map == {
-            ("ns", "pod-a", "telemetry-sidecar"): 40 * 1024**2,
-            ("ns", "pod-a", "web"): 120 * 1024**2,
-        }
-
-    def test_prometheus_container_usage_takes_precedence_over_metrics_api_fallback(self):
-        metrics = PrometheusMetric(
-            pod_cpu_usage=[
-                PodCPUUsage(namespace="ns", pod="pod-a", container="web", node="node-1", cpu_usage_cores=0.02)
-            ]
-        )
-        container_usage = [
-            ContainerResourceUsage(
-                namespace="ns",
-                pod_name="pod-a",
-                container_name="web",
-                cpu_usage_millicores=5,
-                memory_usage_bytes=None,
-            )
-        ]
-
-        maps = PrometheusResourceMapper.build(metrics, container_usages=container_usage)
-
-        assert maps.container_cpu_usage_map[("ns", "pod-a", "web")] == 20
-
-    @pytest.mark.asyncio
-    async def test_container_metrics_keep_request_identity_and_apportion_pod_savings(self, assembler):
-        pod_metrics = [
-            PodMetric(
-                pod_name="pod-a",
-                namespace="ns-1",
-                container_name="web",
-                cpu_request=500,
-                memory_request=256 * 1024**2,
-                owner_kind="Deployment",
-                owner_name="api",
-            ),
-            PodMetric(
-                pod_name="pod-a",
-                namespace="ns-1",
-                container_name="telemetry-sidecar",
-                cpu_request=100,
-                memory_request=64 * 1024**2,
-                owner_kind="Deployment",
-                owner_name="api",
-            ),
-        ]
-        resource_maps = PrometheusResourceMapper.build(
-            PrometheusMetric(
-                pod_cpu_usage=[
-                    PodCPUUsage(namespace="ns-1", pod="pod-a", container="web", node="node-1", cpu_usage_cores=0.02),
-                    PodCPUUsage(
-                        namespace="ns-1",
-                        pod="pod-a",
-                        container="telemetry-sidecar",
-                        node="node-1",
-                        cpu_usage_cores=0.01,
-                    ),
-                ],
-                pod_memory_usage=[
-                    PodMemoryUsage(
-                        namespace="ns-1",
-                        pod="pod-a",
-                        container="web",
-                        node="node-1",
-                        memory_usage_bytes=120 * 1024**2,
-                    ),
-                    PodMemoryUsage(
-                        namespace="ns-1",
-                        pod="pod-a",
-                        container="telemetry-sidecar",
-                        node="node-1",
-                        memory_usage_bytes=40 * 1024**2,
-                    ),
-                ],
-            )
-        )
-        aggregates = await assembler.assemble(
-            energy_metrics=[_energy(pod="pod-a", namespace="ns-1")],
-            cost_map={
-                "pod-a": CostMetric(
-                    pod_name="pod-a",
-                    namespace="ns-1",
-                    cpu_cost=0.1,
-                    ram_cost=0.2,
-                    total_cost=0.3,
-                )
-            },
-            pod_request_map={
-                ("ns-1", "pod-a"): {
-                    "cpu": 600,
-                    "memory": 320 * 1024**2,
-                    "owner_kind": "Deployment",
-                    "owner_name": "api",
-                }
-            },
-            node_contexts={"node-1": _context()},
-            nodes_info={"node-1": _node_info()},
-            node_instance_map={"node-1": "m5.large"},
-            boavizta_cache={},
-            cpu_adjusted_nodes=set(),
-            steps_per_day=288.0,
-            resource_maps=resource_maps,
-        )
-
-        result = assembler.assemble_container_metrics(aggregates, pod_metrics, resource_maps)
-
-        assert {metric.container_name for metric in result} == {"web", "telemetry-sidecar"}
-        assert {metric.container_name: metric.cpu_request for metric in result} == {
-            "web": 500,
-            "telemetry-sidecar": 100,
-        }
-        assert {metric.container_name: metric.cpu_usage_millicores for metric in result} == {
-            "web": 20,
-            "telemetry-sidecar": 10,
-        }
-        assert all(metric.is_estimated for metric in result)
-        assert all(
-            any("allocated from pod-level" in reason for reason in metric.estimation_reasons) for metric in result
-        )
-        assert all(metric.restart_count is None for metric in result)
-        assert all(metric.network_receive_bytes is None for metric in result)
-        assert sum(metric.total_cost for metric in result) == pytest.approx(aggregates[0].total_cost)
-        assert sum(metric.co2e_grams for metric in result) == pytest.approx(aggregates[0].co2e_grams)
-
-    @pytest.mark.asyncio
-    async def test_combined_metric_pod_and_namespace(self, assembler):
-        """pod_name and namespace are correctly carried into CombinedMetric."""
-        result = await _assemble_one(
-            assembler, _energy(pod="my-pod", namespace="my-ns"), context=_context(), node_info=_node_info()
-        )
-
-        assert result[0].pod_name == "my-pod"
-        assert result[0].namespace == "my-ns"
-
-    @pytest.mark.asyncio
-    async def test_co2e_comes_from_calculator(self, assembler, mock_calculator):
-        """co2e_grams in CombinedMetric equals what the calculator returned."""
-        mock_calculator.calculate_emissions = AsyncMock(return_value=_carbon_result(co2e=123.45))
-
-        result = await _assemble_one(assembler, _energy(), context=_context(), node_info=_node_info())
-
-        assert result[0].co2e_grams == pytest.approx(123.45)
-
-    @pytest.mark.asyncio
-    async def test_grid_intensity_from_calculator(self, assembler, mock_calculator):
-        """grid_intensity in CombinedMetric equals the intensity used by the calculator."""
-        mock_calculator.calculate_emissions = AsyncMock(return_value=_carbon_result(intensity=250.0))
-
-        result = await _assemble_one(assembler, _energy(), context=_context(), node_info=_node_info())
-
-        assert result[0].grid_intensity == pytest.approx(250.0)
-
-    @pytest.mark.asyncio
-    async def test_emaps_zone_from_node_context(self, assembler):
-        """emaps_zone in CombinedMetric is taken from the node context."""
-        result = await _assemble_one(assembler, _energy(), context=_context(emaps_zone="DE"), node_info=_node_info())
-
-        assert result[0].emaps_zone == "DE"
-
-    @pytest.mark.asyncio
-    async def test_joules_preserved_in_combined_metric(self, assembler):
-        """joules in CombinedMetric matches the input EnergyMetric."""
-        result = await _assemble_one(assembler, _energy(joules=750_000.0), context=_context(), node_info=_node_info())
-
-        assert result[0].joules == pytest.approx(750_000.0)
-
-    @pytest.mark.asyncio
-    async def test_cost_applied_from_cost_map(self, assembler):
-        """total_cost is non-zero when a matching CostMetric exists in cost_map."""
-        cost = CostMetric(pod_name="pod-a", namespace="ns-1", cpu_cost=0.10, ram_cost=0.20, total_cost=0.30)
-        result = await _assemble_one(
-            assembler,
-            _energy(),
-            context=_context(),
-            node_info=_node_info(),
-            cost_map={"pod-a": cost},
-        )
-
-        # Cost is normalised per step; steps_per_day=288 → per-step cost
-        assert result[0].total_cost > 0
-
-    @pytest.mark.asyncio
-    async def test_pue_applied_from_provider_profile(self, assembler):
-        """pue in CombinedMetric is non-zero and ≥ 1.0."""
-        result = await _assemble_one(assembler, _energy(), context=_context(), node_info=_node_info())
-
-        assert result[0].pue >= 1.0
-
-    @pytest.mark.asyncio
-    async def test_node_instance_type_stored(self, assembler):
-        """node_instance_type is copied from nodes_info into CombinedMetric."""
-        result = await _assemble_one(assembler, _energy(), context=_context(), node_info=_node_info())
-
-        assert result[0].node_instance_type == "m5.large"
-
-    @pytest.mark.asyncio
-    async def test_empty_energy_metrics_produces_empty_list(self, assembler):
-        """No energy metrics → empty result list."""
-        result = await assembler.assemble(
-            energy_metrics=[],
-            cost_map={},
-            pod_request_map={},
-            node_contexts={},
-            nodes_info={},
-            node_instance_map={},
-            boavizta_cache={},
-            cpu_adjusted_nodes=set(),
-            steps_per_day=288.0,
-            resource_maps=_empty_resource_maps(),
-        )
-        assert result == []
-
-
-# ---------------------------------------------------------------------------
-# Estimation flags & fallback behaviour
-# ---------------------------------------------------------------------------
-
-
-class TestMetricAssemblerEstimationFlags:
-    """Tests for is_estimated flag and estimation_reasons population."""
-
-    @pytest.mark.asyncio
-    async def test_is_estimated_true_when_no_node_context(self, assembler):
-        """When no node context exists for the node, is_estimated must be True."""
-        # No context for "node-1"
-        result = await assembler.assemble(
-            energy_metrics=[_energy(node="orphan-node")],
-            cost_map={},
-            pod_request_map={},
-            node_contexts={},
-            nodes_info={},
-            node_instance_map={},
-            boavizta_cache={},
-            cpu_adjusted_nodes=set(),
-            steps_per_day=288.0,
-            resource_maps=_empty_resource_maps(),
-        )
-
-        assert len(result) == 1
-        assert result[0].is_estimated is True
-        assert any("orphan-node" in reason for reason in result[0].estimation_reasons)
-
-    @pytest.mark.asyncio
-    async def test_is_estimated_true_when_no_cost_data(self, assembler):
-        """When no cost data exists for the pod, is_estimated must be True."""
-        result = await _assemble_one(
-            assembler,
-            _energy(),
-            context=_context(),
-            node_info=_node_info(),
-            cost_map={},  # No cost for pod-a
-        )
-
-        assert result[0].is_estimated is True
-        assert any("cost" in r.lower() for r in result[0].estimation_reasons)
-
-    @pytest.mark.asyncio
-    async def test_is_estimated_false_for_fully_resolved_metric(self, assembler):
-        """With all data available from known provider, is_estimated should be False."""
-        from greenkube.core.config import get_config
-
-        cfg = get_config()
-        # Use a provider whose PUE profile IS defined so no estimation reason is added
-        provider = next(
-            (p.replace("default_", "") for p in cfg.DATACENTER_PUE_PROFILES if p.startswith("default_")),
-            "aws",
-        )
-        cost = CostMetric(pod_name="pod-a", namespace="ns-1", cpu_cost=0.1, ram_cost=0.1, total_cost=0.2)
-        context = NodeZoneContext(node="node-1", emaps_zone="FR", is_estimated=False)
-        node_info = _node_info(provider=provider)
-
-        result = await _assemble_one(
-            assembler,
-            _energy(),
-            context=context,
-            node_info=node_info,
-            cost_map={"pod-a": cost},
-        )
-
-        assert len(result) == 1
-        assert result[0].is_estimated is False
-
-    @pytest.mark.asyncio
-    async def test_negative_opencost_is_marked_untrusted_even_when_other_sources_are_resolved(self, assembler):
-        from greenkube.core.config import get_config
-
-        cfg = get_config()
-        provider = next(
-            (p.replace("default_", "") for p in cfg.DATACENTER_PUE_PROFILES if p.startswith("default_")),
-            "aws",
-        )
+    def test_negative_opencost_is_marked_untrusted(self, assembler):
         cost = CostMetric(pod_name="pod-a", namespace="ns-1", cpu_cost=-0.1, ram_cost=0.0, total_cost=-0.1)
-        context = NodeZoneContext(node="node-1", emaps_zone="FR", is_estimated=False)
 
-        result = await _assemble_one(
+        is_estimated, reasons = _flags(assembler, cost_metric=cost)
+
+        assert is_estimated is True
+        assert any("negative" in reason.lower() for reason in reasons)
+
+    @pytest.mark.parametrize("provider", [None, "unknown-cloud"])
+    def test_unknown_provider_uses_the_default_pue(self, assembler, provider):
+        is_estimated, reasons = _flags(assembler, provider=provider)
+
+        assert is_estimated is True
+        assert any("PUE" in reason for reason in reasons)
+
+    def test_energy_and_zone_reasons_are_kept_once(self, assembler):
+        context = NodeZoneContext(node="node-1", emaps_zone="FR", is_estimated=True, estimation_reasons=["zone"])
+
+        is_estimated, reasons = _flags(
             assembler,
-            _energy(),
-            context=context,
-            node_info=_node_info(provider=provider),
-            cost_map={"pod-a": cost},
+            energy_metric=_energy(is_estimated=True, reasons=["zone", "profile"]),
+            node_context=context,
         )
 
-        assert result[0].is_estimated is True
-        assert any("negative" in reason.lower() for reason in result[0].estimation_reasons)
-
-    @pytest.mark.asyncio
-    async def test_estimation_reasons_not_empty_when_estimated(self, assembler):
-        """When is_estimated is True, estimation_reasons must contain at least one entry."""
-        result = await _assemble_one(assembler, _energy(), context=None)
-
-        assert result[0].is_estimated is True
-        assert len(result[0].estimation_reasons) > 0
+        assert is_estimated is True
+        assert reasons == ["zone", "profile"]
 
 
-# ---------------------------------------------------------------------------
-# Data integrity — sanity checks & edge cases
-# ---------------------------------------------------------------------------
+def test_container_rows_keep_request_identity_and_apportion_pod_values():
+    pod_metrics = [
+        PodMetric(
+            pod_name="pod-a",
+            namespace="ns-1",
+            container_name="web",
+            cpu_request=500,
+            memory_request=256 * 1024**2,
+            owner_kind="Deployment",
+            owner_name="api",
+        ),
+        PodMetric(
+            pod_name="pod-a",
+            namespace="ns-1",
+            container_name="telemetry-sidecar",
+            cpu_request=100,
+            memory_request=64 * 1024**2,
+            owner_kind="Deployment",
+            owner_name="api",
+        ),
+    ]
+    resource_maps = PodResourceMaps(
+        container_cpu_usage_map={("ns-1", "pod-a", "web"): 20, ("ns-1", "pod-a", "telemetry-sidecar"): 10},
+        container_memory_usage_map={
+            ("ns-1", "pod-a", "web"): 120 * 1024**2,
+            ("ns-1", "pod-a", "telemetry-sidecar"): 40 * 1024**2,
+        },
+    )
+    aggregate = CombinedMetric(
+        pod_name="pod-a",
+        namespace="ns-1",
+        node="node-1",
+        timestamp=datetime.now(timezone.utc),
+        total_cost=0.3,
+        cost_cpu=0.1,
+        cost_ram=0.2,
+        co2e_grams=50.0,
+        joules=1_000_000.0,
+        cpu_request=600,
+        memory_request=320 * 1024**2,
+        cost_source="opencost",
+        usage_source="prometheus",
+    )
 
+    result = MetricAssembler.assemble_container_metrics([aggregate], pod_metrics, resource_maps)
 
-class TestMetricAssemblerDataIntegrity:
-    """Tests that guard against obviously wrong values in assembled metrics."""
-
-    @pytest.mark.asyncio
-    async def test_negative_joules_clamped_to_zero(self, assembler, mock_calculator):
-        """Negative joules must be clamped to 0; co2e must also be 0."""
-        mock_calculator.calculate_emissions = AsyncMock(return_value=_carbon_result(co2e=50.0))
-
-        result = await _assemble_one(assembler, _energy(joules=-500.0), context=_context(), node_info=_node_info())
-
-        assert len(result) == 1
-        assert result[0].joules == pytest.approx(0.0)
-        assert result[0].co2e_grams == pytest.approx(0.0)
-
-    @pytest.mark.asyncio
-    async def test_calculator_failure_skips_metric(self, assembler, mock_calculator):
-        """When the calculator raises, the metric is skipped — no crash, empty result."""
-        mock_calculator.calculate_emissions = AsyncMock(side_effect=RuntimeError("Calculator failed"))
-
-        result = await _assemble_one(assembler, _energy(), context=_context(), node_info=_node_info())
-
-        assert result == []
-
-    @pytest.mark.asyncio
-    async def test_calculator_returns_none_skips_metric(self, assembler, mock_calculator):
-        """When calculate_emissions returns None, the metric is skipped gracefully."""
-        mock_calculator.calculate_emissions = AsyncMock(return_value=None)
-
-        result = await _assemble_one(assembler, _energy(), context=_context(), node_info=_node_info())
-
-        assert result == []
-
-    @pytest.mark.asyncio
-    async def test_multiple_energy_metrics_produce_multiple_combined_metrics(self, assembler):
-        """Multiple energy metrics all produce corresponding CombinedMetric objects."""
-        energy_metrics = [
-            EnergyMetric(pod_name="pod-a", namespace="ns-1", joules=100_000.0, timestamp=_TS, node="node-1"),
-            EnergyMetric(pod_name="pod-b", namespace="ns-2", joules=200_000.0, timestamp=_TS, node="node-1"),
-        ]
-        node_contexts = {"node-1": _context()}
-        nodes_info = {"node-1": _node_info()}
-
-        result = await assembler.assemble(
-            energy_metrics=energy_metrics,
-            cost_map={},
-            pod_request_map={},
-            node_contexts=node_contexts,
-            nodes_info=nodes_info,
-            node_instance_map={},
-            boavizta_cache={},
-            cpu_adjusted_nodes=set(),
-            steps_per_day=288.0,
-            resource_maps=_empty_resource_maps(),
-        )
-
-        assert len(result) == 2
-        pod_names = {m.pod_name for m in result}
-        assert pod_names == {"pod-a", "pod-b"}
-
-    @pytest.mark.asyncio
-    async def test_duration_seconds_set_from_estimator(self, assembler, mock_estimator):
-        """duration_seconds in CombinedMetric equals estimator.query_range_step_sec."""
-        mock_estimator.query_range_step_sec = 600
-
-        result = await _assemble_one(assembler, _energy(), context=_context(), node_info=_node_info())
-
-        assert result[0].duration_seconds == 600
-
-    @pytest.mark.asyncio
-    async def test_timestamp_preserved(self, assembler):
-        """The timestamp from EnergyMetric is preserved in CombinedMetric."""
-        ts = datetime(2026, 3, 15, 8, 30, 0, tzinfo=timezone.utc)
-        metric = EnergyMetric(pod_name="pod-a", namespace="ns-1", joules=100_000.0, timestamp=ts, node="node-1")
-
-        result = await _assemble_one(assembler, metric, context=_context(), node_info=_node_info())
-
-        assert result[0].timestamp == ts
-
-
-class TestPrefetchPerBucket:
-    @pytest.mark.asyncio
-    async def test_prefetch_fetches_each_hour_separately(self, assembler, mock_calculator, mock_repository):
-        """A batch spanning two hours must fetch two intensities, not reuse the latest."""
-        h1 = datetime(2026, 1, 15, 10, 5, tzinfo=timezone.utc)
-        h2 = datetime(2026, 1, 15, 11, 50, tzinfo=timezone.utc)
-        metrics = [
-            _energy(pod="pod-a").model_copy(update={"timestamp": h1}),
-            _energy(pod="pod-b").model_copy(update={"timestamp": h2}),
-        ]
-        mock_repository.get_for_zone_at_time = AsyncMock(side_effect=[100.0, 200.0])
-
-        await assembler.prefetch_intensities(metrics, {"node-1": _context(emaps_zone="FR")})
-
-        queried = [call.args[1] for call in mock_repository.get_for_zone_at_time.await_args_list]
-        assert "2026-01-15T10:00:00+00:00" in queried
-        assert "2026-01-15T11:00:00+00:00" in queried
-        assert mock_calculator.prefetch_intensity.await_count == 2
-        prefetched = sorted(call.args[2] for call in mock_calculator.prefetch_intensity.await_args_list)
-        assert prefetched == [100.0, 200.0]
+    assert {metric.container_name: metric.cpu_request for metric in result} == {"web": 500, "telemetry-sidecar": 100}
+    assert {metric.container_name: metric.cpu_usage_millicores for metric in result} == {
+        "web": 20,
+        "telemetry-sidecar": 10,
+    }
+    # BUG-29: container rows inherit the pod's provenance instead of being blanket-estimated.
+    assert all(metric.is_estimated == aggregate.is_estimated for metric in result)
+    assert all(metric.cost_source == "opencost" for metric in result)
+    assert all(metric.usage_source == "prometheus" for metric in result)
+    assert sum(metric.total_cost for metric in result) == pytest.approx(aggregate.total_cost)
+    assert sum(metric.co2e_grams for metric in result) == pytest.approx(aggregate.co2e_grams)

@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
-from collections.abc import Callable, Mapping
+import logging
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
-from greenkube.automation.git.base import GitProvider
+from greenkube.automation.delivery import DELIVERY_DIRECT, configured_delivery_mode, effective_expiry
 from greenkube.automation.rollback import InversePlan, inverse_plan_id
 from greenkube.core.observability import elapsed, record_automation_failure, record_automation_plan, start_timer
 from greenkube.gitops.contracts import (
+    PLANNABLE_RENDERERS,
     ActionPlanV3,
     ActionStatus,
     AutomationErrorCode,
@@ -27,8 +28,10 @@ from greenkube.gitops.contracts import (
     RendererKind,
     ValidationResult,
     WorkloadSource,
+    same_repository,
 )
 from greenkube.gitops.discovery.common import safe_repo_path
+from greenkube.gitops.planning.digest import RENDERER_EGRESS_UNENFORCED_WARNING, with_plan_warnings
 from greenkube.gitops.planning.helm import (
     FluxHelmReleasePlanError,
     FluxHelmReleasePlanner,
@@ -46,27 +49,52 @@ from greenkube.gitops.planning.raw_manifest import (
 from greenkube.gitops.planning.raw_manifest import (
     RepositorySnapshot as RawManifestSnapshot,
 )
+from greenkube.gitops.planning.render_inputs import (
+    changed_render_inputs,
+    inverse_render_inputs,
+    records_render_inputs,
+)
 from greenkube.gitops.renderers import RawRenderError, render_raw
 from greenkube.gitops.renderers.helm import HelmError
 from greenkube.gitops.renderers.kustomize import KustomizeError
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.gitops.snapshots.models import (
     RepositorySnapshot as ArchiveRepositorySnapshot,
 )
 from greenkube.gitops.snapshots.models import (
     SnapshotFile,
 )
-from greenkube.storage.base_gitops_repository import AutomationPlanRepository
+from greenkube.storage.base_gitops_repository import (
+    AutomationPlanRepository,
+    WorkloadPlanConflictError,
+    WorkloadPlanGuard,
+)
+from greenkube.utils.time import ensure_utc
+
+logger = logging.getLogger(__name__)
 
 _RAW_MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
-_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
-_GIT_BLOB_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _REPLACEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _STALEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _EXPIREABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _BUSY_STATUSES = frozenset({PlanStatus.APPLYING, PlanStatus.PR_OPEN, PlanStatus.MERGED, PlanStatus.SYNCED})
+_EXPIRY_BATCH_SIZE = 500
 _REPLANABLE_STATUSES = frozenset(
-    {PlanStatus.CLOSED, PlanStatus.FAILED, PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED}
+    {
+        PlanStatus.CLOSED,
+        PlanStatus.FAILED,
+        PlanStatus.STALE,
+        PlanStatus.SUPERSEDED,
+        PlanStatus.REJECTED,
+        PlanStatus.CANCELLED,
+    }
 )
+# Unapproved previews a newer request for the same workload replaces instead of 409 (D6, BUG-48).
+SUPERSEDABLE_PREVIEW_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED})
+_CANCELLABLE_PREVIEW_STATUSES = SUPERSEDABLE_PREVIEW_STATUSES
+
+
+logger = logging.getLogger(__name__)
 
 
 class AutomationPlanError(RuntimeError):
@@ -87,7 +115,42 @@ class AutomationPlanError(RuntimeError):
         super().__init__(message)
 
 
-PlanServiceError = AutomationPlanError
+class _RecommendationReader(Protocol):
+    async def get_recommendation_by_id(self, rec_id: int) -> Any: ...
+
+
+async def ensure_recommendations_active(repository: _RecommendationReader, recommendation_ids: Sequence[Any]) -> None:
+    """Raise ``not_active`` when a requested recommendation (or one grouped with it) is not active.
+
+    Planning a dismissed, applied, expired or superseded recommendation is a
+    lifecycle problem, not a targeting one: the caller gets ``not_active``
+    instead of the planner's generic ``requires_container_target``. Unknown ids
+    and invalid input are left to the planner, which rejects them.
+    """
+    seen: set[int] = set()
+    pending = [rec_id for rec_id in recommendation_ids if type(rec_id) is int and rec_id > 0]
+    while pending:
+        rec_id = pending.pop(0)
+        if rec_id in seen:
+            continue
+        seen.add(rec_id)
+        try:
+            record = await repository.get_recommendation_by_id(rec_id)
+        except Exception:  # the planner reads it again and fails closed
+            continue
+        if record is None:
+            continue
+        status = getattr(record, "status", None)
+        label = str(getattr(status, "value", status) or "").lower()
+        if status is not None and label != "active":
+            raise AutomationPlanError(
+                AutomationErrorCode.NOT_ACTIVE,
+                f"recommendation {rec_id} is {label}; only active recommendations can be planned",
+            )
+        action = getattr(record, "action", None)
+        pending.extend(
+            other for other in (getattr(action, "recommendation_ids", None) or ()) if type(other) is int and other > 0
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,39 +180,6 @@ class PlanOperationEnqueuer(Protocol):
     async def enqueue(self, plan: Plan, *, idempotency_key: str) -> object: ...
 
 
-class ProviderGitBlobResolver:
-    """Resolve Git blob metadata where the existing provider adapter exposes a blob SHA."""
-
-    def __init__(self, providers: Mapping[str, GitProvider]) -> None:
-        self._providers = dict(providers)
-
-    async def get_blob_file(self, source: WorkloadSource, path: str, revision: str) -> GitBlobFile | None:
-        provider = self._providers.get(source.provider_id)
-        if provider is None:
-            raise AutomationPlanError(
-                AutomationErrorCode.PROVIDER_NOT_READY,
-                f"no Git provider is configured for {source.provider_id!r}",
-            )
-        if provider.name not in {"github", "gitea", "gitlab"}:
-            raise AutomationPlanError(
-                AutomationErrorCode.PROVIDER_NOT_READY,
-                f"provider {provider.name!r} has no verified Git blob SHA adapter",
-            )
-        repository = provider.repository(source.repo_url, base_branch=source.ref)
-        git_file = await provider.get_file(repository, path, revision)
-        if git_file is None:
-            return None
-        blob_sha = git_file.blob_sha
-        if blob_sha is None and provider.name in {"github", "gitea"}:
-            blob_sha = git_file.sha
-        if blob_sha is None:
-            raise AutomationPlanError(
-                AutomationErrorCode.PROVIDER_NOT_READY,
-                f"provider returned no Git blob SHA for {path!r} at {revision}",
-            )
-        return GitBlobFile(path=git_file.path, content=git_file.content, blob_sha=blob_sha)
-
-
 class AutomationPlanService:
     """Validate, persist and transition raw-manifest plans without mutating a cluster."""
 
@@ -165,6 +195,7 @@ class AutomationPlanService:
         operation_enqueuer: PlanOperationEnqueuer | None = None,
         plan_ttl: timedelta = timedelta(minutes=30),
         clock: Callable[[], datetime] | None = None,
+        renderer_egress_unenforced: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         if plan_ttl <= timedelta(0):
             raise ValueError("plan_ttl must be positive")
@@ -184,6 +215,8 @@ class AutomationPlanService:
         self.operation_enqueuer = operation_enqueuer
         self.plan_ttl = plan_ttl
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        #: True when the readiness reconciler last saw the renderer's egress canary connect (F6).
+        self.renderer_egress_unenforced = renderer_egress_unenforced
 
     async def create_plan(
         self,
@@ -217,6 +250,30 @@ class AutomationPlanService:
             if status == "failed":
                 record_automation_failure("plan")
 
+    async def _with_renderer_warnings(self, file_plan: Any, action: ActionPlanV3, source: WorkloadSource) -> Any:
+        """Kustomize and Helm plans carry ``renderer_egress_unenforced`` when the canary connected (F6).
+
+        Raw-manifest plans never call the renderer. A probe that cannot be read
+        adds nothing: the warning reports a known state, it never blocks.
+        """
+        probe = self.renderer_egress_unenforced
+        if probe is None or not isinstance(file_plan, FilePlan):
+            return file_plan
+        try:
+            unenforced = await probe()
+        except Exception as exc:
+            logger.debug("Renderer egress state unreadable (%s); no warning added.", type(exc).__name__)
+            return file_plan
+        if not unenforced:
+            return file_plan
+        return with_plan_warnings(
+            file_plan,
+            [RENDERER_EGRESS_UNENFORCED_WARNING],
+            action=action,
+            source=source,
+            error_type=ValueError,
+        )
+
     async def preview_plan(
         self,
         action: ActionPlanV3,
@@ -249,7 +306,7 @@ class AutomationPlanService:
         persist: bool,
         actor: str,
     ) -> Plan:
-        now = _as_utc(self.clock())
+        now = ensure_utc(self.clock())
         self._validate_source(source, now)
         contents, file_metadata, base_revision = _archive_contents(snapshot, source)
         if source.renderer is RendererKind.KUSTOMIZE:
@@ -286,12 +343,14 @@ class AutomationPlanService:
             except HelmValuesUnsupportedError as exc:
                 raise AutomationPlanError(
                     AutomationErrorCode.UNSUPPORTED_SOURCE,
-                    "the Helm values mapping is unsupported or did not preserve the exact target",
+                    f"the Helm values mapping is unsupported or did not preserve the exact target: {exc}",
                 ) from exc
             except (HelmPlanError, HelmError, ValidationError) as exc:
+                if _is_no_effective_change(exc):
+                    raise _no_effective_change_error(exc) from exc
                 raise AutomationPlanError(
                     AutomationErrorCode.RENDER_VALIDATION_FAILED,
-                    "Helm values render validation failed",
+                    f"Helm values render validation failed: {exc}",
                 ) from exc
         elif source.renderer is RendererKind.HELM_RELEASE:
             planner = self.planners.get(RendererKind.HELM_RELEASE)
@@ -305,12 +364,14 @@ class AutomationPlanService:
             except FluxHelmReleaseUnsupportedError as exc:
                 raise AutomationPlanError(
                     AutomationErrorCode.UNSUPPORTED_SOURCE,
-                    "this Flux HelmRelease source is outside the validated local post-renderer subset",
+                    f"this Flux HelmRelease source is outside the validated post-renderer subset: {exc}",
                 ) from exc
             except (FluxHelmReleasePlanError, HelmPlanError, HelmError, ValidationError) as exc:
+                if _is_no_effective_change(exc):
+                    raise _no_effective_change_error(exc) from exc
                 raise AutomationPlanError(
                     AutomationErrorCode.RENDER_VALIDATION_FAILED,
-                    "Flux HelmRelease render validation failed",
+                    f"Flux HelmRelease render validation failed: {exc}",
                 ) from exc
         else:
             target_path = _find_target_path(contents, action)
@@ -326,6 +387,8 @@ class AutomationPlanService:
             except (RawManifestPlanError, ValidationError) as exc:
                 raise _planner_error(exc) from exc
 
+        if source.renderer is not RendererKind.RAW:
+            file_plan = await self._with_renderer_warnings(file_plan, action, source)
         if not file_plan.validation.passed:
             raise AutomationPlanError(
                 AutomationErrorCode.RENDER_VALIDATION_FAILED,
@@ -371,10 +434,15 @@ class AutomationPlanService:
             if (
                 existing.status in _EXPIREABLE_STATUSES
                 and existing.expires_at is not None
-                and _as_utc(existing.expires_at) <= now
+                and ensure_utc(existing.expires_at) <= now
             ):
-                await self._transition(existing, PlanStatus.STALE)
-                raise AutomationPlanError(AutomationErrorCode.PLAN_EXPIRED, "plan has expired")
+                # A fresh request after the previous identical preview expired re-plans instead of 409.
+                existing = await self._transition(existing, PlanStatus.STALE, reason_code="plan_expired")
+            refreshed = _binding_generation_changed(existing.source, source)
+            if existing.status in SUPERSEDABLE_PREVIEW_STATUSES and refreshed:
+                # Same files, but the binding was refreshed since (e2e: a crash-looping workload's
+                # live evidence flaps): approving the old preview would always answer source_changed.
+                existing = await self._transition(existing, PlanStatus.STALE, reason_code="source_changed")
             if existing.status in _REPLANABLE_STATUSES:
                 plan = await self._next_attempt_plan(plan)
             elif existing.status not in _REPLACEABLE_STATUSES | {PlanStatus.APPLYING, PlanStatus.PR_OPEN}:
@@ -385,10 +453,7 @@ class AutomationPlanService:
             else:
                 return existing
 
-        previous_plans = []
-        for previous_status in _BUSY_STATUSES | _REPLACEABLE_STATUSES:
-            previous_plans.extend(await self.repository.list_plans(status=previous_status))
-        previous_plans = [candidate for candidate in previous_plans if _same_workload_binding(candidate.source, source)]
+        previous_plans = await self._workload_plans(source, _BUSY_STATUSES | _REPLACEABLE_STATUSES)
         previous_plans.sort(key=lambda candidate: (candidate.created_at, candidate.plan_id))
         busy = [item for item in previous_plans if item.status in _BUSY_STATUSES]
         if busy:
@@ -400,7 +465,39 @@ class AutomationPlanService:
         if not persist:
             return plan
 
-        saved = await self.repository.save_plan(plan, policy_result=policy_result, actor=actor)
+        # Compare-and-set insert: a concurrent request for the same deterministic plan ID must
+        # never overwrite a plan that already advanced (D12, BUG-56). The busy check above is
+        # repeated atomically with the insert: two concurrent requests for one workload yield
+        # one plan, and a plan that became busy meanwhile refuses the new one.
+        guarded_insert = getattr(self.repository, "save_plan_if_workload_idle", None)
+        insert_if_absent = getattr(self.repository, "save_plan_if_absent", None)
+        if callable(guarded_insert):
+            guard = WorkloadPlanGuard(
+                blocking_statuses=_BUSY_STATUSES | _REPLACEABLE_STATUSES,
+                tolerated_plan_ids=frozenset(
+                    previous.plan_id for previous in previous_plans if previous.status in _REPLACEABLE_STATUSES
+                ),
+                tolerated_statuses=_REPLACEABLE_STATUSES,
+            )
+            try:
+                saved = await cast(Any, guarded_insert)(plan, guard, policy_result=policy_result, actor=actor)
+            except WorkloadPlanConflictError as exc:
+                raise AutomationPlanError(
+                    AutomationErrorCode.WORKLOAD_PLAN_ALREADY_EXISTS,
+                    f"another plan for this workload was created or started concurrently ({exc.plan_id}); "
+                    "read the workload's plans and retry",
+                ) from exc
+        elif callable(insert_if_absent):
+            saved = await cast(Any, insert_if_absent)(plan, policy_result=policy_result, actor=actor)
+        else:
+            saved = await self.repository.save_plan(plan, policy_result=policy_result, actor=actor)
+        if saved.digest != plan.digest or saved.source.id != plan.source.id:
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                "plan ID was concurrently bound to a different source revision or digest; retry",
+            )
+        if saved.status is not plan.status:
+            return saved
         for previous in previous_plans:
             if previous.plan_id != saved.plan_id and previous.status in _REPLACEABLE_STATUSES:
                 await self._transition(previous, PlanStatus.SUPERSEDED)
@@ -494,7 +591,7 @@ class AutomationPlanService:
                 AutomationErrorCode.ROLLBACK_NOT_READY,
                 "the current source contains no forward-created files or updates to reverse",
             )
-        now = _as_utc(self.clock())
+        now = ensure_utc(self.clock())
         self._validate_source(source, now)
         if source.renderer is not inverse.renderer:
             raise AutomationPlanError(
@@ -511,6 +608,7 @@ class AutomationPlanService:
             output_digest=inverse.rendered_after_digest,
             warnings=list(inverse.warnings),
             reason="exact inverse render validated against the original resource target",
+            **inverse_render_inputs(original_file_plan.validation, inverse.files),
         )
         if not validation.passed:
             raise AutomationPlanError(
@@ -562,6 +660,7 @@ class AutomationPlanService:
                 PlanStatus.STALE,
                 PlanStatus.REJECTED,
                 PlanStatus.SUPERSEDED,
+                PlanStatus.CANCELLED,
                 PlanStatus.SYNC_FAILED,
             }:
                 raise AutomationPlanError(
@@ -569,22 +668,38 @@ class AutomationPlanService:
                     "the existing rollback plan is no longer actionable at this source revision",
                 )
             return existing
+        # Workload-scoped read (idx_automation_plans_workload) instead of every plan (D15, BUG-57).
         busy = [
             candidate
-            for candidate in await self.repository.list_plans()
+            for candidate in await self._workload_plans(source, _BUSY_STATUSES)
             if candidate.plan_id != original_plan.plan_id
-            and _same_workload_binding(candidate.source, source)
-            and candidate.status in _BUSY_STATUSES
         ]
         if busy:
             raise AutomationPlanError(
                 AutomationErrorCode.ROLLBACK_NOT_READY,
                 "another plan is already applying or syncing the resolved workload source",
             )
-        saved = await self.repository.save_plan_if_absent(
-            plan,
-            policy_result=policy_result,
-        )
+        # The busy check is repeated atomically with the insert (one plan per workload); the
+        # original plan the rollback reverses is tolerated in any busy status.
+        guarded_insert = getattr(self.repository, "save_plan_if_workload_idle", None)
+        if callable(guarded_insert):
+            guard = WorkloadPlanGuard(
+                blocking_statuses=_BUSY_STATUSES,
+                tolerated_plan_ids=frozenset({original_plan.plan_id}),
+                tolerated_statuses=_BUSY_STATUSES,
+            )
+            try:
+                saved = await cast(Any, guarded_insert)(plan, guard, policy_result=policy_result)
+            except WorkloadPlanConflictError as exc:
+                raise AutomationPlanError(
+                    AutomationErrorCode.ROLLBACK_NOT_READY,
+                    f"another plan is already applying or syncing the resolved workload source ({exc.plan_id})",
+                ) from exc
+        else:
+            saved = await self.repository.save_plan_if_absent(
+                plan,
+                policy_result=policy_result,
+            )
         if (
             saved.digest != plan.digest
             or saved.rollback_of_plan_id != original_plan.plan_id
@@ -602,6 +717,7 @@ class AutomationPlanService:
             PlanStatus.STALE,
             PlanStatus.REJECTED,
             PlanStatus.SUPERSEDED,
+            PlanStatus.CANCELLED,
             PlanStatus.SYNC_FAILED,
         }:
             raise AutomationPlanError(
@@ -615,8 +731,9 @@ class AutomationPlanService:
         if plan is None:
             raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, f"plan {plan_id!r} was not found")
 
-        now = _as_utc(self.clock())
-        if plan.status in _EXPIREABLE_STATUSES and plan.expires_at is not None and _as_utc(plan.expires_at) <= now:
+        now = ensure_utc(self.clock())
+        expiry = effective_expiry(plan)
+        if plan.status in _EXPIREABLE_STATUSES and expiry is not None and ensure_utc(expiry) <= now:
             await self._transition(plan, PlanStatus.STALE, actor=actor, reason_code="plan_expired")
             raise AutomationPlanError(AutomationErrorCode.PLAN_EXPIRED, "plan has expired")
         if plan.status not in {PlanStatus.VALIDATED, PlanStatus.APPROVED}:
@@ -639,7 +756,9 @@ class AutomationPlanService:
                 "only a plan with successful render validation and a matching digest can be approved",
             )
         current_revision = await self._resolve_current_revision(plan.source)
-        if current_revision.lower() != plan.file_plan.base_revision.lower():
+        if current_revision.lower() != plan.file_plan.base_revision.lower() and not await self._touched_files_unchanged(
+            plan, current_revision
+        ):
             if plan.status in _STALEABLE_STATUSES:
                 await self._transition(plan, PlanStatus.STALE, actor=actor, reason_code="source_changed")
             raise AutomationPlanError(
@@ -649,17 +768,61 @@ class AutomationPlanService:
 
         approved = plan
         if plan.status is PlanStatus.VALIDATED:
-            approved = await self.repository.set_plan_status(
-                plan.plan_id,
-                PlanStatus.APPROVED,
-                expected_statuses=(PlanStatus.VALIDATED,),
-                expected_digest=plan.digest,
-                actor=actor,
-            )
+            # The workload busy check is repeated at approval, atomically with the transition:
+            # a plan of the same workload that started delivering meanwhile refuses it.
+            guarded_transition = getattr(self.repository, "set_plan_status_if_workload_idle", None)
+            if callable(guarded_transition):
+                guard = WorkloadPlanGuard(
+                    blocking_statuses=_BUSY_STATUSES | {PlanStatus.APPROVED},
+                    tolerated_plan_ids=frozenset({plan.rollback_of_plan_id} if plan.rollback_of_plan_id else ()),
+                    tolerated_statuses=_BUSY_STATUSES,
+                )
+                try:
+                    approved = await cast(Any, guarded_transition)(
+                        plan.plan_id,
+                        PlanStatus.APPROVED,
+                        guard,
+                        expected_statuses=(PlanStatus.VALIDATED,),
+                        expected_digest=plan.digest,
+                        actor=actor,
+                    )
+                except WorkloadPlanConflictError as exc:
+                    raise AutomationPlanError(
+                        AutomationErrorCode.WORKLOAD_PLAN_ALREADY_EXISTS,
+                        f"another plan for this workload is {exc.status.value} ({exc.plan_id}); "
+                        "wait for it to finish or cancel it before approving",
+                    ) from exc
+            else:
+                approved = await self.repository.set_plan_status(
+                    plan.plan_id,
+                    PlanStatus.APPROVED,
+                    expected_statuses=(PlanStatus.VALIDATED,),
+                    expected_digest=plan.digest,
+                    actor=actor,
+                )
             if approved is None:
                 raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "plan changed during approval")
 
-        if self.operation_enqueuer is not None:
+        # Delivery modes (F4): only "direct" queues an operation that writes to Git. A plan
+        # approved in "patch" or "ci" mode waits for a person or a CI job to report its PR.
+        mode = configured_delivery_mode()
+        recorder = getattr(self.repository, "set_plan_delivery_mode", None)
+        if approved.delivery_mode is None and not callable(recorder) and mode != DELIVERY_DIRECT:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                "this plan store cannot record an external delivery mode",
+            )
+        if approved.delivery_mode is None and callable(recorder):
+            recorded = await cast(Any, recorder)(
+                approved.plan_id,
+                mode,
+                expected_digest=approved.digest,
+                expected_statuses=(PlanStatus.APPROVED,),
+            )
+            if recorded is None:
+                raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "plan changed during approval")
+            approved = recorded
+        if self.operation_enqueuer is not None and approved.delivery_mode in (None, DELIVERY_DIRECT):
             if approved.digest is None:
                 raise AutomationPlanError(
                     AutomationErrorCode.RENDER_VALIDATION_FAILED,
@@ -700,24 +863,105 @@ class AutomationPlanService:
         plan = await self.repository.get_plan(plan_id)
         if plan is None or plan.expires_at is None or plan.status not in _EXPIREABLE_STATUSES:
             return plan
-        current_time = _as_utc(now if now is not None else self.clock())
-        if _as_utc(plan.expires_at) > current_time:
+        current_time = ensure_utc(now if now is not None else self.clock())
+        expiry = effective_expiry(plan)
+        if expiry is None or ensure_utc(expiry) > current_time:
             return plan
         return await self._transition(plan, PlanStatus.STALE, reason_code="plan_expired")
 
-    async def expire_due_plans(self, *, now: datetime | None = None) -> list[Plan]:
-        current_time = _as_utc(now if now is not None else self.clock())
+    async def expire_due_plans(self, *, now: datetime | None = None, limit: int = _EXPIRY_BATCH_SIZE) -> list[Plan]:
+        """Mark at most ``limit`` plans whose TTL elapsed as STALE, oldest expiry first.
+
+        The repository selects only expired rows instead of loading every live plan on each
+        sweep (D15, BUG-57); the next sweep picks up any remainder. PostgreSQL serves the range
+        from ``idx_automation_plans_status_expiry``; SQLite compares ``julianday(expires_at)``,
+        so it uses only the status prefix of that index, and the batch limit bounds the work.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("plan expiry limit must be a positive integer")
+        current_time = ensure_utc(now if now is not None else self.clock())
+        statuses = sorted(_EXPIREABLE_STATUSES, key=lambda status: status.value)
+        expired_reader = getattr(self.repository, "list_expired_plans", None)
+        if callable(expired_reader):
+            candidates = await cast(Any, expired_reader)(now=current_time, statuses=statuses, limit=limit)
+        else:
+            candidates = [plan for status in statuses for plan in await self.repository.list_plans(status=status)]
+        due = sorted(
+            (
+                plan
+                for plan in candidates
+                if plan.status in _EXPIREABLE_STATUSES
+                and plan.expires_at is not None
+                # Approved patch/ci plans wait longer for their pull request (F4).
+                and ensure_utc(cast(datetime, effective_expiry(plan))) <= current_time
+            ),
+            key=lambda item: (ensure_utc(cast(datetime, item.expires_at)), item.plan_id),
+        )[:limit]
         expired: list[Plan] = []
-        for status in _EXPIREABLE_STATUSES:
-            for plan in await self.repository.list_plans(status=status):
-                if plan.expires_at is None or _as_utc(plan.expires_at) > current_time:
-                    continue
+        for plan in due:
+            try:
                 transitioned = await self._transition(plan, PlanStatus.STALE, reason_code="plan_expired")
-                expired.append(transitioned)
+            except AutomationPlanError:
+                # A concurrent approval or replica already moved the plan; it is no longer due.
+                continue
+            expired.append(transitioned)
         return sorted(expired, key=lambda item: (item.created_at, item.plan_id))
 
     async def prune_retained_history(self, *, cutoff: datetime) -> dict[str, int]:
         return await self.repository.prune_automation_history(cutoff=cutoff)
+
+    async def cancel_by_user(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        """Cancel a plan that has not started applying: it becomes CANCELLED, reason ``cancelled_by_user`` (F-10).
+
+        A plan already cancelled is returned unchanged; any status other than
+        draft, validated or approved raises ``PLAN_STALE``.
+        """
+        plan = await self.repository.get_plan(plan_id)
+        if plan is None:
+            return None
+        if plan.status is PlanStatus.CANCELLED:
+            return plan
+        if plan.status not in _STALEABLE_STATUSES:
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                f"plan cannot be cancelled from status {plan.status.value}",
+            )
+        return await self._transition(plan, PlanStatus.CANCELLED, actor=actor, reason_code="cancelled_by_user")
+
+    async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        """Cancel an unapproved preview: a DRAFT/VALIDATED plan becomes SUPERSEDED (D6)."""
+        plan = await self.repository.get_plan(plan_id)
+        if plan is None:
+            return None
+        if plan.status is PlanStatus.SUPERSEDED:
+            return plan
+        if plan.status not in _CANCELLABLE_PREVIEW_STATUSES:
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                f"plan cannot be cancelled from status {plan.status.value}",
+            )
+        return await self._transition(plan, PlanStatus.SUPERSEDED, actor=actor, reason_code="cancelled_by_user")
+
+    async def _workload_plans(self, source: WorkloadSource, statuses: frozenset[PlanStatus]) -> list[Plan]:
+        ordered_statuses = sorted(statuses, key=lambda status: status.value)
+        reader = getattr(self.repository, "list_plans_for_workload", None)
+        if callable(reader):
+            plans = await cast(Any, reader)(
+                cluster=source.cluster,
+                namespace=source.namespace,
+                workload_kind=source.workload_kind,
+                workload_name=source.workload_name,
+                statuses=ordered_statuses,
+            )
+        else:
+            plans = []
+            for status in ordered_statuses:
+                plans.extend(await self.repository.list_plans(status=status))
+        return [
+            candidate
+            for candidate in plans
+            if candidate.status in statuses and _same_workload_binding(candidate.source, source)
+        ]
 
     async def supersede_plan(self, plan_id: str) -> Plan | None:
         plan = await self.repository.get_plan(plan_id)
@@ -731,46 +975,6 @@ class AutomationPlanService:
                 f"plan cannot be superseded from status {plan.status.value}",
             )
         return await self._transition(plan, PlanStatus.SUPERSEDED, reason_code="replacement_plan")
-
-    async def create(
-        self,
-        action: ActionPlanV3,
-        source: WorkloadSource,
-        snapshot: ArchiveRepositorySnapshot,
-        *,
-        policy_result: dict[str, Any] | None = None,
-        change_set_id: str | None = None,
-        actor: str = "system",
-    ) -> Plan:
-        return await self.create_plan(
-            action,
-            source,
-            snapshot,
-            policy_result=policy_result,
-            change_set_id=change_set_id,
-            actor=actor,
-        )
-
-    async def read(self, plan_id: str) -> Plan | None:
-        return await self.read_plan(plan_id)
-
-    async def approve(self, plan_id: str, digest: str) -> Plan:
-        return await self.approve_plan(plan_id, digest)
-
-    async def stale(
-        self,
-        plan_id: str,
-        *,
-        actor: str = "system",
-        reason_code: str | None = None,
-    ) -> Plan | None:
-        return await self.mark_stale(plan_id, actor=actor, reason_code=reason_code)
-
-    async def expire(self, plan_id: str, *, now: datetime | None = None) -> Plan | None:
-        return await self.expire_plan(plan_id, now=now)
-
-    async def supersede(self, plan_id: str) -> Plan | None:
-        return await self.supersede_plan(plan_id)
 
     async def _get_git_blob_file(self, source: WorkloadSource, path: str, revision: str) -> GitBlobFile:
         resolver = self.git_blob_resolver
@@ -795,6 +999,70 @@ class AutomationPlanService:
             )
         return git_file
 
+    async def _touched_files_unchanged(self, plan: Plan, revision: str) -> bool:
+        """Whether every file the plan edits or its render read is unchanged at ``revision`` (D7, BUG-49).
+
+        Unrelated commits on a busy branch then no longer stale an approved plan; a change
+        to a touched file or to a render input (Kustomize base or patch, values file, chart
+        file, manifest of the rendered directory) requires re-rendering.
+        """
+        file_plan = plan.file_plan
+        resolver = self.git_blob_resolver
+        if file_plan is None or resolver is None:
+            return False
+        if not await self._render_inputs_unchanged(plan, revision):
+            return False
+        for edit in file_plan.files:
+            try:
+                git_file = await resolver.get_blob_file(plan.source, edit.path, revision)
+            except AutomationPlanError:
+                raise
+            except Exception as exc:
+                raise AutomationPlanError(
+                    AutomationErrorCode.PROVIDER_NOT_READY,
+                    f"could not resolve Git blob metadata for {edit.path!r} at {revision}",
+                ) from exc
+            if edit.operation == "create":
+                if git_file is not None:
+                    return False
+                continue
+            if (
+                git_file is None
+                or git_file.path != edit.path
+                or edit.original_sha is None
+                or git_file.blob_sha.lower() != edit.original_sha.lower()
+            ):
+                return False
+        return True
+
+    async def _render_inputs_unchanged(self, plan: Plan, revision: str) -> bool:
+        """Whether no render input of the plan changed between its base revision and ``revision``."""
+        file_plan = plan.file_plan
+        resolver = self.git_blob_resolver
+        if file_plan is None or resolver is None or not records_render_inputs(file_plan.validation):
+            return False
+        validation = file_plan.validation
+        changed_paths = getattr(resolver, "changed_paths", None)
+        try:
+            if callable(changed_paths):
+                paths = await cast(Any, changed_paths)(plan.source, file_plan.base_revision, revision)
+                return not changed_render_inputs(validation, paths)
+            if validation.render_scopes:
+                # An added file in a render scope is only visible in a tree comparison.
+                return False
+            for path, blob_sha in validation.render_inputs.items():
+                git_file = await resolver.get_blob_file(plan.source, path, revision)
+                if git_file is None or git_file.blob_sha.lower() != blob_sha.lower():
+                    return False
+            return True
+        except AutomationPlanError:
+            raise
+        except Exception as exc:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                f"could not compare the plan's render inputs at {revision}",
+            ) from exc
+
     async def _resolve_current_revision(self, source: WorkloadSource) -> str:
         resolver = self.revision_resolver
         if resolver is None:
@@ -809,7 +1077,7 @@ class AutomationPlanService:
                 AutomationErrorCode.PROVIDER_NOT_READY,
                 "could not resolve the current source base revision",
             ) from exc
-        if not isinstance(revision, str) or not _COMMIT_SHA_PATTERN.fullmatch(revision):
+        if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
             raise AutomationPlanError(
                 AutomationErrorCode.PROVIDER_NOT_READY,
                 "the current source resolver did not return an immutable full Git commit SHA",
@@ -834,7 +1102,7 @@ class AutomationPlanService:
         )
         if updated is None:
             raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "plan changed during state transition")
-        if status in {PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED}:
+        if status in {PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED, PlanStatus.CANCELLED}:
             await self._clear_unplanned_recommendations(plan, actor=actor)
         return updated
 
@@ -875,21 +1143,13 @@ class AutomationPlanService:
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"workload source binding is not resolved ({source.status.value})",
             )
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} is not supported by the automation plan service",
             )
-        if source.expires_at is not None and _as_utc(source.expires_at) <= now:
+        if source.expires_at is not None and ensure_utc(source.expires_at) <= now:
             raise AutomationPlanError(AutomationErrorCode.SOURCE_CHANGED, "workload source binding has expired")
-
-
-PlanService = AutomationPlanService
 
 
 def _archive_contents(
@@ -907,7 +1167,7 @@ def _archive_contents(
             AutomationErrorCode.SOURCE_CHANGED,
             "archive snapshot repository identity does not match the resolved workload source",
         )
-    if not isinstance(metadata.commit_sha, str) or not _COMMIT_SHA_PATTERN.fullmatch(metadata.commit_sha):
+    if not isinstance(metadata.commit_sha, str) or not GIT_OBJECT_SHA.fullmatch(metadata.commit_sha):
         raise AutomationPlanError(
             AutomationErrorCode.SOURCE_CHANGED,
             "archive snapshot does not identify an immutable full Git commit SHA",
@@ -941,7 +1201,8 @@ def _archive_contents(
         if (
             isinstance(chart, Mapping)
             and chart.get("source_kind") == "GitRepository"
-            and chart.get("repo_url") == source.repo_url
+            and isinstance(chart.get("repo_url"), str)
+            and same_repository(chart["repo_url"], source.repo_url)
         ):
             raw_chart_path = chart.get("name")
             if not isinstance(raw_chart_path, str):
@@ -1056,7 +1317,7 @@ def _validated_blob_sha(
             AutomationErrorCode.SOURCE_CHANGED,
             f"provider content for {path!r} does not match the immutable archive snapshot",
         )
-    if not isinstance(sha, str) or not _GIT_BLOB_SHA_PATTERN.fullmatch(sha):
+    if not isinstance(sha, str) or not GIT_OBJECT_SHA.fullmatch(sha):
         raise AutomationPlanError(
             AutomationErrorCode.PROVIDER_NOT_READY,
             f"provider did not return a valid Git blob SHA for {path!r}; snapshot SHA-256 cannot be substituted",
@@ -1077,6 +1338,8 @@ def _planner_error(
 ) -> AutomationPlanError:
     message = str(error)
     lowered = message.lower()
+    if _is_no_effective_change(error):
+        return _no_effective_change_error(error)
     if "ambiguous" in lowered or "duplicate resource identity" in lowered:
         code = AutomationErrorCode.AMBIGUOUS_BINDING
     elif "unsupported" in lowered or "must use the raw renderer" in lowered:
@@ -1089,6 +1352,23 @@ def _planner_error(
     return AutomationPlanError(code, f"{prefix} planning failed: {message}")
 
 
+#: Planner messages that mean the source already declares the proposed requests.
+_NO_EFFECTIVE_CHANGE_MARKERS = ("already present", "does not change the target resource")
+
+
+def _is_no_effective_change(error: Exception) -> bool:
+    lowered = str(error).lower()
+    return any(marker in lowered for marker in _NO_EFFECTIVE_CHANGE_MARKERS)
+
+
+def _no_effective_change_error(error: Exception) -> AutomationPlanError:
+    """Fail closed: a plan whose rendered target does not change must never become a pull request."""
+    return AutomationPlanError(
+        AutomationErrorCode.NO_EFFECTIVE_CHANGE,
+        f"the source already declares the proposed requests, so a pull request would change nothing ({error})",
+    )
+
+
 def _safe_snapshot_path(path: str) -> bool:
     if not isinstance(path, str) or not path or path != path.strip() or "\x00" in path or "\\" in path:
         return False
@@ -1098,6 +1378,12 @@ def _safe_snapshot_path(path: str) -> bool:
 
 def _in_binding_scope(path: str, scope: str) -> bool:
     return scope == "." or path == scope or path.startswith(f"{scope}/")
+
+
+def _binding_generation_changed(stored: WorkloadSource, current: WorkloadSource) -> bool:
+    """Whether the binding a preview was planned from was refreshed since (approval refuses it)."""
+    expected = stored.evidence.get("binding_generation")
+    return expected is not None and expected != current.evidence.get("binding_generation")
 
 
 def _same_workload_binding(left: WorkloadSource, right: WorkloadSource) -> bool:
@@ -1114,7 +1400,53 @@ def _same_workload_binding(left: WorkloadSource, right: WorkloadSource) -> bool:
     )
 
 
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+# --------------------------------------------------------------------------- #
+# Policy-based auto-approval hook (roadmap F5)                                 #
+# --------------------------------------------------------------------------- #
+
+
+class PlanApprover(Protocol):
+    async def approve_plan(self, plan_id: str, digest: str, *, actor: str = "system") -> Plan: ...
+
+
+async def maybe_auto_approve(
+    approver: PlanApprover,
+    plan: Plan,
+    recommendations: Sequence[Any],
+    *,
+    actor: str,
+    policy: Any,
+    may_approve: bool,
+) -> tuple[Plan, list[str]]:
+    """Approve a fresh preview on behalf of ``actor`` when ``automation.autoApprove`` allows it.
+
+    Returns the (possibly approved) plan and why it was not approved. The approval goes
+    through the same path as the human click (pauseDelivery, binding, policy and digest
+    checks); any refusal leaves the preview waiting for that click. Only a requester
+    who may approve plans (``approve`` scope) can trigger it, rollbacks never are, and
+    the rules of :func:`auto_approve_blockers` (contested consensus is a hard stop)
+    apply to every recommendation of the plan.
+    """
+    from greenkube.core.optimization.eligibility import auto_approve_blockers
+
+    if not getattr(policy, "enabled", False):
+        return plan, ["auto_approve_disabled"]
+    if not may_approve:
+        return plan, ["approve_scope_missing"]
+    if plan.status is not PlanStatus.VALIDATED or plan.digest is None:
+        return plan, ["plan_not_validated"]
+    if plan.rollback_of_plan_id is not None:
+        return plan, ["rollback_plan"]
+    blockers = auto_approve_blockers(recommendations, policy, expected=len(plan.recommendation_ids))
+    if blockers:
+        return plan, blockers
+    try:
+        approved = await approver.approve_plan(plan.plan_id, plan.digest, actor=f"autoapprove:{actor}"[:128])
+    except AutomationPlanError as error:
+        return plan, [error.code.value]
+    except Exception as error:
+        # The preview already exists: an unexpected failure (provider, resolver, store)
+        # must not turn its creation into a 500; it simply waits for the click.
+        logger.warning("Auto-approval of plan %s failed (%s).", plan.plan_id, type(error).__name__)
+        return plan, ["auto_approve_failed"]
+    return approved, []

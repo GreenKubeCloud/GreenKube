@@ -8,7 +8,6 @@ import {
 	getHealth,
 	getServicesHealth,
 	getServiceHealth,
-	updateServiceConfig,
 	getVersion,
 	getConfig,
 	getNamespaces,
@@ -26,7 +25,6 @@ import {
 	getMetricsPage,
 	createAutomationPlan,
 	getAutomationPlan,
-	getAutomationOperation,
 	approveAutomationPlan,
 	cancelAutomationPlan,
 	previewAutomationPlanRollback,
@@ -34,9 +32,17 @@ import {
 	refreshGitOpsDiscovery,
 	getGitOpsCoverage,
 	getGitOpsBindings,
-	setApiToken,
-	clearApiToken
-} from '$lib/api.js';
+	clearCsrfToken,
+	setCsrfToken,
+	listSources,
+	listSourceRuns,
+	getSetupStatus,
+	getRepositorySuggestions,
+	allowlistRepositories,
+	listChanges,
+	getChange,
+	getChangeMeasurements
+} from '#lib/api.js';
 
 
 // ---------------------------------------------------------------------------
@@ -68,7 +74,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	clearApiToken();
+	clearCsrfToken();
 	vi.restoreAllMocks();
 });
 
@@ -77,13 +83,14 @@ afterEach(() => {
 // getHealth
 // ---------------------------------------------------------------------------
 describe('getHealth', () => {
-	it('uses same-origin credentials and an in-memory bearer token when configured', async () => {
+	it('uses same-origin credentials and never sends a bearer token', async () => {
 		globalThis.fetch = mockFetchOk({ status: 'ok' });
-		setApiToken('short-lived-token');
+		setCsrfToken('csrf-token');
 		await getHealth();
 		const [, options] = fetch.mock.calls[0];
-		expect(options.credentials).toBe('include');
-		expect(options.headers.Authorization).toBe('Bearer short-lived-token');
+		expect(options.credentials).toBe('same-origin');
+		expect(options.headers.Authorization).toBeUndefined();
+		expect(options.headers['X-CSRF-Token']).toBeUndefined();
 	});
 
 	it('returns health data on success', async () => {
@@ -103,7 +110,7 @@ describe('getHealth', () => {
 				blob: () => Promise.resolve(new Blob(['csv']))
 			}));
 			await downloadReport({ namespace: 'prod', last: '24h', format: 'csv' });
-			expect(fetch.mock.calls[0][1].credentials).toBe('include');
+			expect(fetch.mock.calls[0][1].credentials).toBe('same-origin');
 			expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:report');
 		});
 	});
@@ -206,22 +213,6 @@ describe('automation plan API', () => {
 		expect(result.status).toBe('sync_pending');
 		expect(fetch.mock.calls[0][0]).toBe('http://localhost:3000/api/v1/automation/plans/pln%2F1');
 	});
-
-	it('reads execution state for one encoded operation ID', async () => {
-		globalThis.fetch = mockFetchOk({
-			operation_id: 'operation/1',
-			status: 'running',
-			result: { plan_status: 'applying' }
-		});
-
-		const result = await getAutomationOperation('operation/1');
-
-		expect(result.status).toBe('running');
-		expect(fetch.mock.calls[0][0]).toBe(
-			'http://localhost:3000/api/v1/automation/operations/operation%2F1'
-		);
-		expect(fetch.mock.calls[0][1].method).toBeUndefined();
-	});
 });
 
 describe('GitOps operations API', () => {
@@ -246,7 +237,7 @@ describe('GitOps operations API', () => {
 		expect(url.pathname).toBe('/api/v1/gitops/refresh');
 		expect(url.searchParams.get('cluster')).toBe('minikube');
 		expect(options.method).toBe('POST');
-		expect(options.credentials).toBe('include');
+		expect(options.credentials).toBe('same-origin');
 	});
 
 	it('reads persisted workload coverage from the GitOps coverage endpoint', async () => {
@@ -312,54 +303,6 @@ describe('getServiceHealth', () => {
 
 		const url = fetch.mock.calls[0][0];
 		expect(url).toContain('/health/services/prometheus');
-	});
-});
-
-
-// ---------------------------------------------------------------------------
-// updateServiceConfig
-// ---------------------------------------------------------------------------
-describe('updateServiceConfig', () => {
-	it('sends POST with JSON body', async () => {
-		globalThis.fetch = vi.fn(() =>
-			Promise.resolve({
-				ok: true,
-				json: () => Promise.resolve({ updated: true })
-			})
-		);
-
-		const config = { prometheus_url: 'http://prom:9090' };
-		const result = await updateServiceConfig(config);
-		expect(result).toEqual({ updated: true });
-
-		const [url, opts] = fetch.mock.calls[0];
-		expect(url).toContain('/config/services');
-		expect(opts.method).toBe('POST');
-		expect(opts.headers['Content-Type']).toBe('application/json');
-		expect(JSON.parse(opts.body)).toEqual(config);
-	});
-
-	it('throws on error response', async () => {
-		globalThis.fetch = vi.fn(() =>
-			Promise.resolve({
-				ok: false,
-				status: 400,
-				json: () => Promise.resolve({ detail: 'Invalid config' })
-			})
-		);
-		await expect(updateServiceConfig({})).rejects.toThrow('Invalid config');
-	});
-
-	it('exposes the configuration acknowledgement without changing the response shape', async () => {
-		globalThis.fetch = vi.fn(() => Promise.resolve({
-			ok: true,
-			headers: { get: (name) => name === 'X-Configuration-Version' ? '12' : 'true' },
-			json: () => Promise.resolve({ services: {} })
-		}));
-		const result = await updateServiceConfig({ prometheus_url: 'http://prom:9090' });
-		expect(result.services).toEqual({});
-		expect(result.configurationAcknowledgement).toEqual({ version: '12', persisted: true });
-		expect(Object.keys(result)).not.toContain('configurationAcknowledgement');
 	});
 });
 
@@ -610,6 +553,12 @@ describe('buildReportExportUrl', () => {
 		expect(url).not.toContain('granularity=');
 	});
 
+	it('adds include_idle only when asked', () => {
+		expect(buildReportExportUrl({ format: 'csv' })).not.toContain('include_idle');
+		expect(buildReportExportUrl({ format: 'csv', include_idle: false })).not.toContain('include_idle');
+		expect(buildReportExportUrl({ format: 'csv', include_idle: true })).toContain('include_idle=true');
+	});
+
 	it('returns a valid URL string', () => {
 		const url = buildReportExportUrl({});
 		expect(() => new URL(url)).not.toThrow();
@@ -655,13 +604,11 @@ describe('request error handling', () => {
 		});
 	});
 
-	it('keeps authentication request-scoped and never stores it in browser storage', async () => {
-		setApiToken('ephemeral-token');
+	it('relies on the session cookie and never sends a stored credential', async () => {
 		globalThis.fetch = mockFetchOk({});
 		await getHealth();
-		expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer ephemeral-token');
-		expect(fetch.mock.calls[0][1].credentials).toBe('include');
-		clearApiToken();
+		expect(fetch.mock.calls[0][1].headers.Authorization).toBeUndefined();
+		expect(fetch.mock.calls[0][1].credentials).toBe('same-origin');
 	});
 });
 
@@ -676,5 +623,45 @@ describe('cursor contracts', () => {
 
 		await getMetricsPage({ namespace: 'prod', limit: 1, cursor: 'next' });
 		expect(fetch.mock.calls[1][0]).toContain('cursor=next');
+	});
+});
+
+describe('setup, sources and changes contracts', () => {
+	it('reads sources, runs and setup status from /api/v1', async () => {
+		globalThis.fetch = mockFetchOk({});
+		await listSources();
+		await listSourceRuns('builtin.vpa/x', { limit: 5 });
+		await getSetupStatus();
+		await getRepositorySuggestions();
+		const urls = fetch.mock.calls.map(([url]) => url);
+		expect(urls[0]).toContain('/api/v1/sources');
+		expect(urls[1]).toContain('/api/v1/sources/builtin.vpa%2Fx/runs');
+		expect(urls[1]).toContain('limit=5');
+		expect(urls[2]).toContain('/api/v1/setup/status');
+		expect(urls[3]).toContain('/api/v1/automation/repositories/suggestions');
+	});
+
+	it('posts the repositories to allowlist with the CSRF token', async () => {
+		globalThis.fetch = mockFetchOk({ allowlisted: 2 });
+		setCsrfToken('csrf-token');
+		await allowlistRepositories(['https://github.com/acme/a', 'https://github.com/acme/b']);
+		const [url, options] = fetch.mock.calls[0];
+		expect(url).toContain('/api/v1/automation/repositories/allowlist');
+		expect(options.method).toBe('POST');
+		expect(JSON.parse(options.body)).toEqual({ repo_urls: ['https://github.com/acme/a', 'https://github.com/acme/b'] });
+		expect(options.headers['X-CSRF-Token']).toBe('csrf-token');
+	});
+
+	it('reads changes from /api/v2 with repeated state filters', async () => {
+		globalThis.fetch = mockFetchOk({ items: [], next_cursor: null });
+		await listChanges({ namespace: 'shop', state: ['applied', 'measuring'], limit: 10, cursor: 'a|b' });
+		await getChange('chg-1');
+		await getChangeMeasurements('chg-1');
+		const urls = fetch.mock.calls.map(([url]) => url);
+		expect(urls[0]).toContain('/api/v2/changes?');
+		expect(urls[0]).toContain('state=applied&state=measuring');
+		expect(urls[0]).toContain('cursor=a%7Cb');
+		expect(urls[1]).toContain('/api/v2/changes/chg-1');
+		expect(urls[2]).toContain('/api/v2/changes/chg-1/measurements');
 	});
 });

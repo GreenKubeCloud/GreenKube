@@ -1,0 +1,37 @@
+{
+    "apiVersion": "v1",
+    "kind": "List",
+    "metadata": {"resourceVersion": ""},
+    "items": [
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {"name": "storefront", "namespace": "shop", "uid": "2a7c1e9b-55d0-4a5b-8f3e-6c0d9e8f7a61"},
+            "spec": {
+                "clusterIP": "10.96.71.20",
+                "clusterIPs": ["10.96.71.20", "fd00:10:96::4a1"],
+                "ipFamilies": ["IPv4", "IPv6"],
+                "ipFamilyPolicy": "RequireDualStack",
+                "ports": [{"name": "http", "nodePort": 32080, "port": 80, "protocol": "TCP", "targetPort": "http"}],
+                "selector": {"app.kubernetes.io/name": "storefront"},
+                "type": "LoadBalancer"
+            },
+            "status": {"loadBalancer": {"ingress": [{"hostname": "a1b2c3-storefront.elb.eu-west-3.amazonaws.com"}]}}
+        },
+        {
+            "addressType": "IPv6",
+            "apiVersion": "discovery.k8s.io/v1",
+            "endpoints": [
+                {"addresses": ["fd00:10:244::1a"], "conditions": {"ready": true, "serving": true, "terminating": false}, "targetRef": {"kind": "Pod", "name": "storefront-6d9f7c8b5-k2x8q", "namespace": "shop"}},
+                {"addresses": ["fd00:10:244::2b"], "conditions": {"ready": false, "serving": false, "terminating": false}, "targetRef": {"kind": "Pod", "name": "storefront-6d9f7c8b5-p9w4z", "namespace": "shop"}}
+            ],
+            "kind": "EndpointSlice",
+            "metadata": {
+                "labels": {"endpointslice.kubernetes.io/managed-by": "endpointslice-controller.k8s.io", "kubernetes.io/service-name": "storefront"},
+                "name": "storefront-v6-8lq2m",
+                "namespace": "shop"
+            },
+            "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]
+        }
+    ]
+}

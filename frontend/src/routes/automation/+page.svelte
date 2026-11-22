@@ -1,58 +1,17 @@
 <script>
 	import { onMount } from 'svelte';
-	import DataState from '$lib/components/DataState.svelte';
+	import { currentUser, hasScope } from '#lib/stores.js';
+	import DataState from '#lib/components/DataState.svelte';
+	import ControllerFamilyCard from '#lib/components/automation/ControllerFamilyCard.svelte';
+	import { groupControllerFamilies } from '#lib/components/automation/gitopsControllers.js';
 	import {
 		getAutomationStatus,
 		getGitOpsBindings,
 		getGitOpsCoverage,
 		getGitOpsStatus,
-		getOpenPullRequests,
 		refreshGitOpsDiscovery,
 		resolveGitOpsBinding
-	} from '$lib/api.js';
-
-	const CAPABILITIES = [
-		{ key: 'argocd', label: 'Argo CD' },
-		{ key: 'flux_kustomization', label: 'Flux Kustomization' },
-		{ key: 'flux_helm_release', label: 'Flux HelmRelease' },
-		{ key: 'flux_source_git_repository', label: 'Flux GitRepository' },
-		{ key: 'flux_source_oci_repository', label: 'Flux OCIRepository' },
-		{ key: 'flux_source_helm_repository', label: 'Flux HelmRepository' },
-		{ key: 'flux_source_bucket', label: 'Flux Bucket' }
-	];
-
-	const PROVIDER_LABELS = {
-		github: 'GitHub',
-		gitlab: 'GitLab',
-		gitea: 'Gitea'
-	};
-
-	const SYNC_STATUS_LABELS = {
-		synced: 'Synced',
-		pending: 'Pending',
-		failed: 'Failed',
-		unavailable: 'Unavailable',
-		mismatched: 'Revision mismatch'
-	};
-
-	const SYNC_ERROR_LABELS = {
-		sync_confirmed: 'Sync confirmed',
-		reconciliation_pending: 'Reconciliation pending',
-		controller_failed: 'Controller failed',
-		controller_not_found: 'Controller not found',
-		controller_ambiguous: 'Controller ambiguous',
-		controller_identity_mismatch: 'Controller identity mismatch',
-		controller_not_ready: 'Controller not ready',
-		source_unresolved: 'Source unresolved',
-		source_mismatch: 'Source mismatch',
-		source_ambiguous: 'Source ambiguous',
-		unsupported_controller: 'Unsupported controller',
-		revision_unavailable: 'Revision unavailable',
-		revision_mismatch: 'Revision mismatch',
-		invalid_response: 'Invalid response',
-		response_too_large: 'Response too large',
-		response_truncated: 'Response truncated'
-	};
+	} from '#lib/api.js';
 
 	const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 	const SAFE_REVISION =
@@ -66,6 +25,8 @@
 		'ambiguous-multi-source-owner': 'Multiple source owners were found',
 		'conflicting-equal-priority-source-units': 'Multiple current sources disagree',
 		'conflicting-source-forms': 'Source configuration is ambiguous',
+		'cross-repository-git-chart':
+			'The Helm chart is read from another Git repository than its values; GreenKube cannot plan it yet',
 		'highest-priority-source-is-ambiguous': 'The highest-priority source is ambiguous',
 		'highest-priority-source-blocked': 'The highest-priority source is blocked',
 		'highest-priority-source-unresolved': 'The highest-priority source is unresolved',
@@ -85,6 +46,8 @@
 
 	let loading = true;
 	let refreshingDiscovery = false;
+	// Refreshing discovery and resolving bindings are writes (403 for a viewer).
+	$: canWrite = hasScope($currentUser, 'write');
 	let pageError = '';
 	let discoveryRefreshError = '';
 	let discoveryRefreshSuccess = '';
@@ -92,12 +55,10 @@
 	let coverage = null;
 	let bindings = [];
 	let providerReadiness = null;
-	let pullRequests = [];
 	let discoveryError = false;
 	let coverageError = false;
 	let bindingsError = false;
 	let providerReadinessError = false;
-	let pullRequestsError = false;
 	let selectedCandidates = {};
 	let confirmations = {};
 	let resolvingBindings = {};
@@ -105,6 +66,9 @@
 	let resolutionSuccess = '';
 	let loadSequence = 0;
 	let bindingUpdateSequence = 0;
+
+	$: controllerFamilies = groupControllerFamilies(discoveryStatus?.discovery);
+	$: coveragePercent = ratioPercent(coverage?.ratio);
 
 	onMount(() => {
 		loadOperations();
@@ -124,11 +88,6 @@
 			/^[A-Za-z0-9._/-]+$/.test(value)
 			? value
 			: 'Controller omitted';
-	}
-
-	function providerLabel(value) {
-		if (typeof value !== 'string') return 'Unrecognized provider';
-		return PROVIDER_LABELS[value.trim().toLowerCase()] ?? 'Unrecognized provider';
 	}
 
 	function repositoryLabel(value) {
@@ -222,25 +181,10 @@
 			: '—';
 	}
 
-	function capabilityLabel(capability) {
-		if (!isRecord(capability) || typeof capability.available !== 'boolean') return 'Unknown';
-		return capability.available ? 'Available' : 'Unavailable';
-	}
-
-	function capabilityTone(capability) {
-		if (!isRecord(capability) || typeof capability.available !== 'boolean') {
-			return 'bg-dark-800 text-dark-300';
-		}
-		return capability.available
-			? 'bg-green-500/10 text-green-400'
-			: 'bg-yellow-500/10 text-yellow-300';
-	}
-
-	function capabilityNote(capability) {
-		if (!isRecord(capability)) return '';
-		if (capability.reason === 'crd-not-found') return 'CRD not detected';
-		if (typeof capability.reason === 'string' && capability.reason) return 'Reason omitted';
-		return '';
+	function ratioPercent(value) {
+		return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+			? Math.round(value * 100)
+			: null;
 	}
 
 	function planReadiness(status) {
@@ -254,16 +198,6 @@
 
 	function automationMetric(value) {
 		return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? String(value) : '—';
-	}
-
-	function syncStatusLabel(value) {
-		if (typeof value !== 'string') return '—';
-		return SYNC_STATUS_LABELS[value.trim().toLowerCase()] ?? '—';
-	}
-
-	function syncErrorLabel(value) {
-		if (typeof value !== 'string') return '—';
-		return SYNC_ERROR_LABELS[value.trim().toLowerCase()] ?? '—';
 	}
 
 	function bindingReasonLabel(value) {
@@ -477,25 +411,6 @@
 		}
 	}
 
-	function projectPullRequest(record, index) {
-		if (!isRecord(record)) return null;
-		const normalizedStatus = typeof record.status === 'string' ? record.status.trim().toLowerCase() : '';
-		if (normalizedStatus !== 'pending' && normalizedStatus !== 'open') return null;
-
-		return {
-			key: `pull-request-${index}`,
-			planId: safeIdentifier(record.plan_id),
-			provider: providerLabel(record.provider),
-			providerId: safeIdentifier(record.provider_id),
-			repo: repositoryLabel(record.repo),
-			status: normalizedStatus === 'pending' ? 'Pending' : 'Open',
-			syncStatus: syncStatusLabel(record.sync_status),
-			syncRevision: revisionLabel(record.sync_revision),
-			syncObservedAt: timestampLabel(record.sync_observed_at),
-			syncNote: syncErrorLabel(record.sync_error_code)
-		};
-	}
-
 	async function refreshDiscovery() {
 		if (loading || refreshingDiscovery) return;
 		refreshingDiscovery = true;
@@ -519,21 +434,18 @@
 		discoveryStatus = null;
 		coverage = null;
 		providerReadiness = null;
-		pullRequests = [];
 		discoveryError = true;
 		coverageError = true;
 		bindingsError = true;
 		providerReadinessError = true;
-		pullRequestsError = true;
 		resolutionErrors = {};
 		resolutionSuccess = '';
 
-		const [statusResult, coverageResult, bindingsResult, providerResult, pullRequestsResult] = await Promise.allSettled([
+		const [statusResult, coverageResult, bindingsResult, providerResult] = await Promise.allSettled([
 			getGitOpsStatus(),
 			getGitOpsCoverage(),
 			getGitOpsBindings(),
-			getAutomationStatus(),
-			getOpenPullRequests()
+			getAutomationStatus()
 		]);
 
 		if (sequence !== loadSequence) return;
@@ -571,37 +483,48 @@
 			providerReadinessError = false;
 		}
 
-		if (pullRequestsResult.status === 'fulfilled' && Array.isArray(pullRequestsResult.value)) {
-			pullRequests = pullRequestsResult.value
-				.map((record, index) => projectPullRequest(record, index))
-				.filter((record) => record !== null);
-			pullRequestsError = false;
-		}
-
 		const hasData =
-			!discoveryError || !coverageError || !bindingsError || !providerReadinessError || !pullRequestsError;
+			!discoveryError || !coverageError || !bindingsError || !providerReadinessError;
 		if (!hasData) pageError = 'Automation operations could not be loaded.';
 		if (sequence === loadSequence) loading = false;
 	}
 </script>
 
-<div class="mx-auto max-w-[1600px] space-y-6 p-6 lg:p-8">
-	<header class="flex items-start justify-between gap-4">
-		<div>
+<div class="mx-auto max-w-[1600px] space-y-6 p-4 sm:p-6 lg:p-8">
+	<header class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+		<div class="min-w-0">
 			<h1 class="text-2xl font-bold text-dark-100">Automation &amp; GitOps</h1>
 			<p class="mt-1 text-sm text-dark-500">
-				Review workload source candidates, approve expiring manual bindings, and inspect pull-request operations.
+				Review workload source candidates, approve expiring manual bindings, and check plan automation readiness.
 			</p>
 		</div>
-		<button
-			type="button"
-			class="rounded-lg border border-dark-700 px-3 py-2 text-sm text-dark-300 hover:bg-dark-800 disabled:opacity-50"
-			disabled={loading || refreshingDiscovery}
-			on:click={refreshDiscovery}
-		>
-			{loading || refreshingDiscovery ? 'Refreshing…' : 'Refresh discovery & operations'}
-		</button>
+		{#if canWrite}
+			<button
+				type="button"
+				class="shrink-0 self-start rounded-lg border border-dark-700 px-3 py-2 text-sm text-dark-300 hover:bg-dark-800 disabled:opacity-50"
+				disabled={loading || refreshingDiscovery}
+				on:click={refreshDiscovery}
+			>
+				{loading || refreshingDiscovery ? 'Refreshing…' : 'Refresh discovery & operations'}
+			</button>
+		{:else}
+			<button
+				type="button"
+				class="shrink-0 self-start rounded-lg border border-dark-700 px-3 py-2 text-sm text-dark-300 hover:bg-dark-800 disabled:opacity-50"
+				disabled={loading}
+				on:click={loadOperations}
+			>
+				{loading ? 'Reloading…' : 'Reload'}
+			</button>
+		{/if}
 	</header>
+
+	{#if !canWrite}
+		<p class="rounded-lg border border-dark-700 bg-dark-900 px-3 py-2 text-xs text-dark-400" role="note" data-testid="read-only-hint">
+			Read-only access{$currentUser?.role ? ` (${$currentUser.role})` : ''}: refreshing discovery and resolving
+			bindings need an operator or admin.
+		</p>
+	{/if}
 
 	<DataState
 		{loading}
@@ -610,9 +533,12 @@
 		on:retry={loadOperations}
 	>
 		<div class="space-y-6">
-			<section class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-5">
+			<section
+				class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-4 sm:p-5"
+				aria-labelledby="gitops-discovery-heading"
+			>
 				<div class="mb-4">
-					<h2 class="text-lg font-semibold text-dark-100">GitOps discovery</h2>
+					<h2 id="gitops-discovery-heading" class="text-lg font-semibold text-dark-100">GitOps discovery</h2>
 					<p class="mt-1 text-sm text-dark-500">
 						Controller availability, workload bindings, and current discovery coverage.
 					</p>
@@ -626,31 +552,25 @@
 				{#if discoveryError}
 					<p class="text-sm text-red-400" role="alert">GitOps discovery status is unavailable.</p>
 				{:else}
-					<div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-						{#each CAPABILITIES as capability}
-							{@const state = discoveryStatus?.discovery?.[capability.key]}
-							<div class="rounded-xl border border-dark-700/50 bg-dark-950/40 p-4">
-								<div class="flex items-start justify-between gap-3">
-									<p class="text-sm font-medium text-dark-200">{capability.label}</p>
-									<span class="rounded-full px-2 py-1 text-xs {capabilityTone(state)}">
-										{capabilityLabel(state)}
-									</span>
-								</div>
-								{#if capabilityNote(state)}
-									<p class="mt-2 text-xs text-dark-500">{capabilityNote(state)}</p>
-								{/if}
-							</div>
+					<ul class="grid grid-cols-1 gap-3 md:grid-cols-2" aria-label="GitOps controllers">
+						{#each controllerFamilies as family (family.id)}
+							<li class="min-w-0">
+								<ControllerFamilyCard {family} />
+							</li>
 						{/each}
-					</div>
+					</ul>
 					<p class="mt-4 text-xs text-dark-500">
 						Last discovery refresh: {timestampLabel(discoveryStatus?.last_refresh)}
 					</p>
 				{/if}
 			</section>
 
-			<section class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-5">
+			<section
+				class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-4 sm:p-5"
+				aria-labelledby="binding-issues-heading"
+			>
 				<div class="mb-4">
-					<h2 class="text-lg font-semibold text-dark-100">Workload binding issues and manual resolution</h2>
+					<h2 id="binding-issues-heading" class="text-lg font-semibold text-dark-100">Workload binding issues and manual resolution</h2>
 					<p class="mt-1 text-sm text-dark-500">
 						Review ambiguous, unresolved, blocked, and stale workload sources. Reload to read the latest
 						persisted discovery snapshot; only ambiguous and unresolved bindings can be manually resolved.
@@ -708,7 +628,11 @@
 										</p>
 									{/if}
 
-									{#if binding.canResolve}
+									{#if binding.canResolve && !canWrite}
+										<p class="text-sm text-dark-400" data-testid="resolve-read-only">
+											An operator or admin can resolve this binding by choosing its GitOps source.
+										</p>
+									{:else if binding.canResolve}
 										<div class="space-y-3">
 											<label
 												for={`candidate-${binding.key}`}
@@ -774,9 +698,12 @@
 				{/if}
 			</section>
 
-			<section class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-5">
+			<section
+				class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-4 sm:p-5"
+				aria-labelledby="workload-coverage-heading"
+			>
 				<div class="mb-4">
-					<h2 class="text-lg font-semibold text-dark-100">Workload coverage</h2>
+					<h2 id="workload-coverage-heading" class="text-lg font-semibold text-dark-100">Workload coverage</h2>
 					<p class="mt-1 text-sm text-dark-500">
 						Persisted workload binding counts for the selected cluster.
 					</p>
@@ -788,28 +715,55 @@
 					{#if countLabel(coverage.total) === '0'}
 						<p class="mb-4 text-sm text-dark-400">No workload bindings have been observed yet.</p>
 					{/if}
-					<dl class="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
-						{#each [
-							{ label: 'Total', value: countLabel(coverage.total) },
-							{ label: 'Resolved', value: countLabel(coverage.resolved) },
-							{ label: 'Ambiguous', value: countLabel(coverage.ambiguous) },
-							{ label: 'Unresolved', value: countLabel(coverage.unresolved) },
-							{ label: 'Blocked', value: countLabel(coverage.blocked) },
-							{ label: 'Stale', value: countLabel(coverage.stale) },
-							{ label: 'Coverage', value: ratioLabel(coverage.ratio) }
-						] as metric}
-							<div class="rounded-xl border border-dark-700/50 bg-dark-950/40 p-4">
-								<dt class="text-xs uppercase tracking-wide text-dark-500">{metric.label}</dt>
-								<dd class="mt-2 text-xl font-semibold text-dark-100">{metric.value}</dd>
+					<div class="rounded-xl border border-dark-700/50 bg-dark-950/40 p-4">
+						<div class="flex flex-wrap items-end justify-between gap-x-4 gap-y-1">
+							<div>
+								<p class="text-xs uppercase tracking-wide text-dark-500">Coverage</p>
+								<p class="mt-1 text-2xl font-semibold text-dark-100">{ratioLabel(coverage.ratio)}</p>
 							</div>
-						{/each}
-					</dl>
+							<p class="text-sm text-dark-400">
+								{countLabel(coverage.resolved)} of {countLabel(coverage.total)} workloads resolved to a Git source
+							</p>
+						</div>
+						<div
+							class="mt-3 h-2 overflow-hidden rounded-full bg-dark-800"
+							role="progressbar"
+							aria-label="Workload coverage"
+							aria-valuemin="0"
+							aria-valuemax="100"
+							aria-valuenow={coveragePercent ?? undefined}
+							aria-valuetext={coveragePercent === null ? 'Unknown' : `${coveragePercent}%`}
+						>
+							<div class="h-full rounded-full bg-green-500" style="width: {coveragePercent ?? 0}%"></div>
+						</div>
+						<ul
+							class="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-6"
+							aria-label="Workload bindings by status"
+						>
+							{#each [
+								{ label: 'Total', value: countLabel(coverage.total) },
+								{ label: 'Resolved', value: countLabel(coverage.resolved) },
+								{ label: 'Ambiguous', value: countLabel(coverage.ambiguous) },
+								{ label: 'Unresolved', value: countLabel(coverage.unresolved) },
+								{ label: 'Blocked', value: countLabel(coverage.blocked) },
+								{ label: 'Stale', value: countLabel(coverage.stale) }
+							] as metric (metric.label)}
+								<li class="min-w-0">
+									<span class="block text-xs uppercase tracking-wide text-dark-500">{metric.label}</span>
+									<span class="mt-0.5 block text-lg font-semibold text-dark-100">{metric.value}</span>
+								</li>
+							{/each}
+						</ul>
+					</div>
 				{/if}
 			</section>
 
-			<section class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-5">
+			<section
+				class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-4 sm:p-5"
+				aria-labelledby="plan-readiness-heading"
+			>
 				<div class="mb-4">
-					<h2 class="text-lg font-semibold text-dark-100">GitOps plan automation readiness</h2>
+					<h2 id="plan-readiness-heading" class="text-lg font-semibold text-dark-100">GitOps plan automation readiness</h2>
 					<p class="mt-1 text-sm text-dark-500">
 						Provider Secrets are mounted read-only; secret values are never displayed.
 					</p>
@@ -826,89 +780,41 @@
 							Provider registry: {providerReadiness.provider === 'gitops' ? 'Configured' : 'Unavailable'}
 						</span>
 					</div>
-					<dl class="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-						<div class="rounded-xl border border-dark-700/50 bg-dark-950/40 p-4">
+					<dl
+						class="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl border border-dark-700/50 bg-dark-950/40 p-4 text-sm sm:grid-cols-4"
+					>
+						<div class="min-w-0">
 							<dt class="text-xs uppercase tracking-wide text-dark-500">Queued operations</dt>
-							<dd class="mt-2 text-lg font-semibold text-dark-100">{automationMetric(providerReadiness.queue?.queued)}</dd>
+							<dd class="mt-0.5 text-lg font-semibold text-dark-100">{automationMetric(providerReadiness.queue?.queued)}</dd>
 						</div>
-						<div class="rounded-xl border border-dark-700/50 bg-dark-950/40 p-4">
+						<div class="min-w-0">
 							<dt class="text-xs uppercase tracking-wide text-dark-500">Stuck operations</dt>
-							<dd class="mt-2 text-lg font-semibold text-dark-100">{automationMetric(providerReadiness.queue?.stuck)}</dd>
+							<dd class="mt-0.5 text-lg font-semibold text-dark-100">{automationMetric(providerReadiness.queue?.stuck)}</dd>
 						</div>
-						<div class="rounded-xl border border-dark-700/50 bg-dark-950/40 p-4">
+						<div class="min-w-0">
 							<dt class="text-xs uppercase tracking-wide text-dark-500">Worker heartbeat</dt>
-							<dd class="mt-2 text-sm font-semibold text-dark-100">
+							<dd class="mt-0.5 text-sm font-semibold text-dark-100">
 								{providerReadiness.worker?.healthy === true ? 'Healthy' : 'Stale or absent'}
 							</dd>
 						</div>
-						<div class="rounded-xl border border-dark-700/50 bg-dark-950/40 p-4">
+						<div class="min-w-0">
 							<dt class="text-xs uppercase tracking-wide text-dark-500">Discovery age (s)</dt>
-							<dd class="mt-2 text-lg font-semibold text-dark-100">{automationMetric(providerReadiness.discovery?.age_seconds)}</dd>
+							<dd class="mt-0.5 text-lg font-semibold text-dark-100">{automationMetric(providerReadiness.discovery?.age_seconds)}</dd>
 						</div>
 					</dl>
 				{/if}
 			</section>
 
-			<section class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-5">
-				<div class="mb-4">
-					<h2 class="text-lg font-semibold text-dark-100">Pending and open pull requests</h2>
-					<p class="mt-1 text-sm text-dark-500">
-						Read-only records with safe plan, provider, repository, and sync metadata.
-					</p>
-				</div>
-
-				{#if pullRequestsError}
-					<p class="text-sm text-red-400" role="alert">Pull-request records are unavailable.</p>
-				{:else if pullRequests.length === 0}
-					<p class="text-sm text-dark-400">No pending or open pull requests.</p>
-				{:else}
-					<div class="space-y-3">
-						{#each pullRequests as pullRequest (pullRequest.key)}
-							<article class="rounded-xl border border-dark-700/50 bg-dark-950/40 p-4">
-								<div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-									<h3 class="font-medium text-dark-100">Pull request</h3>
-									<span class="rounded-full bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-300">
-										{pullRequest.status}
-									</span>
-								</div>
-								<dl class="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2 xl:grid-cols-3">
-									<div>
-										<dt class="text-xs text-dark-500">Plan</dt>
-										<dd class="mt-1 break-all font-mono text-dark-200">{pullRequest.planId}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Provider</dt>
-										<dd class="mt-1 text-dark-200">{pullRequest.provider}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Provider ID</dt>
-										<dd class="mt-1 break-all font-mono text-dark-200">{pullRequest.providerId}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Repository</dt>
-										<dd class="mt-1 break-all font-mono text-dark-200">{pullRequest.repo}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Sync status</dt>
-										<dd class="mt-1 text-dark-200">{pullRequest.syncStatus}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Sync revision</dt>
-										<dd class="mt-1 break-all font-mono text-dark-200">{pullRequest.syncRevision}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Sync observed</dt>
-										<dd class="mt-1 text-dark-200">{pullRequest.syncObservedAt}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Sync note</dt>
-										<dd class="mt-1 text-dark-200">{pullRequest.syncNote}</dd>
-									</div>
-								</dl>
-							</article>
-						{/each}
-					</div>
-				{/if}
+			<section
+				class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-4 sm:p-5"
+				aria-labelledby="pull-requests-heading"
+				data-testid="changes-board-link"
+			>
+				<h2 id="pull-requests-heading" class="text-lg font-semibold text-dark-100">Pull requests and changes</h2>
+				<p class="mt-1 text-sm text-dark-500">
+					Pull requests, their merge and sync state, rollouts and measurements are followed on the changes board.
+				</p>
+				<a href="/changes" class="mt-3 inline-block text-sm text-green-400 hover:text-green-300">Open the changes board →</a>
 			</section>
 		</div>
 	</DataState>

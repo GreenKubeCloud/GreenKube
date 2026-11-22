@@ -35,14 +35,15 @@ from greenkube.gitops.planning.helm import (
     HelmValuesPlanner,
     HelmValuesUnsupportedError,
     _dump_patch,
-    _legacy_target_selector,
     _managed_postrenderer_patches,
     _new_managed_patch,
     _target_selector,
 )
+from greenkube.gitops.planning.render_inputs import changed_render_inputs, git_blob_sha
 from greenkube.gitops.renderers.helm import HelmRenderer
 from greenkube.gitops.renderers.sandbox import SandboxResult
 from greenkube.gitops.snapshots import RepositorySnapshot, snapshot_from_files
+from tests.automation.actions.oom_limit_scenario import oom_operation  # pyrefly: ignore[missing-import]
 
 BASE_REVISION = "a" * 40
 PROVIDER_ID = "github-main"
@@ -125,8 +126,10 @@ class _ChartRunner:
         ignore_values: bool = False,
         ambiguous_mapping: bool = False,
         container_names: Sequence[str] = ("api", "sidecar"),
+        omit_namespace: bool = False,
     ) -> None:
         self.helm_version = helm_version
+        self.omit_namespace = omit_namespace
         self.unrelated_on_action = unrelated_on_action
         self.ignore_values = ignore_values
         self.ambiguous_mapping = ambiguous_mapping
@@ -177,6 +180,9 @@ class _ChartRunner:
             "metadata": {"name": "payments-api", "namespace": "prod"},
             "spec": {"template": {"spec": {"containers": containers}}},
         }
+        if self.omit_namespace:
+            # Most charts leave the namespace to ``helm template --namespace``.
+            del deployment["metadata"]["namespace"]
         output = f"# Source: {chart_path.as_posix()}/templates/deployment.yaml\n---\n{_safe_dump(deployment)}"
         if self.unrelated_on_action and "cpu: 300m" in output:
             output += """\
@@ -423,6 +429,53 @@ featureFlags:
         assert "cpu: 500m" in planned_values
         assert len(runner.calls) == 8
         assert (snapshot.workspace / "apps/prod/values.yaml").read_text(encoding="utf-8") == values_content
+    finally:
+        snapshot.close()
+
+
+def test_helm_values_receive_mebibytes_not_a_raw_byte_count():
+    """Wave-4 e2e: a byte-level memory proposal reached the Helm values as ``memory: '24114500'``."""
+    from greenkube.automation.actions.container_resources import build_container_resource_actions
+    from tests.automation.actions.test_container_resources_v2 import (  # pyrefly: ignore[missing-import]
+        _recommendation,
+    )
+
+    recommendation = _recommendation(current=128 * 1024**2, proposed=24114500)
+    built = build_container_resource_actions([recommendation])[recommendation.id or 0]
+    action = built.model_copy(update={"target": TARGET})
+    values_content = "app:\n  resources:\n    requests:\n      cpu: 100m\n      memory: 128Mi\n"
+    snapshot = _snapshot({**_CHART, "apps/prod/values.yaml": values_content})
+    planner = HelmValuesPlanner(renderer=_helm_renderer(_ChartRunner()))
+
+    try:
+        plan = planner.plan(action, _values_source(), snapshot, BASE_REVISION, mapping=_values_mapping())
+
+        planned_values = plan.files[0].content
+        assert planned_values is not None
+        assert "memory: 23Mi" in planned_values
+        assert "24114500" not in planned_values
+        assert "24114500" not in (plan.diff or "")
+    finally:
+        snapshot.close()
+
+
+def test_helm_values_rewrite_keeps_long_lines_unwrapped():
+    """Field report F-05: the rewritten values file was folded at 80 columns."""
+    description = "Simulation: " + "a long human description that is well past eighty columns " * 2
+    url = "http://prometheus-operated.monitoring.svc.cluster.local:9090/" + "x" * 60
+    values_content = (
+        f'description: "{description.strip()}"\n'
+        f"url: {url}\n"
+        "app:\n  resources:\n    requests:\n      cpu: 100m\n      memory: 128Mi\n"
+    )
+    expected = values_content.replace("cpu: 100m", "cpu: 300m").replace("memory: 128Mi", "memory: 256Mi")
+    snapshot = _snapshot({**_CHART, "apps/prod/values.yaml": values_content})
+    planner = HelmValuesPlanner(renderer=_helm_renderer(_ChartRunner()))
+
+    try:
+        plan = planner.plan(_action(), _values_source(), snapshot, BASE_REVISION, mapping=_values_mapping())
+
+        assert plan.files[0].content == expected
     finally:
         snapshot.close()
 
@@ -798,7 +851,7 @@ def test_helm_values_planner_rejects_unknown_mapping_fields():
         snapshot.close()
 
 
-def test_helm_values_planner_fails_closed_for_remote_charts_before_rendering():
+def test_helm_values_planner_fails_closed_for_remote_charts_without_an_exact_version_before_rendering():
     snapshot = _snapshot({**_CHART, "apps/prod/values.yaml": "app: {}\n"})
     runner = _ChartRunner()
     remote_source = _values_source(
@@ -812,7 +865,7 @@ def test_helm_values_planner_fails_closed_for_remote_charts_before_rendering():
     )
 
     try:
-        with pytest.raises(HelmValuesUnsupportedError, match="remote"):
+        with pytest.raises(HelmValuesUnsupportedError, match="chart-version-unresolved"):
             HelmValuesPlanner(renderer=_helm_renderer(runner)).plan(
                 _action(),
                 remote_source,
@@ -986,6 +1039,81 @@ def test_flux_helmrelease_planner_adds_render_validated_managed_postrenderer_ide
         snapshot.close()
 
 
+_OOM_CHART_VALUES = """\
+app:
+  resources:
+    requests:
+      memory: 24Mi
+    limits:
+      memory: 24Mi
+"""
+
+
+def _oom_action() -> ActionPlanV3:
+    """e2e: request = limit = 24Mi, OOM-killed; GreenKube raises the request and the limit above it."""
+    operation = oom_operation()
+    return ActionPlanV3(
+        action_id="act-oom",
+        recommendation_ids=[7],
+        target=TARGET,
+        operations=[operation],
+        evidence_ref="recommendation/7",
+    )
+
+
+def test_helm_values_planner_renders_the_oom_increase_with_its_raised_limit_in_mebibytes():
+    files = {
+        **_CHART,
+        "charts/payments/values.yaml": _OOM_CHART_VALUES,
+        "apps/prod/values.yaml": _OOM_CHART_VALUES,
+    }
+    snapshot = _snapshot(files)
+    try:
+        plan = HelmValuesPlanner(renderer=_helm_renderer(_ChartRunner())).plan(
+            _oom_action(), _values_source(), snapshot, BASE_REVISION, mapping=_values_mapping()
+        )
+        assert plan.validation.passed and plan.validation.requests_within_limits
+        values = _safe_load(plan.files[0].content or "")
+        assert values["app"]["resources"] == {"requests": {"memory": "48Mi"}, "limits": {"memory": "53Mi"}}
+    finally:
+        snapshot.close()
+
+
+def test_flux_post_renderer_renders_the_oom_increase_with_its_raised_limit():
+    release = _release_manifest().replace("          cpu: 100m\n          memory: 128Mi\n", "          memory: 24Mi\n")
+    files = {**_CHART, "charts/payments/values.yaml": _OOM_CHART_VALUES, "clusters/prod/helmrelease.yaml": release}
+    snapshot = _snapshot(files)
+    try:
+        plan = FluxHelmReleasePlanner(renderer=_helm_renderer(_ChartRunner())).plan(
+            _oom_action(), _flux_source(), snapshot, BASE_REVISION
+        )
+        assert plan.validation.passed and plan.validation.requests_within_limits
+        planned = _safe_load(plan.files[0].content or "")
+        patch = _safe_load(planned["spec"]["postRenderers"][0]["kustomize"]["patches"][0]["patch"])
+        assert patch["spec"]["template"]["spec"]["containers"][0]["resources"] == {
+            "requests": {"memory": "48Mi"},
+            "limits": {"memory": "53Mi"},
+        }
+    finally:
+        snapshot.close()
+
+
+def test_flux_helmrelease_planner_refuses_a_target_without_metadata_namespace():
+    """e2e: such a chart crashed the planner (KeyError, HTTP 500); planning it would open a no-op PR.
+
+    Flux post-renders the chart before Helm assigns the namespace, so a patch selecting the
+    release namespace never matches: the planner refuses with a typed reason instead.
+    """
+    snapshot = _snapshot({**_CHART, "clusters/prod/helmrelease.yaml": _release_manifest()})
+    planner = FluxHelmReleasePlanner(renderer=_helm_renderer(_ChartRunner(omit_namespace=True)))
+
+    try:
+        with pytest.raises(FluxHelmReleaseUnsupportedError, match="leaves metadata.namespace"):
+            planner.plan(_action(), _flux_source(), snapshot, BASE_REVISION)
+    finally:
+        snapshot.close()
+
+
 def test_flux_helmrelease_multi_container_patch_preserves_chart_render_order():
     files = {**_CHART, "clusters/prod/helmrelease.yaml": _release_manifest()}
     snapshot = _snapshot(files)
@@ -1078,7 +1206,8 @@ def test_flux_helmrelease_planner_fails_closed_for_remote_chart_and_runtime_valu
     )
 
     try:
-        with pytest.raises(FluxHelmReleasePlanError, match="remote"):
+        # The manifest names a HelmRepository the discovered source does not: drift fails closed.
+        with pytest.raises(FluxHelmReleasePlanError, match="changed after source discovery"):
             FluxHelmReleasePlanner(renderer=_helm_renderer(remote_runner)).plan(
                 _action(),
                 remote_source,
@@ -1330,7 +1459,7 @@ def test_flux_helmrelease_planner_rejects_valuesfrom_target_path_as_unsupported(
         snapshot.close()
 
 
-def test_flux_helmrelease_planner_rejects_remote_chartref_with_a_typed_reason():
+def test_flux_helmrelease_planner_rejects_an_undiscovered_chartref_with_a_typed_reason():
     release = _safe_load(_release_manifest())
     release["spec"].pop("chart")
     release["spec"]["chartRef"] = {
@@ -1350,7 +1479,8 @@ def test_flux_helmrelease_planner_rejects_remote_chartref_with_a_typed_reason():
     runner = _ChartRunner()
 
     try:
-        with pytest.raises(FluxHelmReleaseUnsupportedError, match="remote-chart-not-in-snapshot") as error:
+        # The chartRef OCIRepository is not the GitRepository discovery captured: drift fails closed.
+        with pytest.raises(FluxHelmReleaseUnsupportedError, match="changed after source discovery") as error:
             FluxHelmReleasePlanner(renderer=_helm_renderer(runner)).plan(
                 _action(),
                 _flux_source(renderer_config=source_config),
@@ -1463,11 +1593,10 @@ def test_flux_helmrelease_planner_updates_its_managed_patch_without_duplicates()
     try:
         first = planner.plan(_action(), _flux_source(), snapshot, BASE_REVISION)
         assert first.files[0].content is not None
-        legacy_release = first.files[0].content.replace(r"payments\-api", "payments-api")
         second_snapshot = _snapshot(
             {
                 **_CHART,
-                "clusters/prod/helmrelease.yaml": legacy_release,
+                "clusters/prod/helmrelease.yaml": first.files[0].content,
             }
         )
         try:
@@ -1506,7 +1635,7 @@ def test_flux_helmrelease_planner_updates_its_managed_patch_without_duplicates()
         snapshot.close()
 
 
-def test_flux_postrenderer_selectors_escape_regex_metacharacters_and_read_legacy_selectors():
+def test_flux_postrenderer_selectors_escape_regex_metacharacters():
     target = ResourceTarget(
         api_version="apps/v1",
         kind="Deployment",
@@ -1522,7 +1651,7 @@ def test_flux_postrenderer_selectors_escape_regex_metacharacters_and_read_legacy
                 "kustomize": {
                     "patches": [
                         {
-                            "target": _legacy_target_selector(target),
+                            "target": _target_selector(target),
                             "patch": _dump_patch(patch),
                         }
                     ]
@@ -1539,6 +1668,12 @@ def test_flux_postrenderer_selectors_escape_regex_metacharacters_and_read_legacy
         "namespace": r"prod\.blue",
     }
     assert _managed_postrenderer_patches(spec, FluxHelmReleasePlanError)[0].target == target
+
+    # An unescaped selector would also match "paymentsXapi": it is not a GreenKube-managed patch.
+    unescaped = {**_target_selector(target), "name": "payments.api", "namespace": "prod.blue"}
+    spec["postRenderers"][0]["kustomize"]["patches"][0]["target"] = unescaped
+    with pytest.raises(FluxHelmReleasePlanError, match="does not match its patch identity"):
+        _managed_postrenderer_patches(spec, FluxHelmReleasePlanError)
 
 
 def test_flux_helmrelease_planner_refuses_unmanaged_postrenderers():
@@ -1644,3 +1779,120 @@ def test_flux_helmrelease_planner_renders_current_and_restored_release_sources()
             restored_snapshot.close()
     finally:
         original_snapshot.close()
+
+
+def _values_from_config() -> dict[str, Any]:
+    reference = {
+        "values_key": None,
+        "target_path": None,
+        "optional": False,
+        "git_managed": True,
+        "provider_id": PROVIDER_ID,
+        "repo_url": REPO_URL,
+        "ref": "main",
+        "revision": BASE_REVISION,
+    }
+    return {
+        **_flux_source().renderer_config,
+        "release_name": "prod-payments",
+        "values_from": [
+            {
+                **reference,
+                "kind": "ConfigMap",
+                "name": "payments-values",
+                "namespace": "flux-system",
+                "path": "clusters/prod/payments-values.yaml",
+            },
+            {
+                **reference,
+                "kind": "Secret",
+                "name": "payments-secret-values",
+                "namespace": "flux-system",
+                "values_key": "values.yaml",
+                "path": "clusters/prod/payments-secrets.yaml",
+            },
+        ],
+    }
+
+
+def test_flux_helmrelease_plan_records_git_managed_valuesfrom_manifests_as_render_inputs():
+    release = _safe_load(_fixture("flux-helmrelease-values-from.yaml"))
+    release["spec"]["values"] = {"app": {"resources": {"requests": {"cpu": "275m"}}}}
+    snapshot = _snapshot(
+        {
+            **_CHART,
+            "clusters/prod/helmrelease.yaml": _safe_dump(release),
+            "clusters/prod/payments-values.yaml": _fixture("flux-values-configmap.yaml"),
+            "clusters/prod/payments-secrets.yaml": _fixture("flux-values-secret.yaml"),
+            "clusters/prod/unrelated.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: other\n",
+        }
+    )
+
+    try:
+        plan = FluxHelmReleasePlanner(renderer=_helm_renderer(_ChartRunner())).plan(
+            _action(), _flux_source(renderer_config=_values_from_config()), snapshot, BASE_REVISION
+        )
+    finally:
+        snapshot.close()
+
+    inputs = plan.validation.render_inputs
+    assert {"clusters/prod/payments-values.yaml", "clusters/prod/payments-secrets.yaml"} <= set(inputs)
+    assert inputs["clusters/prod/payments-values.yaml"] == git_blob_sha(
+        _fixture("flux-values-configmap.yaml"), BASE_REVISION
+    )
+    # A moved head that only changes a valuesFrom manifest changes the render: the plan goes stale.
+    assert changed_render_inputs(plan.validation, ["clusters/prod/payments-values.yaml"]) == [
+        "clusters/prod/payments-values.yaml"
+    ]
+    assert changed_render_inputs(plan.validation, ["clusters/prod/unrelated.yaml"]) == []
+
+
+def test_flux_helmrelease_plan_records_values_files_outside_the_chart_as_render_inputs():
+    release = _safe_load(_release_manifest())
+    release["spec"].pop("values")
+    release["spec"]["chart"]["spec"]["valuesFiles"] = ["values/prod.yaml"]
+    source_config = {**_flux_source().renderer_config, "chart_values_files": ["values/prod.yaml"]}
+    values = "app:\n  resources:\n    requests:\n      cpu: 250m\n      memory: 80Mi\n"
+    snapshot = _snapshot({**_CHART, "clusters/prod/helmrelease.yaml": _safe_dump(release), "values/prod.yaml": values})
+
+    try:
+        plan = FluxHelmReleasePlanner(renderer=_helm_renderer(_ChartRunner())).plan(
+            _action(requests={"cpu": "300m"}), _flux_source(renderer_config=source_config), snapshot, BASE_REVISION
+        )
+    finally:
+        snapshot.close()
+
+    assert plan.validation.render_inputs["values/prod.yaml"] == git_blob_sha(values, BASE_REVISION)
+    assert changed_render_inputs(plan.validation, ["values/prod.yaml"]) == ["values/prod.yaml"]
+
+
+def test_helm_values_plan_watches_local_file_dependency_charts_through_the_chart_scope():
+    # Chart.yaml dependencies are refused by the planners and the renderer refuses a
+    # file:// reference that leaves the chart, so a renderable local dependency (here an
+    # apiVersion v1 requirements.yaml) lives in the chart directory, a render scope.
+    common = {
+        "charts/payments/charts/common/Chart.yaml": "apiVersion: v2\nname: common\nversion: 0.1.0\ntype: library\n",
+        "charts/payments/charts/common/templates/_helpers.tpl": '{{- define "common.name" -}}x{{- end -}}\n',
+    }
+    requirements = "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://charts/common\n"
+    files = {
+        **_CHART,
+        **common,
+        "charts/payments/Chart.yaml": "apiVersion: v1\nname: payments\nversion: 1.0.0\n",
+        "charts/payments/requirements.yaml": requirements,
+        "apps/prod/values.yaml": "app:\n  resources:\n    requests:\n      cpu: 100m\n",
+    }
+    snapshot = _snapshot(files)
+
+    try:
+        plan = HelmValuesPlanner(renderer=_helm_renderer(_ChartRunner())).plan(
+            _action(), _values_source(), snapshot, BASE_REVISION, mapping=_values_mapping()
+        )
+    finally:
+        snapshot.close()
+
+    assert plan.validation.render_scopes == ["charts/payments"]
+    assert {*common, "charts/payments/requirements.yaml"} <= set(plan.validation.render_inputs)
+    assert changed_render_inputs(plan.validation, ["charts/payments/charts/common/templates/new.yaml"]) == [
+        "charts/payments/charts/common/templates/new.yaml"
+    ]

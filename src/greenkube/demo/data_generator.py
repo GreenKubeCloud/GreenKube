@@ -18,11 +18,14 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from greenkube.impact.types import CapacityDelta, ChangeKind, Co2eBreakdown, CostBreakdown, ImpactDelta
+from greenkube.models.evidence import RecommendationEvidence, ResourceSnapshot, UtilizationStats
 from greenkube.models.metrics import (
     CombinedMetric,
     RecommendationRecord,
     RecommendationStatus,
     RecommendationType,
+    RiskLevel,
 )
 from greenkube.models.node import NodeInfo
 
@@ -159,14 +162,12 @@ def _workload(
     baseline_memory_bytes: int,
     placement: str = "global",
     profile: str = "steady",
-    storage_request_bytes: int | None = None,
-    storage_usage_ratio: float = 0.65,
+    volume_bytes: int | None = None,
     historical_cpu_request: int | None = None,
     historical_memory_request_bytes: int | None = None,
     optimized_days_ago: int | None = None,
     off_peak_after_days_ago: int | None = None,
     batch_shift_after_days_ago: int | None = None,
-    ephemeral_storage_request_bytes: int | None = None,
 ) -> dict[str, Any]:
     return {
         "pod_name": pod_name,
@@ -178,14 +179,12 @@ def _workload(
         "baseline_memory_bytes": baseline_memory_bytes,
         "placement": placement,
         "profile": profile,
-        "storage_request_bytes": storage_request_bytes,
-        "storage_usage_ratio": storage_usage_ratio,
+        "volume_bytes": volume_bytes,
         "historical_cpu_request": historical_cpu_request,
         "historical_memory_request_bytes": historical_memory_request_bytes,
         "optimized_days_ago": optimized_days_ago,
         "off_peak_after_days_ago": off_peak_after_days_ago,
         "batch_shift_after_days_ago": batch_shift_after_days_ago,
-        "ephemeral_storage_request_bytes": ephemeral_storage_request_bytes,
     }
 
 
@@ -412,8 +411,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=70,
                 baseline_memory_bytes=980 * MIB,
                 profile="steady",
-                storage_request_bytes=500 * GIB,
-                storage_usage_ratio=0.72,
+                volume_bytes=500 * GIB,
             ),
             _workload(
                 "prometheus-k8s-1",
@@ -424,8 +422,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=62,
                 baseline_memory_bytes=985 * MIB,
                 profile="steady",
-                storage_request_bytes=500 * GIB,
-                storage_usage_ratio=0.7,
+                volume_bytes=500 * GIB,
             ),
             _workload(
                 "grafana-0",
@@ -540,8 +537,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=68,
                 baseline_memory_bytes=3123 * MIB,
                 profile="storage",
-                storage_request_bytes=1024 * GIB,
-                storage_usage_ratio=0.68,
+                volume_bytes=1024 * GIB,
             ),
             _workload(
                 "minio-1",
@@ -552,8 +548,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=54,
                 baseline_memory_bytes=3342 * MIB,
                 profile="storage",
-                storage_request_bytes=1024 * GIB,
-                storage_usage_ratio=0.7,
+                volume_bytes=1024 * GIB,
             ),
             _workload(
                 "minio-2",
@@ -564,8 +559,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=58,
                 baseline_memory_bytes=3303 * MIB,
                 profile="storage",
-                storage_request_bytes=1024 * GIB,
-                storage_usage_ratio=0.69,
+                volume_bytes=1024 * GIB,
             ),
             _workload(
                 "minio-3",
@@ -576,8 +570,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=92,
                 baseline_memory_bytes=3158 * MIB,
                 profile="storage",
-                storage_request_bytes=1024 * GIB,
-                storage_usage_ratio=0.67,
+                volume_bytes=1024 * GIB,
             ),
         ],
         "dremio": [
@@ -591,8 +584,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_memory_bytes=2630 * MIB,
                 profile="analytics",
                 placement="global",
-                storage_request_bytes=250 * GIB,
-                storage_usage_ratio=0.55,
+                volume_bytes=250 * GIB,
             ),
             _workload(
                 "dremio-coordinator-0",
@@ -604,7 +596,6 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_memory_bytes=2174 * MIB,
                 profile="analytics",
                 placement="global",
-                ephemeral_storage_request_bytes=40 * GIB,
             ),
             _workload(
                 "dremio-executor-0",
@@ -617,7 +608,6 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 profile="batch",
                 batch_shift_after_days_ago=210,
                 placement="global",
-                ephemeral_storage_request_bytes=60 * GIB,
             ),
             _workload(
                 "dremio-executor-1",
@@ -630,7 +620,6 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 profile="batch",
                 batch_shift_after_days_ago=210,
                 placement="global",
-                ephemeral_storage_request_bytes=60 * GIB,
             ),
             _workload(
                 "zk-0",
@@ -659,7 +648,6 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 historical_memory_request_bytes=24 * GIB,
                 optimized_days_ago=210,
                 batch_shift_after_days_ago=210,
-                ephemeral_storage_request_bytes=80 * GIB,
             ),
             _workload(
                 "mageai-trigger-0",
@@ -714,8 +702,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=18,
                 baseline_memory_bytes=92 * MIB,
                 profile="steady",
-                storage_request_bytes=150 * GIB,
-                storage_usage_ratio=0.58,
+                volume_bytes=150 * GIB,
             ),
             _workload(
                 "superset-redis-master-0",
@@ -771,8 +758,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=55,
                 baseline_memory_bytes=1226 * MIB,
                 profile="steady",
-                storage_request_bytes=400 * GIB,
-                storage_usage_ratio=0.62,
+                volume_bytes=400 * GIB,
             ),
             _workload(
                 "datahub-prerequisites-kafka-1",
@@ -783,8 +769,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=72,
                 baseline_memory_bytes=1223 * MIB,
                 profile="steady",
-                storage_request_bytes=400 * GIB,
-                storage_usage_ratio=0.66,
+                volume_bytes=400 * GIB,
             ),
             _workload(
                 "datahub-prerequisites-mysql-0",
@@ -795,8 +780,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=28,
                 baseline_memory_bytes=755 * MIB,
                 profile="steady",
-                storage_request_bytes=200 * GIB,
-                storage_usage_ratio=0.6,
+                volume_bytes=200 * GIB,
             ),
             _workload(
                 "opensearch-cluster-master-0",
@@ -807,8 +791,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=40,
                 baseline_memory_bytes=2850 * MIB,
                 profile="search",
-                storage_request_bytes=500 * GIB,
-                storage_usage_ratio=0.64,
+                volume_bytes=500 * GIB,
             ),
         ],
         "website": [
@@ -1217,9 +1200,8 @@ def _select_node(active_nodes: list[dict[str, Any]], workload: dict[str, Any], t
     return candidates[_stable_rng(workload["pod_name"], bucket).randrange(len(candidates))]
 
 
-def _resource_rates(
-    profile: str, activity: float, storage_request_bytes: int | None
-) -> tuple[float, float, float, float]:
+def _network_rates(profile: str, activity: float) -> tuple[float, float]:
+    """Receive and transmit rates (bytes/s) that price the demo network cost."""
     network_base = {
         "web": (75000.0, 68000.0),
         "api": (42000.0, 36000.0),
@@ -1231,23 +1213,8 @@ def _resource_rates(
         "burst": (28000.0, 25000.0),
         "steady": (10000.0, 8000.0),
     }
-    disk_base = {
-        "web": (1200.0, 900.0),
-        "api": (900.0, 700.0),
-        "search": (3500.0, 2200.0),
-        "analytics": (9000.0, 7000.0),
-        "batch": (14000.0, 12000.0),
-        "storage": (16000.0, 18000.0),
-        "office": (700.0, 500.0),
-        "burst": (2200.0, 1800.0),
-        "steady": (800.0, 700.0),
-    }
     rx_base, tx_base = network_base.get(profile, network_base["steady"])
-    read_base, write_base = disk_base.get(profile, disk_base["steady"])
-    if storage_request_bytes:
-        read_base *= 1.2
-        write_base *= 1.3
-    return rx_base * activity, tx_base * activity, read_base * activity, write_base * activity
+    return rx_base * activity, tx_base * activity
 
 
 def generate_node_snapshots(days: int = 30) -> list[NodeInfo]:
@@ -1375,16 +1342,9 @@ def generate_combined_metrics(days: int = 30) -> list[CombinedMetric]:
                 embodied_hourly = node_state["embodied_emissions_kg"] * 1000 / (4 * 365.25 * 24)
                 embodied_co2e = embodied_hourly * duration_hours * max(0.08, request_share)
 
-                storage_request_bytes = workload.get("storage_request_bytes")
-                storage_usage_bytes = None
-                if storage_request_bytes:
-                    storage_request_bytes = int(storage_request_bytes)
-                    storage_usage_bytes = int(storage_request_bytes * float(workload.get("storage_usage_ratio", 0.65)))
-
-                rx_rate, tx_rate, read_rate, write_rate = _resource_rates(
-                    str(workload["profile"]), activity, storage_request_bytes
-                )
-                storage_cost = ((storage_request_bytes or 0) / GIB) * 0.00012 * duration_hours
+                volume_bytes = int(workload.get("volume_bytes") or 0)
+                rx_rate, tx_rate = _network_rates(str(workload["profile"]), activity)
+                storage_cost = (volume_bytes / GIB) * 0.00012 * duration_hours
                 network_cost = (rx_rate + tx_rate) / (1024**3) * 0.015 * duration_hours
                 compute_cost = (
                     idle_cost_per_workload * duration_hours
@@ -1408,18 +1368,6 @@ def generate_combined_metrics(days: int = 30) -> list[CombinedMetric]:
                         cpu_usage_max_millicores=min(cpu_request, int(cpu_usage * 1.16)),
                         memory_usage_bytes=memory_usage,
                         memory_usage_max_bytes=min(memory_request, int(memory_usage * 1.08)),
-                        network_receive_bytes=round(rx_rate, 2),
-                        network_transmit_bytes=round(tx_rate, 2),
-                        disk_read_bytes=round(read_rate, 2),
-                        disk_write_bytes=round(write_rate, 2),
-                        storage_request_bytes=storage_request_bytes,
-                        storage_usage_bytes=storage_usage_bytes,
-                        ephemeral_storage_request_bytes=workload.get("ephemeral_storage_request_bytes"),
-                        ephemeral_storage_usage_bytes=(
-                            int(int(workload["ephemeral_storage_request_bytes"]) * 0.55)
-                            if workload.get("ephemeral_storage_request_bytes")
-                            else None
-                        ),
                         restart_count=_stable_rng(workload["pod_name"], ts.date()).randint(0, 1),
                         owner_kind=str(workload["owner_kind"]),
                         owner_name=str(workload["owner_name"]),
@@ -1435,6 +1383,11 @@ def generate_combined_metrics(days: int = 30) -> list[CombinedMetric]:
                         estimation_reasons=["daily_story_bucket"] if is_estimated else [],
                         embodied_co2e_grams=round(embodied_co2e, 4),
                         calculation_version=DEMO_CALCULATION_VERSION,
+                        # The story simulates a fully instrumented cluster (A11 provenance).
+                        cost_source="opencost",
+                        usage_source="prometheus",
+                        power_source="instance_profile",
+                        intensity_source="realtime" if is_estimated else "consolidated",
                     )
                 )
 
@@ -1442,8 +1395,161 @@ def generate_combined_metrics(days: int = 30) -> list[CombinedMetric]:
     return metrics
 
 
-def _applied_recommendation(**kwargs: Any) -> RecommendationRecord:
-    return RecommendationRecord(status=RecommendationStatus.APPLIED, updated_at=kwargs.get("applied_at"), **kwargs)
+#: Demo unit prices (USD, on-demand Graviton list prices rounded) used by the demo projections.
+DEMO_CPU_CORE_HOUR = 0.0316
+DEMO_RAM_GIB_HOUR = 0.0042
+#: Demo grid and embodied emission rates per reserved core-hour and GiB-hour (grams CO2e).
+DEMO_CO2E_PER_CORE_HOUR_G = 9.5
+DEMO_CO2E_PER_GIB_HOUR_G = 1.1
+HOURS_PER_YEAR = 8760.0
+
+
+def demo_impact(
+    *,
+    cpu_cores: float = 0.0,
+    mem_gib: float = 0.0,
+    replicas: float = 1.0,
+    realization_factor: float = 0.7,
+    realization_source: str = "autoscaler",
+    realization_reasons: tuple[str, ...] = ("Karpenter consolidates the pool (WhenEmptyOrUnderutilized)",),
+    kind: ChangeKind = ChangeKind.CONTAINER_RESOURCES,
+    lb_cost_annual: float = 0.0,
+    load_balancers: int = 0,
+) -> dict[str, Any]:
+    """An Impact Model projection (``impact``) for a demo recommendation.
+
+    The demo has no live cluster to project from, so the projection is built
+    from demo unit prices with the real :class:`ImpactDelta` types: the
+    recommendation API derives the projected released capacity, allocated and
+    billable savings from it exactly as for a real projection.
+    """
+    replica_hours = HOURS_PER_YEAR * replicas
+    core_hours = cpu_cores * replica_hours
+    gib_hours = mem_gib * replica_hours
+    cost = CostBreakdown(cpu=core_hours * DEMO_CPU_CORE_HOUR, ram=gib_hours * DEMO_RAM_GIB_HOUR, lb=lb_cost_annual)
+    allocated = cost.cpu + cost.ram + cost.lb
+    co2e_total = core_hours * DEMO_CO2E_PER_CORE_HOUR_G + gib_hours * DEMO_CO2E_PER_GIB_HOUR_G
+    co2e = Co2eBreakdown(
+        idle_operational=co2e_total * 0.45,
+        dynamic_operational=co2e_total * 0.15,
+        memory_operational=co2e_total * 0.1,
+        embodied=co2e_total * 0.3,
+    )
+    expected_co2e = co2e_total * realization_factor
+    expected_cost = allocated * realization_factor if kind is ChangeKind.CONTAINER_RESOURCES else allocated
+    carbon_price = 100.0
+    delta = ImpactDelta(
+        kind=kind,
+        allocated_cost_annual=allocated,
+        cost_breakdown_annual=cost,
+        capacity_released=CapacityDelta(
+            cpu_core_hours=core_hours,
+            mem_gib_hours=gib_hours,
+            replica_hours=replica_hours if kind is ChangeKind.CONTAINER_RESOURCES else 0.0,
+            load_balancers=load_balancers,
+        ),
+        expected_billable_cost_annual=expected_cost,
+        realization_factor=realization_factor if kind is ChangeKind.CONTAINER_RESOURCES else 1.0,
+        co2e_allocated_annual_g=co2e_total,
+        co2e_expected_annual_g=expected_co2e,
+        co2e_breakdown_annual_g=co2e,
+        co2e_modeled=kind is ChangeKind.CONTAINER_RESOURCES,
+        carbon_price_per_tonne=carbon_price,
+        value_annual=expected_cost + carbon_price * expected_co2e / 1e6,
+        currency="USD",
+        confidence=0.8,
+        assumptions={
+            "demo": True,
+            "unit_prices_source": "demo",
+            "realization_factor_source": realization_source,
+            "realization_reasons": list(realization_reasons),
+        },
+    )
+    return delta.to_dict()
+
+
+def _demo_evidence(
+    *,
+    now: datetime,
+    days: int,
+    cpu: tuple[int, int] | None = None,
+    memory: tuple[int, int] | None = None,
+    usage: UtilizationStats | None = None,
+    memory_usage: UtilizationStats | None = None,
+    risk: str = "low",
+    confidence: float = 0.85,
+) -> RecommendationEvidence:
+    """Review evidence of a demo rightsizing (observation window, usage percentiles, requests)."""
+    return RecommendationEvidence(
+        observation_window_start=now - timedelta(days=days),
+        observation_window_end=now,
+        observation_window_seconds=days * 86400.0,
+        first_observed_at=now - timedelta(days=days),
+        sample_count=days * 288,
+        coverage_ratio=0.98,
+        current=ResourceSnapshot(
+            cpu_request_millicores=cpu[0] if cpu else None, memory_request_bytes=memory[0] if memory else None
+        ),
+        proposed=ResourceSnapshot(
+            cpu_request_millicores=cpu[1] if cpu else None, memory_request_bytes=memory[1] if memory else None
+        ),
+        cpu_usage=usage,
+        memory_usage=memory_usage,
+        restart_count=0,
+        oom_events=0,
+        savings_method="impact_model",
+        confidence=confidence,
+        risk_level=risk,
+        generated_by="greenkube",
+    )
+
+
+def _projected(**kwargs: Any) -> dict[str, Any]:
+    """``impact`` and the v1 savings fields (expected billable cost and CO2e) of a demo projection."""
+    impact = demo_impact(**kwargs)
+    cost = impact["expected_billable_cost_annual"]
+    co2e = impact["co2e_expected_annual_g"]
+    return {
+        "impact": impact,
+        "potential_savings_cost": cost if cost > 0 else None,
+        "potential_savings_co2e_grams": co2e if co2e > 0 else None,
+    }
+
+
+#: Days between a demo change landing and its measurement being decided.
+DEMO_VERIFICATION_DAYS = 8
+
+
+def _applied_recommendation(*, measured: bool = True, **kwargs: Any) -> RecommendationRecord:
+    """An applied demo recommendation, verified with a measured saving unless ``measured`` is False.
+
+    A measured one carries its realized savings as the measured allocated rate
+    (``measured_cost_saved``, ``measured_co2e_saved_grams``), so the savings
+    report and the ledger show measured savings next to the projections. An
+    unmeasured one stays ``applied`` with an inconclusive verification and
+    accrues nothing, as in production.
+    """
+    applied_at = kwargs["applied_at"]
+    if not measured:
+        return RecommendationRecord(
+            status=RecommendationStatus.APPLIED,
+            updated_at=applied_at,
+            application_method="pr_merge",
+            verification_status="inconclusive",
+            **kwargs,
+        )
+    verified_at = applied_at + timedelta(days=DEMO_VERIFICATION_DAYS)
+    return RecommendationRecord(
+        status=RecommendationStatus.VERIFIED,
+        updated_at=verified_at,
+        application_method="pr_merge",
+        verified_at=verified_at,
+        verification_status="passed",
+        measured_cost_saved=kwargs.get("cost_saved"),
+        measured_co2e_saved_grams=kwargs.get("carbon_saved_co2e_grams"),
+        savings_realized=True,
+        **kwargs,
+    )
 
 
 def _active_recommendation(**kwargs: Any) -> RecommendationRecord:
@@ -1455,25 +1561,6 @@ def generate_recommendations() -> list[RecommendationRecord]:
     now = datetime.now(timezone.utc)
 
     recommendations = [
-        _applied_recommendation(
-            pod_name="lens-review-sandbox-0",
-            namespace="design-review",
-            type=RecommendationType.ZOMBIE_POD,
-            description="The abandoned design-review sandbox was removed after 45 idle days.",
-            reason="The pod had no inbound traffic, no completed user sessions, and <1% CPU for six weeks.",
-            priority="high",
-            scope="pod",
-            potential_savings_cost=620.0,
-            potential_savings_co2e_grams=285000.0,
-            current_cpu_request_millicores=800,
-            current_memory_request_bytes=2 * GIB,
-            actual_cpu_request_millicores=0,
-            actual_memory_request_bytes=0,
-            carbon_saved_co2e_grams=252000.0,
-            cost_saved=580.0,
-            created_at=now - timedelta(days=710),
-            applied_at=now - timedelta(days=700),
-        ),
         _applied_recommendation(
             pod_name="datahub-datahub-gms-0",
             namespace="datahub",
@@ -1511,109 +1598,6 @@ def generate_recommendations() -> list[RecommendationRecord]:
             applied_at=now - timedelta(days=330),
         ),
         _applied_recommendation(
-            pod_name="storefront-web-us-0",
-            namespace="website",
-            type=RecommendationType.AUTOSCALING_CANDIDATE,
-            description="A latency-aware HPA was rolled out on the US storefront to absorb lunchtime spikes.",
-            reason="The service had a coefficient of variation above 0.9 with sharp regional peaks around 18:00 UTC.",
-            priority="high",
-            scope="pod",
-            potential_savings_cost=920.0,
-            potential_savings_co2e_grams=58000.0,
-            current_cpu_request_millicores=950,
-            actual_cpu_request_millicores=700,
-            carbon_saved_co2e_grams=52000.0,
-            cost_saved=860.0,
-            created_at=now - timedelta(days=340),
-            applied_at=now - timedelta(days=310),
-        ),
-        _applied_recommendation(
-            pod_name="superset-worker-1",
-            namespace="superset",
-            type=RecommendationType.OFF_PEAK_SCALING,
-            description=(
-                "Superset workers now scale down overnight and on weekends outside executive reporting windows."
-            ),
-            reason="The BI workload was idle for 14 hours per weekday and almost fully idle on Saturdays.",
-            priority="medium",
-            scope="pod",
-            potential_savings_cost=1120.0,
-            potential_savings_co2e_grams=104000.0,
-            cron_schedule="0 20 * * * scale-down; 0 6 * * 1-5 scale-up",
-            carbon_saved_co2e_grams=92000.0,
-            cost_saved=970.0,
-            created_at=now - timedelta(days=300),
-            applied_at=now - timedelta(days=260),
-        ),
-        _applied_recommendation(
-            pod_name=None,
-            namespace="design-review",
-            type=RecommendationType.IDLE_NAMESPACE,
-            description="The design-review namespace is now started only for approved product review sessions.",
-            reason="It stayed mostly idle after the product launch, but still reserved memory and PVC capacity.",
-            priority="medium",
-            scope="namespace",
-            potential_savings_cost=740.0,
-            potential_savings_co2e_grams=68000.0,
-            carbon_saved_co2e_grams=60000.0,
-            cost_saved=680.0,
-            created_at=now - timedelta(days=260),
-            applied_at=now - timedelta(days=240),
-        ),
-        _applied_recommendation(
-            pod_name="mageai-0",
-            namespace="mageai",
-            type=RecommendationType.CARBON_AWARE_SCHEDULING,
-            description="Mage AI demand forecasts were shifted from midday to low-carbon night windows in Osaka.",
-            reason=(
-                "The batch consumed the same compute but emitted far less when "
-                "scheduled between 01:00 and 04:00 local time."
-            ),
-            priority="high",
-            scope="pod",
-            potential_savings_cost=140.0,
-            potential_savings_co2e_grams=128000.0,
-            carbon_saved_co2e_grams=115000.0,
-            cost_saved=120.0,
-            created_at=now - timedelta(days=240),
-            applied_at=now - timedelta(days=210),
-        ),
-        _applied_recommendation(
-            pod_name="eu-optic-buffer-05",
-            namespace="cluster",
-            type=RecommendationType.OVERPROVISIONED_NODE,
-            description=(
-                "The extra European buffer node was removed after regional "
-                "failover tests confirmed sufficient headroom."
-            ),
-            reason="Average CPU stayed below 14% and memory below 22% even during catalog refreshes.",
-            priority="high",
-            scope="node",
-            potential_savings_cost=3120.0,
-            potential_savings_co2e_grams=148000.0,
-            target_node="eu-optic-buffer-05",
-            carbon_saved_co2e_grams=130000.0,
-            cost_saved=2700.0,
-            created_at=now - timedelta(days=390),
-            applied_at=now - timedelta(days=320),
-        ),
-        _applied_recommendation(
-            pod_name="ap-optic-edge-03",
-            namespace="cluster",
-            type=RecommendationType.UNDERUTILIZED_NODE,
-            description="One APAC node was downsized from m8g.2xlarge to m8g.xlarge after sustained low utilization.",
-            reason="The local checkout and retail services rarely exceeded 38% CPU outside campaign weeks.",
-            priority="medium",
-            scope="node",
-            potential_savings_cost=860.0,
-            potential_savings_co2e_grams=155000.0,
-            target_node="ap-optic-edge-03",
-            carbon_saved_co2e_grams=140000.0,
-            cost_saved=780.0,
-            created_at=now - timedelta(days=200),
-            applied_at=now - timedelta(days=175),
-        ),
-        _applied_recommendation(
             pod_name="pvc-optic-analytics-data",
             namespace=None,
             type=RecommendationType.ORPHANED_PERSISTENT_VOLUME,
@@ -1647,51 +1631,157 @@ def generate_recommendations() -> list[RecommendationRecord]:
             created_at=now - timedelta(days=100),
             applied_at=now - timedelta(days=80),
         ),
+        _applied_recommendation(
+            measured=False,
+            pod_name="api-gateway-0",
+            container_name="app",
+            namespace="platform",
+            owner_kind="Deployment",
+            owner_name="api-gateway",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="The API gateway CPU request was cut from 1200m; the team merged 900m instead of 800m.",
+            reason="P95 CPU stayed below 610m for 30 days; reviewers kept extra headroom for campaign traffic.",
+            priority="medium",
+            scope="workload",
+            potential_savings_cost=109.0,
+            potential_savings_co2e_grams=26000.0,
+            current_cpu_request_millicores=1200,
+            recommended_cpu_request_millicores=800,
+            carbon_saved_co2e_grams=19000.0,
+            cost_saved=82.0,
+            created_at=now - timedelta(days=225),
+            applied_at=now - timedelta(days=210),
+        ),
+        _applied_recommendation(
+            pod_name="pricing-service-0",
+            container_name="app",
+            namespace="commerce",
+            owner_kind="Deployment",
+            owner_name="pricing-service",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="The pricing service CPU request went from 900m to 550m through a reviewed pull request.",
+            reason="P95 CPU stayed below 420m for 30 days, including two promotional weekends.",
+            priority="medium",
+            scope="workload",
+            potential_savings_cost=95.0,
+            potential_savings_co2e_grams=29000.0,
+            current_cpu_request_millicores=900,
+            recommended_cpu_request_millicores=550,
+            actual_cpu_request_millicores=550,
+            carbon_saved_co2e_grams=27000.0,
+            cost_saved=88.0,
+            created_at=now - timedelta(days=150),
+            applied_at=now - timedelta(days=140),
+        ),
         _active_recommendation(
             pod_name="catalog-search-0",
+            container_name="app",
             namespace="platform",
+            owner_kind="Deployment",
+            owner_name="catalog-search",
             type=RecommendationType.RIGHTSIZING_MEMORY,
-            description="Catalog search still keeps more heap than needed outside the Black Friday replay tests.",
-            reason="P95 memory stayed below 780Mi during the last 90 days while 1280Mi remains reserved.",
+            description="Catalog search keeps more heap than it needs outside the Black Friday replay tests.",
+            reason="P95 memory stayed below 780Mi during the last 30 days while 1024Mi remains reserved.",
             priority="medium",
-            scope="pod",
-            potential_savings_cost=260.0,
-            potential_savings_co2e_grams=22000.0,
-            current_memory_request_bytes=1280 * MIB,
-            recommended_memory_request_bytes=1024 * MIB,
+            scope="workload",
+            current_memory_request_bytes=1024 * MIB,
+            recommended_memory_request_bytes=832 * MIB,
+            risk_level=RiskLevel.LOW,
+            confidence=0.86,
+            evidence=_demo_evidence(
+                now=now,
+                days=30,
+                memory=(1024 * MIB, 832 * MIB),
+                memory_usage=UtilizationStats(
+                    avg=610 * MIB, p50=600 * MIB, p90=720 * MIB, p95=770 * MIB, p99=790 * MIB, max=801 * MIB
+                ),
+            ),
             created_at=now - timedelta(days=12),
+            **_projected(mem_gib=192 / 1024, replicas=3.0),
         ),
         _active_recommendation(
-            pod_name="dremio-executor-1",
-            namespace="dremio",
-            type=RecommendationType.CARBON_AWARE_SCHEDULING,
-            description=(
-                "Weekly data rebalancing still runs too early in the afternoon "
-                "instead of the lowest-carbon overnight slot."
+            pod_name="checkout-api-eu-0",
+            container_name="app",
+            namespace="commerce",
+            owner_kind="Deployment",
+            owner_name="checkout-api-eu",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="The EU checkout API reserves 600m CPU per replica but its P95 stays near 210m.",
+            reason="P95 CPU was 208m and the maximum 262m over 30 days across 4 replicas; no throttling observed.",
+            priority="high",
+            scope="workload",
+            current_cpu_request_millicores=600,
+            recommended_cpu_request_millicores=300,
+            risk_level=RiskLevel.LOW,
+            confidence=0.91,
+            evidence=_demo_evidence(
+                now=now,
+                days=30,
+                cpu=(600, 300),
+                usage=UtilizationStats(avg=120, p50=110, p90=190, p95=208, p99=240, max=262),
+                confidence=0.91,
             ),
-            reason=(
-                "The executor consumes mostly the same energy, but its run "
-                "window still overlaps with the regional peak intensity period."
-            ),
+            created_at=now - timedelta(days=6),
+            **_projected(cpu_cores=0.3, replicas=4.0),
+        ),
+        _active_recommendation(
+            pod_name="identity-service-0",
+            container_name="app",
+            namespace="platform",
+            owner_kind="Deployment",
+            owner_name="identity-service",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="The identity service CPU request is four times its P95 usage.",
+            reason="P95 CPU was 96m over 30 days for a 400m request; login peaks stay under 140m.",
             priority="medium",
-            scope="pod",
-            potential_savings_co2e_grams=34000.0,
-            created_at=now - timedelta(days=7),
+            scope="workload",
+            current_cpu_request_millicores=400,
+            recommended_cpu_request_millicores=150,
+            risk_level=RiskLevel.MEDIUM,
+            risk_factors=["bursty_usage"],
+            confidence=0.78,
+            evidence=_demo_evidence(
+                now=now,
+                days=30,
+                cpu=(400, 150),
+                usage=UtilizationStats(avg=66, p50=60, p90=88, p95=96, p99=130, max=138),
+                risk="medium",
+                confidence=0.78,
+            ),
+            created_at=now - timedelta(days=5),
+            **_projected(cpu_cores=0.25, replicas=2.0),
         ),
         _active_recommendation(
-            pod_name="stock-reservation-0",
-            namespace="retail",
-            type=RecommendationType.OFF_PEAK_SCALING,
-            description=(
-                "Nightly reservation reconciliation could scale down between store closure and ERP batch import."
-            ),
-            reason="The service drops below 6% utilization for almost nine hours every night.",
+            pod_name="qa-traceability-0",
+            container_name="app",
+            namespace="manufacturing",
+            owner_kind="Deployment",
+            owner_name="qa-traceability",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="QA traceability runs on the fixed factory pool and reserves 350m CPU for a 60m P95.",
+            reason="P95 CPU was 61m over 30 days. The factory pool has no autoscaler: the capacity is freed for "
+            "other workloads, the bill does not change until nodes are removed.",
             priority="low",
-            scope="pod",
-            potential_savings_cost=120.0,
-            potential_savings_co2e_grams=13000.0,
-            cron_schedule="0 0 * * * scale-down; 0 6 * * * scale-up",
-            created_at=now - timedelta(days=4),
+            scope="workload",
+            current_cpu_request_millicores=350,
+            recommended_cpu_request_millicores=100,
+            risk_level=RiskLevel.LOW,
+            confidence=0.88,
+            evidence=_demo_evidence(
+                now=now,
+                days=30,
+                cpu=(350, 100),
+                usage=UtilizationStats(avg=45, p50=42, p90=55, p95=61, p99=70, max=74),
+                confidence=0.88,
+            ),
+            created_at=now - timedelta(days=3),
+            **_projected(
+                cpu_cores=0.25,
+                replicas=2.0,
+                realization_factor=0.0,
+                realization_source="fixed_capacity",
+                realization_reasons=("the factory pool has a fixed node count (no autoscaler)",),
+            ),
         ),
         _active_recommendation(
             pod_name="inventory-replica-lb",
@@ -1703,6 +1793,9 @@ def generate_recommendations() -> list[RecommendationRecord]:
             reason="The Service of type LoadBalancer has 0 ready endpoints: its selector no longer matches any pod.",
             priority="medium",
             scope="cluster",
+            risk_level=RiskLevel.MEDIUM,
+            confidence=0.9,
+            impact=demo_impact(kind=ChangeKind.ASSET_DELETION, lb_cost_annual=216.0, load_balancers=1),
             potential_savings_cost=216.0,
             created_at=now - timedelta(days=2),
         ),

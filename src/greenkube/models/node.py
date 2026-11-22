@@ -36,7 +36,31 @@ class NodeInfo(BaseModel):
     memory_capacity_bytes: Optional[int] = Field(None, description="Memory capacity in bytes")
     is_active: bool = Field(True, description="Whether this node is currently active in the cluster.")
     timestamp: Optional[datetime] = Field(None, description="Snapshot timestamp")
-    embodied_emissions_kg: Optional[float] = Field(None, description="Manufactured emissions in kgCO2eq")
+    embodied_emissions_kg: Optional[float] = Field(
+        None,
+        description=(
+            "Operator-configured whole-node embodied emissions in kgCO2eq (annotation greenkube.io/embodied-kg). "
+            "None when not configured: Boavizta values and fallbacks live in instance_carbon_profiles (NRG-07)."
+        ),
+    )
+    host_id: Optional[str] = Field(
+        None,
+        description="status.nodeInfo.bootID: nodes with the same value share one host (NRG-15); in snapshots (0183).",
+    )
+    provider_id: Optional[str] = Field(
+        None, description="spec.providerID (kind://, aws://, ...). Stored in node snapshots (0183)."
+    )
+    gpu_count: Optional[int] = Field(
+        None, description="GPUs in the node capacity (nvidia.com/gpu, amd.com/gpu, gpu.intel.com/*), NRG-13."
+    )
+    gpu_model: Optional[str] = Field(None, description="Label nvidia.com/gpu.product (NRG-13). Not stored.")
+    confirmed_until: Optional[datetime] = Field(
+        None,
+        description=(
+            "Stored snapshots only: end of the version (valid_to) or, for the current version, the last time "
+            "the Kubernetes API confirmed it unchanged. None when unknown."
+        ),
+    )
 
     @computed_field
     @property

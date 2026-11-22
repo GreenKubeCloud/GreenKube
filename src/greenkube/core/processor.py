@@ -1,20 +1,17 @@
 # src/greenkube/core/processor.py
-"""DataProcessor – thin orchestration facade.
+"""DataProcessor – composition facade for range collection.
 
-Delegates the heavy lifting to focused collaborators:
+Wires the collectors and collaborators used by the production collection
+path and delegates the work to them:
 
-* :class:`CollectionOrchestrator` – parallel data collection
-* :class:`MetricAssembler` – CombinedMetric construction
+* :class:`HistoricalRangeProcessor` – chunked range processing ``[start, end)``
+* :class:`MetricAssembler` – estimation flags and container rows
 * :class:`NodeZoneMapper` – cloud zone → Electricity Maps zone
 * :class:`EmbodiedEmissionsService` – Boavizta embodied emissions
-* :class:`PrometheusResourceMapper` – per-pod resource maps from Prometheus
-* :class:`CostNormalizer` – per-step / per-range cost normalisation
-* :class:`HistoricalRangeProcessor` – chunked historical range processing
 """
 
-import asyncio
 import logging
-from typing import Dict, List, Set
+from typing import List
 
 from ..collectors.base_electricity_provider import BaseElectricityProvider
 from ..collectors.boavizta_collector import BoaviztaCollector
@@ -24,15 +21,14 @@ from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..core.calculator import CarbonCalculator
-from ..core.collection_orchestrator import CollectionOrchestrator
 from ..core.config import Config, get_config
 from ..core.embodied_service import EmbodiedEmissionsService
 from ..core.historical_range_processor import HistoricalRangeProcessor
 from ..core.metric_assembler import MetricAssembler
 from ..core.node_zone_mapper import NodeZoneMapper
-from ..core.prometheus_resource_mapper import PrometheusResourceMapper
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
+from ..storage.base_pod_snapshot_repository import PodSnapshotRepository
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..storage.embodied_repository import EmbodiedRepository
 
@@ -40,10 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 class DataProcessor:
-    """Orchestrates data collection, energy estimation, and carbon calculation.
-
-    Each responsibility is delegated to a specialised collaborator.
-    """
+    """Builds the range-collection pipeline and owns its collectors' lifecycle."""
 
     def __init__(
         self,
@@ -61,23 +54,21 @@ class DataProcessor:
         estimator: BasicEstimator,
         config: Config | None = None,
         metrics_server_collector: MetricsServerCollector | None = None,
+        pod_snapshot_repository: PodSnapshotRepository | None = None,
     ):
         self._config = config if config is not None else get_config()
         self.calculator = calculator
         self.estimator = estimator
+        self.prometheus_collector = prometheus_collector
+        self.opencost_collector = opencost_collector
         self.node_collector = node_collector
+        self.pod_collector = pod_collector
         self.electricity_provider = electricity_provider
         self.boavizta_collector = boavizta_collector
         self.repository = repository
         self.embodied_repository = embodied_repository
         self._metrics_server_collector = metrics_server_collector or MetricsServerCollector()
 
-        # --- Internal collaborators ---
-        self._orchestrator = CollectionOrchestrator(
-            prometheus_collector=prometheus_collector,
-            opencost_collector=opencost_collector,
-            pod_collector=pod_collector,
-        )
         self._zone_mapper = NodeZoneMapper(node_collector=node_collector, config=self._config)
         self._embodied_service = EmbodiedEmissionsService(
             boavizta_collector=boavizta_collector,
@@ -110,218 +101,8 @@ class DataProcessor:
             zone_mapper=self._zone_mapper,
             config=self._config,
             metrics_server_collector=self._metrics_server_collector,
+            pod_snapshot_repository=pod_snapshot_repository,
         )
-
-    # ------------------------------------------------------------------
-    # run()
-    # ------------------------------------------------------------------
-
-    async def run(self) -> List[CombinedMetric]:
-        """Execute the data processing pipeline.
-
-        The pipeline is structured into sequential phases to guarantee correct
-        data dependencies and avoid concurrent Kubernetes API calls:
-
-        Phase 1 — Node discovery (sequential, K8s API):
-            Collect node metadata (zone, region, provider, instance type).
-
-        Phase 2 — Zone resolution + service-profile prefetch (parallel, uses Phase-1 data):
-            * Map cloud zones → Electricity Maps zones (NodeZoneMapper).
-            * Build the node-instance map from Phase-1 data (no extra K8s call).
-
-        Phase 3 — External metrics + carbon-intensity fetch (parallel, uses Phase-2 data):
-            * Prometheus, OpenCost, Pod collection (metrics collectors).
-            * Boavizta embodied-emissions profiles (uses instance types from Phase 1).
-            * Electricity Maps carbon intensity (uses resolved zones from Phase 2).
-
-        Phase 4 — Assembly:
-            Estimate energy, build CombinedMetric objects.
-        """
-        logger.info("Starting data processing cycle...")
-
-        # ------------------------------------------------------------------
-        # Phase 1: Node discovery (must run alone — single K8s API call)
-        # ------------------------------------------------------------------
-        logger.debug("Phase 1: Collecting node metadata from Kubernetes...")
-        try:
-            nodes_info = await self.node_collector.collect() or {}
-        except Exception as e:
-            logger.error("Failed to collect node metadata: %s", e)
-            nodes_info = {}
-
-        # Build node_instance_map directly from Phase-1 data (no extra K8s call).
-        node_instance_map: Dict[str, str] = {
-            name: info.instance_type
-            for name, info in nodes_info.items()
-            if info.instance_type and info.instance_type != "unknown"
-        }
-
-        # ------------------------------------------------------------------
-        # Phase 2: Zone resolution (depends on Phase-1 nodes_info)
-        # ------------------------------------------------------------------
-        logger.debug("Phase 2: Resolving cloud zones to Electricity Maps zones...")
-        node_contexts = await self._zone_mapper.map_nodes(nodes_info)
-
-        # ------------------------------------------------------------------
-        # Phase 3: Parallel metrics collection + Boavizta (all independent,
-        #          but use Phase-1/2 data for enrichment)
-        # ------------------------------------------------------------------
-        logger.debug("Phase 3: Collecting Prometheus/OpenCost/Pod metrics and Boavizta profiles in parallel...")
-
-        async def collect_container_usage():
-            if not self._config.KUBERNETES_METRICS_API_ENABLED:
-                return []
-            return await self._metrics_server_collector.collect()
-
-        cr, boavizta_cache, container_usages = await asyncio.gather(
-            self._orchestrator.collect_all(nodes_info=nodes_info),
-            self._embodied_service.prepare_embodied_data(nodes_info),
-            collect_container_usage(),
-        )
-
-        prom_metrics = cr.prom_metrics
-        # Merge any instance types found by Prometheus (e.g. kube_node_labels)
-        # with those collected in Phase 1.  Phase-1 data wins for correctness.
-        if cr.node_instance_map:
-            merged = dict(cr.node_instance_map)
-            merged.update(node_instance_map)
-            node_instance_map = merged
-
-        cost_map = cr.cost_map
-        pod_request_map_simple = cr.pod_request_map_simple
-        pod_request_map = cr.pod_request_map_agg
-
-        # ------------------------------------------------------------------
-        # Step: Adjust low-CPU nodes with pod requests
-        # ------------------------------------------------------------------
-        cpu_adjusted_nodes: Set[str] = set()
-        estimation_prom_metrics = prom_metrics
-        if prom_metrics:
-            try:
-                adjusted_cpu_items = {
-                    (item.namespace, item.pod, item.container): item.model_copy(deep=True)
-                    for item in prom_metrics.pod_cpu_usage
-                }
-                node_totals: Dict[str, float] = {}
-                for item in prom_metrics.pod_cpu_usage:
-                    node_totals.setdefault(item.node, 0.0)
-                    node_totals[item.node] += item.cpu_usage_cores
-
-                LOW_NODE_CPU_THRESHOLD = self._config.LOW_NODE_CPU_THRESHOLD
-                if node_totals:
-                    node_to_items: Dict[str, list] = {}
-                    for item in prom_metrics.pod_cpu_usage:
-                        node_to_items.setdefault(item.node, []).append(item)
-
-                    for node, total_cpu in node_totals.items():
-                        if total_cpu < LOW_NODE_CPU_THRESHOLD:
-                            total_reqs = 0.0
-                            for itm in node_to_items.get(node, []):
-                                total_reqs += pod_request_map_simple.get((itm.namespace, itm.pod), 0.0)
-
-                            if total_reqs > 0:
-                                cpu_adjusted_nodes.add(node)
-                                logger.info(
-                                    "Node '%s' CPU %.4f below threshold; substituting pod requests (%.4f)",
-                                    node,
-                                    total_cpu,
-                                    total_reqs,
-                                )
-                                for itm in node_to_items.get(node, []):
-                                    req = pod_request_map_simple.get((itm.namespace, itm.pod), 0.0)
-                                    if req:
-                                        pod_items = [
-                                            candidate
-                                            for candidate in node_to_items.get(node, [])
-                                            if (candidate.namespace, candidate.pod) == (itm.namespace, itm.pod)
-                                        ]
-                                        req_per_container = req / len(pod_items)
-                                        adjusted_cpu_items[(itm.namespace, itm.pod, itm.container)] = itm.model_copy(
-                                            update={
-                                                "cpu_usage_cores": req_per_container,
-                                                "estimated_cpu_usage_cores": req_per_container,
-                                                "cpu_usage_provenance": "estimated",
-                                            }
-                                        )
-                if cpu_adjusted_nodes:
-                    estimation_prom_metrics = prom_metrics.model_copy(
-                        update={"pod_cpu_usage": list(adjusted_cpu_items.values())}
-                    )
-            except Exception as e:
-                logger.warning(
-                    "Failed to adjust node utilization based on pod requests: %s",
-                    e,
-                    exc_info=True,
-                )
-
-            # Estimate energy
-            try:
-                assert estimation_prom_metrics is not None
-                energy_metrics = self.estimator.estimate(estimation_prom_metrics)
-                if cpu_adjusted_nodes:
-                    adjustment_reason = (
-                        "CPU usage on node was below threshold; substituted pod requests for energy estimation"
-                    )
-                    energy_metrics = [
-                        metric.model_copy(
-                            update={
-                                "is_estimated": metric.is_estimated or metric.node in cpu_adjusted_nodes,
-                                "estimation_reasons": list(
-                                    dict.fromkeys([*metric.estimation_reasons, adjustment_reason])
-                                ),
-                            }
-                        )
-                        for metric in energy_metrics
-                    ]
-                logger.info(
-                    "Successfully estimated %d energy metrics from Prometheus.",
-                    len(energy_metrics),
-                )
-            except Exception as e:
-                logger.error("Estimator failed: %s", e)
-                energy_metrics = []
-        else:
-            energy_metrics = []
-
-        # Build per-pod resource maps from Prometheus data
-        resource_maps = PrometheusResourceMapper.build(
-            prom_metrics,
-            estimation_prom_metrics,
-            container_usages=container_usages,
-        )
-
-        # ------------------------------------------------------------------
-        # Phase 4: Prefetch carbon intensities and assemble CombinedMetrics
-        # ------------------------------------------------------------------
-        logger.debug("Phase 4: Prefetching carbon intensities and assembling metrics...")
-        await self._assembler.prefetch_intensities(energy_metrics, node_contexts)
-
-        steps_per_day = 86400 / self.estimator.query_range_step_sec
-
-        combined_metrics = await self._assembler.assemble(
-            energy_metrics=energy_metrics,
-            cost_map=cost_map,
-            pod_request_map=pod_request_map,
-            node_contexts=node_contexts,
-            nodes_info=nodes_info,
-            node_instance_map=node_instance_map,
-            boavizta_cache=boavizta_cache,
-            cpu_adjusted_nodes=cpu_adjusted_nodes,
-            steps_per_day=steps_per_day,
-            resource_maps=resource_maps,
-            pod_metrics=cr.pod_metrics_list,
-        )
-
-        logger.info(
-            "Processing complete. Found %d combined metrics.",
-            len(combined_metrics),
-        )
-        await self.calculator.clear_cache()
-        return combined_metrics
-
-    # ------------------------------------------------------------------
-    # run_range()
-    # ------------------------------------------------------------------
 
     async def run_range(
         self,
@@ -330,16 +111,19 @@ class DataProcessor:
         step=None,
         namespace=None,
     ) -> List[CombinedMetric]:
-        """Delegate historical range processing."""
+        """Collect the half-open window ``[start, end)`` (see :class:`HistoricalRangeProcessor`)."""
         return await self._range_processor.run_range(start=start, end=end, step=step, namespace=namespace)
 
-    # ------------------------------------------------------------------
-    # close()
-    # ------------------------------------------------------------------
+    @property
+    def last_idle_metrics(self) -> list:
+        """``__idle__`` rows of the last :meth:`run_range` call (committed by the caller)."""
+        return self._range_processor.last_idle_metrics
 
     async def close(self):
         """Close all collectors to release resources."""
-        await self._orchestrator.close()
+        await self.prometheus_collector.close()
+        await self.opencost_collector.close()
+        await self.pod_collector.close()
         await self.node_collector.close()
         await self.electricity_provider.close()
         await self.boavizta_collector.close()

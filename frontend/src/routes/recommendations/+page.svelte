@@ -1,26 +1,53 @@
 <script>
-	import { selectedNamespace } from '$lib/stores.js';
-	import { onDestroy } from 'svelte';
+	import { currentUser, demoMode, hasScope, selectedNamespace } from '#lib/stores.js';
+	import { onDestroy, onMount } from 'svelte';
 	import {
 		getActiveRecommendations,
 		getIgnoredRecommendations,
 		getAppliedRecommendations,
 		getRecommendationSavings,
 		getOpenPullRequests,
-		getTopRecommendations,
+		getAutomationStatus,
+		getNamespaces,
 		ignoreRecommendation,
 		unignoreRecommendation,
 		createAutomationPlan,
 		getAutomationPlan,
-		getAutomationOperation,
 		approveAutomationPlan,
 		cancelAutomationPlan,
+		discardAutomationPlan,
 		previewAutomationPlanRollback,
+		reportPlanDelivery,
+		planPatchUrl,
 		getRecommendationEvents
-	} from '$lib/api.js';
-	import { formatCO2, formatCost, formatCPU, formatBytes } from '$lib/utils/format.js';
-	import { groupConsecutiveEvents } from '$lib/utils/lifecycle.js';
-	import DataState from '$lib/components/DataState.svelte';
+	} from '#lib/api.js';
+	import {
+		findPendingOptimizationRun,
+		isRunPending,
+		startOptimizationScan,
+		waitForOptimizationRun
+	} from '#lib/optimizationRuns.js';
+	import { formatCO2, formatCost, formatCPU, formatBytes } from '#lib/utils/format.js';
+	import { groupConsecutiveEvents } from '#lib/utils/lifecycle.js';
+	import {
+		describeRankingFactors,
+		formatRankingScore,
+		rankingFactorLabel,
+		topRankingFactor
+	} from '#lib/utils/ranking.js';
+	import {
+		describeExpectedValue,
+		eligibilityOf,
+		formatMoney,
+		isReliabilityLane,
+		oomHistoryWarningOf,
+		planTargetFor
+	} from '#lib/utils/decision.js';
+	import DataState from '#lib/components/DataState.svelte';
+	import OomHistoryWarning from '#lib/components/OomHistoryWarning.svelte';
+	import { capacitySummary } from '#lib/releasedCapacity.js';
+	import { etaFrom, OPPORTUNITY_LABEL, serverOpportunity } from '#lib/overview.js';
+	import { SAVINGS_TERMS, appliedCostFigure, realizationText, savingPhrase, savingsFigures, visibleDiagnostics } from '#lib/savingsVocabulary.js';
 
 	// --- State ---
 	let activeRecs = [];
@@ -28,27 +55,61 @@
 	let appliedRecs = [];
 	let openPullRequests = [];
 	let openPullRequestKeys = new Set();
+	let automationStatus = null;
+	let automationStatusError = '';
 	let savings = null;
 	let loading = true;
 	let error = null;
 
 	let activeTab = 'active'; // 'active' | 'ignored' | 'savings'
+	// Mutating actions need the write scope and approvals the approve scope:
+	// a viewer sees the recommendations without buttons that would end in 403.
+	$: canWrite = hasScope($currentUser, 'write');
+	$: canApprove = hasScope($currentUser, 'approve');
 	let filterType = 'all';
 	let expandedApplied = new Set(); // ids of expanded applied cards
 	let expandedEvidence = new Set(); // ids of active cards showing the evidence panel
 
-	// Multi-criteria ranking
-	let rankingProfile = ''; // '' = server default (projected savings)
-	let rankedIds = []; // recommendation ids ordered by the selected profile
+	// Ordering. 'server' keeps the API order (risk-adjusted expected value,
+	// I1); the savings sorts are client-side; 'profile:*' reloads the list with
+	// ?profile= so the server re-scores and re-orders every match.
+	let sortMode = 'server';
 
-	const RANKING_PROFILES = [
-		{ value: '', label: 'Projected savings' },
-		{ value: 'balanced', label: 'Balanced' },
-		{ value: 'carbon_first', label: 'Carbon first' },
-		{ value: 'cost_first', label: 'Cost first' },
-		{ value: 'quick_wins', label: 'Quick wins' },
-		{ value: 'low_risk', label: 'Low risk' }
+	const SORT_OPTIONS = [
+		{ value: 'server', label: 'Expected value (default)' },
+		{ value: 'cost', label: 'Projected cost savings' },
+		{ value: 'co2', label: 'Projected CO₂e savings' },
+		{ value: 'profile:balanced', label: 'Profile: balanced' },
+		{ value: 'profile:carbon_first', label: 'Profile: carbon first' },
+		{ value: 'profile:cost_first', label: 'Profile: cost first' },
+		{ value: 'profile:quick_wins', label: 'Profile: quick wins' },
+		{ value: 'profile:low_risk', label: 'Profile: low risk' }
 	];
+
+	// Server-side filters, sent as query parameters of /recommendations/active.
+	let filterSource = '';
+	let filterRisk = '';
+	let filterCapability = '';
+	let namespaceOptions = [];
+
+	const SOURCE_OPTIONS = ['greenkube', 'vpa'];
+	const RISK_OPTIONS = [
+		{ value: 'low', label: 'Low risk' },
+		{ value: 'medium', label: 'Medium risk' },
+		{ value: 'high', label: 'High risk' }
+	];
+	const CAPABILITY_OPTIONS = [
+		{ value: 'cpu_rightsizing', label: 'CPU rightsizing' },
+		{ value: 'memory_rightsizing', label: 'Memory rightsizing' },
+		{ value: 'storage_cleanup', label: 'Storage cleanup' },
+		{ value: 'lb_cleanup', label: 'Load balancer cleanup' }
+	];
+
+	// Recommendation scan run (E1): requested explicitly, polled, then reloaded.
+	let scanRun = null; // { run_id, status, recommendation_count?, error?, timedOut? }
+	let scanError = '';
+	let scanRequesting = false;
+	let scanController = null;
 
 	// Ignore modal state
 	let ignoreModal = null; // { rec } | null
@@ -74,6 +135,11 @@
 	let modalTitleId = 'recommendation-modal-title';
 	let planPollTimer = null;
 	let planPollGeneration = 0;
+	// Delivery modes (F4) and auto-approval (F5).
+	let autoApproveBlockers = [];
+	let deliveryPrUrl = '';
+	let deliveryReport = null;
+	let deliveryError = '';
 
 	const PLAN_POLL_INTERVAL_MS = 3000;
 
@@ -83,13 +149,29 @@
 	// Per-card action loading state
 	let actionLoading = {}; // { [id]: bool }
 
-	$: if ($selectedNamespace !== undefined) loadData();
+	// Reload whenever the namespace or a server-side filter changes.
+	$: rankingProfile = sortMode.startsWith('profile:') ? sortMode.slice('profile:'.length) : '';
+	$: loadKey = [$selectedNamespace ?? '', filterSource, filterRisk, filterCapability, rankingProfile].join('|');
+	$: if (loadKey !== undefined) loadData();
 
 	let loadSeq = 0;
 	let requestController = new AbortController();
 	onDestroy(() => {
 		requestController.abort();
+		scanController?.abort();
 		stopPlanStatusPolling();
+		discardPreviewPlan();
+	});
+
+	onMount(() => {
+		getNamespaces()
+			.then((namespaces) => {
+				namespaceOptions = Array.isArray(namespaces) ? namespaces : [];
+			})
+			.catch(() => {
+				namespaceOptions = [];
+			});
+		followPendingScan();
 	});
 
 	async function loadData() {
@@ -98,71 +180,216 @@
 		const seq = ++loadSeq;
 		requestController.abort();
 		requestController = new AbortController();
+		const { signal } = requestController;
+		const namespace = $selectedNamespace || undefined;
 		loading = true;
 		error = null;
+		automationStatus = null;
+		automationStatusError = '';
 		try {
+			// Plain reads: page loads never schedule a scan (BUG-25).
 			const [active, ignored, applied, sav, openPrs] = await Promise.all([
-				getActiveRecommendations({ namespace: $selectedNamespace || undefined, refresh: true }),
-				getIgnoredRecommendations(),
-				getAppliedRecommendations(),
-				getRecommendationSavings({ namespace: $selectedNamespace || undefined }),
-				getOpenPullRequests()
+				getActiveRecommendations({
+					namespace,
+					source: filterSource || undefined,
+					risk_level: filterRisk || undefined,
+					capability: filterCapability || undefined,
+					profile: rankingProfile || undefined,
+					signal
+				}),
+				getIgnoredRecommendations({ namespace, signal }),
+				getAppliedRecommendations({ namespace, signal }),
+				getRecommendationSavings({ namespace, signal }),
+				getOpenPullRequests({ signal })
 			]);
+			if (seq !== loadSeq) return;
+			try {
+				automationStatus = await getAutomationStatus({ signal });
+			} catch (statusError) {
+				if (statusError.name !== 'AbortError') {
+					automationStatusError = statusError.message || 'Automation readiness could not be checked.';
+				}
+			}
 			if (seq !== loadSeq) return;
 			activeRecs = active;
 			ignoredRecs = ignored;
 			appliedRecs = applied;
 			savings = sav;
-			openPullRequests = openPrs;
-			const openPrIds = new Set(openPrs.map((pr) => pr.recommendation_id));
-			openPullRequestKeys = new Set(
-				active.filter((rec) => openPrIds.has(rec.id)).map((rec) => recommendationKey(rec))
-			);
+			updateOpenPullRequests(openPrs, active);
 		} catch (e) {
 			if (seq === loadSeq && e.name !== 'AbortError') error = e.message;
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}
-
 	}
 
-	// --- Type filter ---
+	// --- Recommendation scan runs ---
+	$: scanPending = scanRequesting || isRunPending(scanRun);
+
+	async function followScan(run, signal) {
+		scanRun = run;
+		const finalRun = await waitForOptimizationRun(run, {
+			signal,
+			onUpdate: (update) => {
+				scanRun = update;
+			}
+		});
+		scanRun = finalRun;
+		await loadData();
+	}
+
+	/** Page opened while a (scheduled) scan runs: reload when it completes. */
+	async function followPendingScan() {
+		scanController?.abort();
+		const controller = new AbortController();
+		scanController = controller;
+		try {
+			const run = await findPendingOptimizationRun({ signal: controller.signal });
+			if (run && scanController === controller) await followScan(run, controller.signal);
+		} catch (e) {
+			if (e?.name !== 'AbortError' && scanController === controller) {
+				scanError = e?.message || 'The recommendation scan status could not be read.';
+			}
+		}
+	}
+
+	/** Ask the controller for a fresh scan, then reload when it completes. */
+	async function rescan() {
+		if (scanPending) return;
+		scanController?.abort();
+		const controller = new AbortController();
+		scanController = controller;
+		scanError = '';
+		scanRun = null;
+		scanRequesting = true;
+		try {
+			const started = await startOptimizationScan({ signal: controller.signal });
+			scanRequesting = false;
+			if (!started.supported || !started.run) {
+				// Older servers have no runs API: reload persisted results only.
+				await loadData();
+				return;
+			}
+			await followScan(started.run, controller.signal);
+		} catch (e) {
+			if (e?.name !== 'AbortError' && scanController === controller) {
+				scanError = e?.message || 'The recommendation scan could not be requested.';
+			}
+		} finally {
+			if (scanController === controller) scanRequesting = false;
+		}
+	}
+
+	function scanStatusText(run) {
+		const label = `Recommendation scan #${run.run_id}`;
+		if (run.timedOut) return `${label} is still running. Results reload when you refresh again.`;
+		if (run.status === 'queued') return `${label} is queued. Results reload automatically when it completes.`;
+		if (run.status === 'running') return `${label} is running. Results reload automatically when it completes.`;
+		if (run.status === 'succeeded') {
+			const count = Number.isFinite(run.recommendation_count)
+				? ` with ${run.recommendation_count} recommendation${run.recommendation_count === 1 ? '' : 's'}`
+				: '';
+			return `${label} completed${count}. Results reloaded.`;
+		}
+		if (run.status === 'failed') return `${label} failed${run.error ? `: ${run.error}` : '.'}`;
+		return `${label} finished. Results reloaded.`;
+	}
+
+	function updateOpenPullRequests(openPrs, recommendations = activeRecs) {
+		openPullRequests = openPrs;
+		const openPrIds = new Set(openPrs.map((pr) => pr.recommendation_id));
+		openPullRequestKeys = new Set(
+			recommendations.filter((rec) => openPrIds.has(rec.id)).map((rec) => recommendationKey(rec))
+		);
+	}
+
+	async function refreshOpenPullRequests() {
+		try {
+			updateOpenPullRequests(await getOpenPullRequests());
+		} catch (e) {
+			if (e.name !== 'AbortError') error = e.message;
+		}
+	}
+
+	// --- Filters and ordering ---
+	function enumValue(value) {
+		return value === null || value === undefined ? '' : String(value);
+	}
+
+	/** Same exact-match semantics as the API filters, for the ignored list. */
+	function matchesServerFilters(rec, source, risk, capability) {
+		return (
+			(!source || enumValue(rec.source) === source) &&
+			(!risk || enumValue(rec.risk_level) === risk) &&
+			(!capability || enumValue(rec.capability) === capability)
+		);
+	}
+
+	$: serverFiltersActive = Boolean(filterSource || filterRisk || filterCapability);
+	$: sourceOptions = [
+		...new Set([
+			...SOURCE_OPTIONS,
+			...[...activeRecs, ...ignoredRecs].map((rec) => enumValue(rec.source)).filter(Boolean),
+			...(filterSource ? [filterSource] : [])
+		])
+	];
+
+	function clearFilters() {
+		filterSource = '';
+		filterRisk = '';
+		filterCapability = '';
+		filterType = 'all';
+		selectedNamespace.set('');
+	}
+
 	$: openPrRecommendationIds = new Set(openPullRequests.map((pr) => pr.recommendation_id));
 	$: actionableActiveRecs = activeRecs;
-	$: currentList = activeTab === 'active' ? actionableActiveRecs : ignoredRecs;
+	$: currentList = activeTab === 'active'
+		? actionableActiveRecs
+		: ignoredRecs.filter((rec) => matchesServerFilters(rec, filterSource, filterRisk, filterCapability));
 	$: types = [...new Set(currentList.map(r => r.type))];
 	$: filtered = filterType === 'all'
 		? currentList
 		: currentList.filter(r => r.type === filterType);
 
-	$: displayed = rankedIds.length
-		? [...filtered].sort((a, b) => {
-			const ia = rankedIds.indexOf(a.id);
-			const ib = rankedIds.indexOf(b.id);
-			return (ia === -1 ? Number.MAX_SAFE_INTEGER : ia) - (ib === -1 ? Number.MAX_SAFE_INTEGER : ib);
-		})
-		: filtered;
-
-	async function applyRankingProfile(profile) {
-		rankingProfile = profile;
-		rankedIds = [];
-		if (!profile) return;
-		try {
-			const ranked = await getTopRecommendations({
-				namespace: $selectedNamespace || undefined,
-				limit: 50,
-				metric: 'co2',
-				profile
-			});
-			rankedIds = ranked.map((r) => r.id).filter((id) => id != null);
-		} catch (e) {
-			error = e.message;
-		}
+	function savingsValue(rec, key) {
+		const value = Number(rec?.[key]);
+		return Number.isFinite(value) ? value : 0;
 	}
 
-	$: totalSavingsCO2 = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
-	$: totalSavingsCost = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_cost ?? 0), 0);
-	$: potentialSavingsPeriod = 'per year';
+	function sortRecommendations(list, mode) {
+		if (mode === 'cost' || mode === 'co2') {
+			const key = mode === 'cost' ? 'potential_savings_cost' : 'potential_savings_co2e_grams';
+			// Stable: equal savings keep the server order.
+			return [...list].sort((a, b) => savingsValue(b, key) - savingsValue(a, key));
+		}
+		// Server order: expected value under the selected profile.
+		return list;
+	}
+
+	$: displayed = sortRecommendations(filtered, sortMode);
+
+	function changeSort(mode) {
+		sortMode = mode;
+	}
+
+	// IMP-07: the server's opportunity, the same figure as the dashboard. The client-side
+	// sums (which net increases) are only a fallback.
+	// The server figure covers every active recommendation: with source/risk filters the page sums the matches.
+	$: opportunity = serverFiltersActive ? null : serverOpportunity(savings);
+	// Fallback (filters on): the matching savings recommendations only, never increases or negatives.
+	$: fallbackRecs = actionableActiveRecs.filter((r) => r?.value?.lane !== 'reliability');
+	$: totalSavingsCO2 =
+		opportunity?.co2eGrams ?? fallbackRecs.reduce((s, r) => s + Math.max(r.potential_savings_co2e_grams ?? 0, 0), 0);
+	// An unknown billable saving (cluster not observed yet) is the allocated value: never summed as projected.
+	$: totalSavingsCost =
+		opportunity?.cost ??
+		fallbackRecs.reduce(
+			(s, r) => s + (r.projected_billable_cost_annual === null ? 0 : Math.max(r.potential_savings_cost ?? 0, 0)),
+			0
+		);
+	$: potentialSavingsPeriod = `per year · ${opportunity?.label ?? OPPORTUNITY_LABEL}`;
+	$: savingsTabFigures = savingsFigures(savings);
 
 	function switchTab(tab) {
 		activeTab = tab;
@@ -197,8 +424,6 @@
 	}
 
 	// --- GitOps plan preview ---
-	const RIGHTSIZING_TYPES = ['RIGHTSIZING_CPU', 'RIGHTSIZING_MEMORY'];
-
 	function recommendationKey(rec) {
 		return [
 			rec.namespace ?? '',
@@ -213,73 +438,109 @@
 		return openPrRecommendationIds.has(rec.id) || openPullRequestKeys.has(recommendationKey(rec));
 	}
 
+	/** The change set to plan, from the server's eligibility (F10); replaces client-side checks. */
 	function safeActionFor(rec) {
-		const action = rec?.action ?? rec?.patch?.action;
-		const id = Number(rec?.id);
-		const target = action?.target;
-		const recommendationIds = Array.isArray(action?.recommendation_ids)
-			? action.recommendation_ids.map(Number)
-			: [];
-		if (
-			!Number.isInteger(id) ||
-			id <= 0 ||
-			action?.version !== 3 ||
-			!action.action_id ||
-			!recommendationIds.length ||
-			!recommendationIds.every((recommendationId) => Number.isInteger(recommendationId) && recommendationId > 0) ||
-			new Set(recommendationIds).size !== recommendationIds.length ||
-			!recommendationIds.includes(id) ||
-			action.constraints?.container_targeted !== true ||
-			rec.scope !== 'workload' ||
-			!rec.owner_kind ||
-			!rec.owner_name ||
-			!rec.namespace ||
-			!rec.container_name ||
-			!target?.api_version ||
-			target?.kind !== rec.owner_kind ||
-			target?.name !== rec.owner_name ||
-			target?.namespace !== rec.namespace ||
-			!Array.isArray(action.operations) ||
-			!action.operations.length
-		) {
-			return null;
-		}
-
-		const containers = action.operations.map((operation) => operation?.container);
-		if (
-			new Set(containers).size !== containers.length ||
-			!action.operations.some((operation) => operation?.container === rec.container_name) ||
-			action.operations.some((operation) => {
-				const requests = operation?.resources?.requests;
-				return (
-					operation?.op !== 'set_container_resources' ||
-					typeof operation.container !== 'string' ||
-					!operation.container.trim() ||
-					!requests ||
-					typeof requests !== 'object' ||
-					Array.isArray(requests) ||
-					!Object.keys(requests).length ||
-					Object.entries(requests).some(
-						([resource, quantity]) =>
-							!['cpu', 'memory'].includes(resource) ||
-							typeof quantity !== 'string' ||
-							!quantity.trim()
-					)
-				);
-			})
-		) {
-			return null;
-		}
-
-		return { action, recommendationIds };
+		return planTargetFor(rec);
 	}
 
 	function hasSafePerContainerAction(rec) {
 		return Boolean(safeActionFor(rec));
 	}
 
+	/** "Cost savings $120 · Incident risk -$8" in the recommendation's currency. */
+	function describeFactorsInCurrency(rec) {
+		const factors = rec?.ranking_factors;
+		if (!factors || typeof factors !== 'object') return '';
+		return Object.entries(factors)
+			.filter(([, amount]) => typeof amount === 'number' && Number.isFinite(amount) && amount !== 0)
+			.sort((a, b) => b[1] - a[1])
+			.map(([key, amount]) => `${rankingFactorLabel(key)} ${formatMoney(amount, rec?.value?.currency)}`)
+			.join(' · ');
+	}
+
+	function blockerText(entry) {
+		return [entry.message, entry.fix].filter(Boolean).join(' ');
+	}
+
+	function manualReason(rec) {
+		const eligibility = eligibilityOf(rec);
+		if (eligibility?.canOpenPr) {
+			return automationStatusError
+				? 'Automation readiness could not be checked; pull-request preview is disabled.'
+				: 'The automation worker is not ready; apply this recommendation manually.';
+		}
+		const [first] = eligibility?.blockers ?? [];
+		return first ? blockerText(first) : 'This recommendation has no GitOps action planner; apply it manually.';
+	}
+
+	/** How approved plans become pull requests (F4): direct, patch or ci. */
+	function deliveryMode() {
+		const mode = automationStatus?.delivery_mode;
+		return mode === 'patch' || mode === 'ci' ? mode : 'direct';
+	}
+
+	function approveLabel(mode = deliveryMode()) {
+		if (mode === 'patch') return 'Approve and get the patch';
+		if (mode === 'ci') return 'Approve for CI delivery';
+		return 'Approve and open PR';
+	}
+
+	const AUTO_APPROVE_REASONS = {
+		approve_scope_missing: 'your account may not approve plans',
+		risk_above_auto_approve: 'the risk is above the auto-approval limit',
+		confidence_below_auto_approve: 'the confidence is below the auto-approval limit',
+		consensus_contested: 'sources disagree (contested advice is never approved automatically)',
+		decrease_without_native_evidence: 'a decrease needs GreenKube evidence or two agreeing sources',
+		increase_without_native_evidence: "an increase is only approved automatically when GreenKube's own analyzer sized it",
+		increase_requires_approval: 'request increases need automation.autoApprove.increases',
+		deletion_requires_review: 'a deletion is always approved by a person',
+		auto_approve_failed: 'the automatic approval failed (approve it by hand)',
+		not_active: 'a recommendation is not active',
+		recommendation_missing: 'a recommendation could not be read',
+		rollback_plan: 'rollbacks are always approved by a person',
+		plan_not_validated: 'the preview is not validated'
+	};
+
+	/** Why automation.autoApprove left this preview for the click, or '' when it is off. */
+	function autoApproveNote(blockers) {
+		const reasons = (Array.isArray(blockers) ? blockers : [])
+			.filter((code) => code !== 'auto_approve_disabled')
+			.map((code) => AUTO_APPROVE_REASONS[code] ?? code);
+		return reasons.length ? `Not approved automatically: ${reasons.join('; ')}.` : '';
+	}
+
+	/** "Collecting evidence — eligible in ~31h" while usage evidence warms up (F7). */
+	function warmUpText(rec) {
+		const eta = etaFrom(eligibilityOf(rec)?.eligibleAt ?? '');
+		return eta ? `Collecting evidence — eligible in ${eta}` : '';
+	}
+
+	async function submitDeliveryLinkBack() {
+		const preview = planPresentation(prPlan);
+		const prUrl = deliveryPrUrl.trim();
+		if (!preview.planId || !prUrl || prLoading) return;
+		const modal = prModal;
+		prLoading = true;
+		deliveryError = '';
+		try {
+			const result = await reportPlanDelivery(preview.planId, prUrl);
+			if (prModal !== modal) return;
+			deliveryReport = result;
+			if (result?.plan) prPlan = result.plan;
+		} catch (e) {
+			if (prModal === modal) deliveryError = e?.message ?? 'The pull request could not be linked.';
+		} finally {
+			if (prModal === modal) prLoading = false;
+		}
+	}
+
 	function canPreviewRecommendation(rec) {
-		return Boolean(safeActionFor(rec)) && !hasOpenPr(rec);
+		return Boolean(
+			automationStatus?.enabled === true &&
+				automationStatus?.ready === true &&
+				safeActionFor(rec) &&
+				!hasOpenPr(rec)
+		);
 	}
 
 	const PLAN_ERROR_MESSAGES = {
@@ -298,7 +559,9 @@
 		rollback_unsupported: 'This plan cannot be safely rolled back.',
 		rollback_conflict: 'The original plan or current source changed; refresh before retrying.',
 		plan_preview_unavailable: 'Plan preview is unavailable for this recommendation.',
-		plan_preparation_unavailable: 'Server-side plan preparation is unavailable for this recommendation.'
+		plan_preparation_unavailable: 'Server-side plan preparation is unavailable for this recommendation.',
+		workload_plan_already_exists:
+			'Another plan for this workload is still active. It is either an approved plan that is still opening its pull request, or an earlier preview that this GreenKube server cannot replace automatically. Unapproved previews expire after 30 minutes: preview again then, or check the open pull requests.'
 	};
 
 	function planErrorCode(value) {
@@ -344,7 +607,7 @@
 			.join(' ');
 		if (/plan[\s_-]+preview[\s_-]+unavailable/i.test(text)) return 'plan_preview_unavailable';
 		const match = text.match(
-			/\b(plan_preview_unavailable|plan_preparation_unavailable|unsupported_source|needs_chart_mapping|ambiguous_binding|plan_stale|source_changed|plan_expired|revision_conflict|provider_not_ready|provider_capability_missing|requires_container_target|rollback_not_ready|rollback_unsupported|rollback_conflict)\b/i
+			/\b(plan_preview_unavailable|plan_preparation_unavailable|unsupported_source|needs_chart_mapping|ambiguous_binding|plan_stale|source_changed|plan_expired|revision_conflict|provider_not_ready|provider_capability_missing|requires_container_target|rollback_not_ready|rollback_unsupported|rollback_conflict|workload_plan_already_exists)\b/i
 		);
 		return match?.[1]?.toLowerCase() ?? '';
 	}
@@ -499,7 +762,7 @@
 				!preview.rollbackOfPlanId &&
 				(
 					planApprovalBlocked ||
-					['stale', 'failed', 'closed', 'superseded', 'rejected'].includes(preview.status) ||
+					['stale', 'failed', 'closed', 'superseded', 'rejected', 'cancelled'].includes(preview.status) ||
 					(preview.status === 'validated' && preview.expiresAt && !preview.expiryValid)
 				)
 		);
@@ -557,19 +820,15 @@
 			planPollTimer = null;
 			planPolling = true;
 			try {
-				const response = preview.operationId
-					? await getAutomationOperation(preview.operationId)
-					: await getAutomationPlan(preview.planId);
+				// The plan carries its operation state (operation_id, operation_status), so one
+				// endpoint is polled; the legacy /automation/operations route was removed (F5).
+				const response = await getAutomationPlan(preview.planId);
 				if (generation !== planPollGeneration || prModal !== modal) return;
-				prPlan = preview.operationId
-					? {
-							...prPlan,
-							operation_id: response?.operation_id ?? preview.operationId,
-							operation_status: response?.status ?? prPlan?.operation_status,
-							status: response?.result?.plan_status ?? prPlan?.status
-						}
-					: response?.plan ?? response;
+				prPlan = response?.plan ?? response;
 				planPollingError = '';
+				if (planPresentation(prPlan).status === 'pr_open') {
+					await refreshOpenPullRequests();
+				}
 			} catch {
 				if (generation === planPollGeneration && prModal === modal) {
 					planPollingError = 'Operation status could not be refreshed; automatic polling will retry.';
@@ -598,6 +857,14 @@
 			return false;
 		}
 		prPlan = response?.plan ?? response;
+		autoApproveBlockers = Array.isArray(response?.auto_approve_blockers) ? response.auto_approve_blockers : [];
+		if (response?.auto_approved === true) {
+			// automation.autoApprove approved the digest with the preview (F5): no extra click.
+			planApproval = response;
+			planFeedback = 'Approved automatically by the automation.autoApprove policy.';
+			if (prModal) schedulePlanStatusPolling(prModal);
+			return true;
+		}
 		if (!canApprovePlan(prPlan)) {
 			const preview = planPresentation(prPlan);
 			prError = preview.expiresAt && !preview.expiryValid
@@ -624,7 +891,11 @@
 			const response = valuesMapping
 				? await createAutomationPlan(action.recommendationIds, valuesMapping)
 				: await createAutomationPlan(action.recommendationIds);
-			if (prModal !== modal) return;
+			if (prModal !== modal) {
+				// The dialog closed while the preview was prepared: do not leave it active.
+				discardPreviewPlan(response?.plan ?? response, null);
+				return;
+			}
 			applyPlanPreview(response, feedback);
 		} catch (e) {
 			if (prModal === modal) {
@@ -703,8 +974,32 @@
 		);
 	}
 
+	const DISCARDABLE_PLAN_STATUSES = ['draft', 'validated'];
+
+	// Plans whose approval was requested from this page. They are never
+	// discarded: the approval may still be in flight (the dialog can close or
+	// the page unmount meanwhile), and its outcome is ambiguous after a network
+	// or gateway error. An unapproved leftover expires or is superseded (D6).
+	const approvalRequestedPlanIds = new Set();
+
+	/**
+	 * Discard an unapproved preview when its dialog closes, so previewing the
+	 * same workload again is not blocked by WORKLOAD_PLAN_ALREADY_EXISTS (D6).
+	 * Best effort: a preview that cannot be discarded still expires on its own.
+	 */
+	function discardPreviewPlan(plan = prPlan, approval = planApproval) {
+		if (!plan || approval) return;
+		const preview = planPresentation(plan);
+		if (!preview.planId || approvalRequestedPlanIds.has(preview.planId)) return;
+		if (!DISCARDABLE_PLAN_STATUSES.includes(preview.status)) return;
+		Promise.resolve()
+			.then(() => discardAutomationPlan(preview.planId))
+			.catch(() => {});
+	}
+
 	function closePrModal() {
 		stopPlanStatusPolling();
+		discardPreviewPlan();
 		prModal = null;
 		prPlan = null;
 		planApproval = null;
@@ -713,6 +1008,10 @@
 		planPollingError = '';
 		prError = null;
 		prLoading = false;
+		autoApproveBlockers = [];
+		deliveryPrUrl = '';
+		deliveryReport = null;
+		deliveryError = '';
 		chartMappingOptions = null;
 		chartMappingSelection = null;
 		chartMappingFile = '';
@@ -730,6 +1029,7 @@
 		planFeedback = '';
 		planPollingError = '';
 		planApproval = null;
+		if (preview.planId) approvalRequestedPlanIds.add(preview.planId);
 		try {
 			const result = await approveAutomationPlan(preview.planId, preview.digest);
 			if (prModal !== modal) return;
@@ -771,7 +1071,8 @@
 			if (prModal !== modal) return;
 			prPlan = result?.plan ?? result;
 			planApproval = null;
-			planApprovalBlocked = String(prPlan?.status ?? '').toLowerCase() === 'stale';
+			// "cancelled" since migration 0220; older servers return "stale".
+			planApprovalBlocked = ['stale', 'cancelled'].includes(String(prPlan?.status ?? '').toLowerCase());
 			planFeedback = planApprovalBlocked
 				? 'Plan cancelled. Preview a new plan before approving.'
 				: 'Plan status updated.';
@@ -795,7 +1096,10 @@
 		planApprovalBlocked = false;
 		try {
 			const result = await previewAutomationPlanRollback(preview.planId);
-			if (prModal !== modal) return;
+			if (prModal !== modal) {
+				discardPreviewPlan(result?.plan ?? result, null);
+				return;
+			}
 			applyPlanPreview(result, 'Rollback preview ready. Review it before approving.');
 		} catch (e) {
 			if (prModal === modal) prError = planErrorMessage(e);
@@ -817,6 +1121,9 @@
 			const result = await getAutomationPlan(preview.planId);
 			if (prModal !== modal) return;
 			prPlan = result?.plan ?? result;
+			if (String(prPlan?.status ?? '').toLowerCase() === 'pr_open') {
+				await refreshOpenPullRequests();
+			}
 		} catch (e) {
 			if (prModal === modal) prError = planErrorMessage(e);
 		} finally {
@@ -845,7 +1152,8 @@
 			needs_mapping: 'Chart mapping required',
 			ambiguous: 'Workload binding is ambiguous',
 			rejected: 'Plan rejected',
-			superseded: 'Plan superseded'
+			superseded: 'Plan superseded',
+			cancelled: 'Plan cancelled'
 		};
 		const normalized = String(status ?? '').toLowerCase();
 		return labels[normalized] ?? (normalized || 'Unknown');
@@ -865,6 +1173,32 @@
 		} catch (e) {
 			error = e.message;
 		}
+	}
+
+	/**
+	 * Request change of an applied recommendation, per resource: the baseline
+	 * before the change, the proposal and the live value detected after it.
+	 * `unchanged` flags a recorded change whose live value still equals the
+	 * baseline, so it is never shown as a pointless "400m → 400m".
+	 */
+	function requestChanges(rec) {
+		const changes = [];
+		for (const [resource, label, format, before, proposed, after] of [
+			['cpu', 'CPU', formatCPU, rec.current_cpu_request_millicores, rec.recommended_cpu_request_millicores, rec.actual_cpu_request_millicores],
+			['memory', 'Memory', formatBytes, rec.current_memory_request_bytes, rec.recommended_memory_request_bytes, rec.actual_memory_request_bytes]
+		]) {
+			if (before == null) continue;
+			changes.push({
+				resource,
+				label,
+				format,
+				before,
+				proposed: proposed ?? null,
+				after: after ?? null,
+				unchanged: after != null && after === before
+			});
+		}
+		return changes;
 	}
 
 	function verificationClass(status) {
@@ -902,8 +1236,7 @@
 	// --- Source / risk display ---
 	const sourceConfig = {
 		greenkube: { label: 'GreenKube', color: 'green' },
-		vpa: { label: 'VPA', color: 'blue' },
-		karpenter: { label: 'Karpenter', color: 'purple' }
+		vpa: { label: 'VPA', color: 'blue' }
 	};
 
 	function getSourceConfig(source) {
@@ -927,15 +1260,8 @@
 
 	// --- Type config ---
 	const typeConfig = {
-		ZOMBIE_POD:              { icon: '💀', label: 'Zombie Pod',           color: 'red',    desc: 'Pod with no meaningful activity' },
 		RIGHTSIZING_CPU:         { icon: '📐', label: 'CPU Rightsizing',      color: 'yellow', desc: 'CPU request can be optimized' },
 		RIGHTSIZING_MEMORY:      { icon: '📐', label: 'Memory Rightsizing',   color: 'yellow', desc: 'Memory request can be optimized' },
-		AUTOSCALING_CANDIDATE:   { icon: '📈', label: 'Autoscaling',          color: 'orange', desc: 'Workload with spiky usage — consider HPA' },
-		OFF_PEAK_SCALING:        { icon: '🌙', label: 'Off-Peak Scaling',     color: 'indigo', desc: 'Idle during off-peak hours — scale down with cron' },
-		IDLE_NAMESPACE:          { icon: '💤', label: 'Idle Namespace',       color: 'purple', desc: 'Namespace with minimal activity' },
-		CARBON_AWARE_SCHEDULING: { icon: '🌍', label: 'Carbon-Aware',         color: 'green',  desc: 'Could run in a lower-carbon zone' },
-		OVERPROVISIONED_NODE:    { icon: '🖥️', label: 'Overprovisioned Node', color: 'blue',   desc: 'Node with very low utilization' },
-		UNDERUTILIZED_NODE:      { icon: '🔻', label: 'Underutilized Node',   color: 'blue',   desc: 'Node with few pods — consider draining' },
 		ORPHANED_PERSISTENT_VOLUME: { icon: '💾', label: 'Orphaned PV',      color: 'orange', desc: 'PersistentVolume with no bound claim' },
 		ORPHANED_LOAD_BALANCER:    { icon: '🌐', label: 'Orphaned LoadBalancer', color: 'orange', desc: 'LoadBalancer Service with no backing endpoints' },
 	};
@@ -1095,6 +1421,8 @@
 				>✕</button>
 			</div>
 
+			<OomHistoryWarning warning={oomHistoryWarningOf(prModal.rec)} />
+
 			{#if prLoading && !prPlan}
 				<p class="text-xs text-dark-400 flex items-center gap-2"><span class="animate-spin">⟳</span> Preparing preview…</p>
 			{/if}
@@ -1173,6 +1501,44 @@
 
 			{#if planFeedback && !prError}
 				<p class="text-xs text-green-400" role="status">{planFeedback}</p>
+			{/if}
+
+			{#if prPlan && !planApproval && autoApproveNote(autoApproveBlockers)}
+				<p class="text-xs text-dark-400" data-testid="auto-approve-note">{autoApproveNote(autoApproveBlockers)}</p>
+			{/if}
+
+			{#if planApproval && !prError && (prPlan?.delivery_mode === 'patch' || prPlan?.delivery_mode === 'ci')}
+				<div class="text-xs rounded-lg px-3 py-2 border border-blue-600/30 bg-blue-600/10 text-blue-200 space-y-2" data-testid="external-delivery">
+					{#if prPlan.delivery_mode === 'ci'}
+						<p>Approved for CI delivery: your CI job opens the pull request with its own token and reports it back. GreenKube then tracks it to merge and sync.</p>
+					{:else}
+						<p>
+							Approved. <a class="underline underline-offset-2" href={planPatchUrl(planPresentation(prPlan).planId)} download>Download the patch</a>
+							or run <code>greenkube plan apply-patch {planPresentation(prPlan).planId}</code>, push the branch and open the pull request.
+							GreenKube links it by its branch name or its GreenKube-Plan trailer.
+						</p>
+					{/if}
+					{#if deliveryReport?.pull_request}
+						<p role="status">Pull request #{deliveryReport.pull_request.number} linked; GreenKube tracks it now.</p>
+					{:else if prPlan.status === 'approved'}
+						<form class="flex flex-wrap items-end gap-2" on:submit|preventDefault={submitDeliveryLinkBack}>
+							<label class="flex-1 min-w-[16rem]">
+								<span class="block text-[11px] text-dark-400">I opened PR</span>
+								<input
+									class="input text-xs w-full"
+									type="url"
+									placeholder="https://github.com/org/repo/pull/42"
+									bind:value={deliveryPrUrl}
+									disabled={prLoading}
+								/>
+							</label>
+							<button class="btn-secondary text-xs disabled:opacity-50" type="submit" disabled={prLoading || !deliveryPrUrl.trim()}>
+								Link pull request
+							</button>
+						</form>
+						{#if deliveryError}<p class="text-red-400" role="alert">{deliveryError}</p>{/if}
+					{/if}
+				</div>
 			{/if}
 
 			{#if planApproval && !prError}
@@ -1370,7 +1736,7 @@
 
 			<div class="flex gap-3 justify-end pt-1">
 				<button class="btn-secondary text-xs" on:click={closePrModal}>Close</button>
-				{#if canCancelPlan(prPlan)}
+				{#if canWrite && canCancelPlan(prPlan)}
 					<button
 						class="btn-secondary text-xs disabled:opacity-50"
 						disabled={prLoading}
@@ -1379,7 +1745,7 @@
 						{prLoading ? 'Cancelling…' : 'Cancel plan'}
 					</button>
 				{/if}
-				{#if canReplan(prPlan)}
+				{#if canWrite && canReplan(prPlan)}
 					<button
 						class="btn-secondary text-xs disabled:opacity-50"
 						disabled={prLoading}
@@ -1388,7 +1754,7 @@
 						Re-plan
 					</button>
 				{/if}
-				{#if canPreviewRollback(prPlan)}
+				{#if canWrite && canPreviewRollback(prPlan)}
 					<button
 						class="btn-secondary text-xs disabled:opacity-50"
 						disabled={prLoading}
@@ -1397,15 +1763,19 @@
 						{prLoading ? 'Preparing rollback…' : 'Preview rollback'}
 					</button>
 				{/if}
-				{#if prPlan && canApprovePlan(prPlan) && !planApprovalBlocked && !planApproval}
+				{#if prPlan && canApprove && prPlan?.may_approve !== false && canApprovePlan(prPlan) && !planApprovalBlocked && !planApproval}
 					<button
 						class="btn-primary text-xs flex items-center gap-2 disabled:opacity-50"
 						disabled={prLoading}
 						on:click={approvePlan}
 					>
 						{#if prLoading}<span class="animate-spin">⟳</span>{/if}
-						Approve plan
+						{approveLabel()}
 					</button>
+				{:else if prPlan && (!canApprove || prPlan?.may_approve === false) && canApprovePlan(prPlan) && !planApprovalBlocked && !planApproval}
+					<p class="self-center text-xs text-dark-400" data-testid="approve-read-only">
+						Approving a plan needs the approve scope (operator or admin).
+					</p>
 				{/if}
 			</div>
 		</div>
@@ -1418,27 +1788,138 @@
 	<div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
 		<div>
 			<h1 class="text-2xl font-bold text-dark-100">Recommendations</h1>
-			<p class="text-sm text-dark-500 mt-1">Actionable suggestions to reduce your cluster's environmental footprint</p>
+			<p class="text-sm text-dark-500 mt-1">Ranked, evidence-backed changes, ready as pull requests</p>
 		</div>
-		<div class="flex items-center gap-3">
-			{#if $selectedNamespace}
-				<button class="btn-secondary text-xs" on:click={() => selectedNamespace.set('')}>
-					Clear filter: {$selectedNamespace} ✕
+		<div class="flex items-center gap-3 flex-wrap">
+			<label class="flex items-center gap-2 text-xs text-dark-400">
+				<span>Sort by</span>
+				<select
+					aria-label="Sort recommendations"
+					class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs text-dark-200"
+					value={sortMode}
+					on:change={(e) => changeSort(e.currentTarget.value)}
+					title="Expected value is the server order: projected value (cost and carbon) times the success probability, minus incident and effort costs. Profiles re-score every recommendation matching the filters."
+				>
+					{#each SORT_OPTIONS as option}
+						<option value={option.value}>{option.label}</option>
+					{/each}
+				</select>
+			</label>
+			{#if canWrite}
+				<button
+					class="btn-secondary text-xs disabled:opacity-50"
+					disabled={scanPending}
+					title="Run a new recommendation scan and reload the results when it completes"
+					on:click={rescan}
+				>
+					{scanPending ? '⟳ Scanning…' : '↻ Rescan'}
 				</button>
 			{/if}
-			<select
-				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs text-dark-200"
-				bind:value={rankingProfile}
-				on:change={(e) => applyRankingProfile(e.currentTarget.value)}
-				title="Multi-criteria ranking profile"
-			>
-				{#each RANKING_PROFILES as profile}
-					<option value={profile.value}>{profile.label}</option>
-				{/each}
-			</select>
-			<button class="btn-secondary text-xs" on:click={loadData}>↻ Refresh</button>
 		</div>
 	</div>
+
+	{#if !canWrite}
+		<p class="rounded-lg border border-dark-700 bg-dark-900 px-3 py-2 text-xs text-dark-400" role="note" data-testid="read-only-hint">
+			Read-only access{$currentUser?.role ? ` (${$currentUser.role})` : ''}: you can review recommendations and their
+			evidence. Opening pull requests, ignoring, restoring and rescanning need an operator or admin.
+		</p>
+	{/if}
+
+	{#if scanError}
+		<div class="card text-sm text-amber-300" role="alert">{scanError}</div>
+	{:else if scanRun}
+		<div
+			class="card text-sm {scanRun.status === 'failed' ? 'text-amber-300' : 'text-dark-300'}"
+			role={scanRun.status === 'failed' ? 'alert' : 'status'}
+		>
+			{#if scanPending}<span class="animate-spin inline-block mr-1">⟳</span>{/if}
+			{scanStatusText(scanRun)}
+		</div>
+	{/if}
+
+	<!-- Filters (sent to the API as query parameters) -->
+	<div class="flex flex-wrap items-end gap-3" role="group" aria-label="Recommendation filters">
+		<label class="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-dark-500">
+			Namespace
+			<select
+				aria-label="Filter by namespace"
+				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs normal-case tracking-normal text-dark-200"
+				bind:value={$selectedNamespace}
+			>
+				<option value="">All namespaces</option>
+				{#each namespaceOptions as ns}
+					<option value={ns}>{ns}</option>
+				{/each}
+				{#if $selectedNamespace && !namespaceOptions.includes($selectedNamespace)}
+					<option value={$selectedNamespace}>{$selectedNamespace}</option>
+				{/if}
+			</select>
+		</label>
+		<label class="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-dark-500">
+			Source
+			<select
+				aria-label="Filter by source"
+				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs normal-case tracking-normal text-dark-200"
+				bind:value={filterSource}
+			>
+				<option value="">All sources</option>
+				{#each sourceOptions as source}
+					<option value={source}>{getSourceConfig(source).label}</option>
+				{/each}
+			</select>
+		</label>
+		<label class="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-dark-500">
+			Risk
+			<select
+				aria-label="Filter by risk level"
+				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs normal-case tracking-normal text-dark-200"
+				bind:value={filterRisk}
+			>
+				<option value="">Any risk</option>
+				{#each RISK_OPTIONS as risk}
+					<option value={risk.value}>{risk.label}</option>
+				{/each}
+			</select>
+		</label>
+		<label class="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-dark-500">
+			Capability
+			<select
+				aria-label="Filter by capability"
+				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs normal-case tracking-normal text-dark-200"
+				bind:value={filterCapability}
+			>
+				<option value="">All capabilities</option>
+				{#each CAPABILITY_OPTIONS as capability}
+					<option value={capability.value}>{capability.label}</option>
+				{/each}
+			</select>
+		</label>
+		{#if serverFiltersActive || $selectedNamespace}
+			<button class="btn-secondary text-xs" on:click={clearFilters}>Clear filters ✕</button>
+		{/if}
+	</div>
+
+	{#if $demoMode}
+		<div class="card text-sm text-dark-300" role="status" data-testid="demo-notice">
+			Demo data: pull requests are disabled in the demo. Install GreenKube in your cluster to open them.
+		</div>
+	{:else if automationStatusError || (automationStatus === null && !loading)}
+		<div class="card text-sm text-amber-300" role="alert">
+			GitOps automation status is unavailable. Pull-request previews are disabled; check the Automation page and API health.
+		</div>
+	{:else if automationStatus === null}
+		<div class="card text-sm text-dark-400" role="status">
+			Checking GitOps automation readiness…
+		</div>
+	{:else if automationStatus.enabled !== true}
+		<div class="card text-sm text-dark-400" role="status">
+			GitOps automation is disabled. Recommendations remain visible, but pull-request previews are unavailable; apply changes manually.
+		</div>
+	{:else if automationStatus.ready !== true}
+		<div class="card text-sm text-amber-300" role="status">
+			GitOps automation is enabled but not ready. Pull-request previews are disabled until its worker is healthy.
+		</div>
+	{/if}
 
 	<!-- Tabs -->
 	<div class="flex gap-1 bg-dark-900 rounded-xl p-1 w-fit border border-dark-700">
@@ -1453,17 +1934,19 @@
 				{actionableActiveRecs.length}
 			</span>
 		</button>
-		<button
-			class="px-4 py-2 rounded-lg text-sm font-medium transition-colors
-			       {activeTab === 'pull-requests' ? 'bg-dark-700 text-dark-100' : 'text-dark-500 hover:text-dark-300'}"
-			on:click={() => switchTab('pull-requests')}
+		<!-- Pull requests live on the changes board (K4): a link, not a second list. -->
+		<a
+			class="px-4 py-2 rounded-lg text-sm font-medium transition-colors text-dark-500 hover:text-dark-300"
+			href="/changes"
+			title="Pull requests and their sync, apply and measurement stages are on the Changes board"
+			data-testid="changes-link"
 		>
 			Pull requests
-			<span class="ml-1.5 text-xs px-1.5 py-0.5 rounded-full
-			             {activeTab === 'pull-requests' ? 'bg-blue-600/20 text-blue-400' : 'bg-dark-700 text-dark-500'}">
+			<span class="ml-1.5 text-xs px-1.5 py-0.5 rounded-full bg-dark-700 text-dark-500">
 				{openPullRequests.length}
 			</span>
-		</button>
+			<span aria-hidden="true">→</span>
+		</a>
 		<button
 			class="px-4 py-2 rounded-lg text-sm font-medium transition-colors
 			       {activeTab === 'ignored' ? 'bg-dark-700 text-dark-100' : 'text-dark-500 hover:text-dark-300'}"
@@ -1480,7 +1963,7 @@
 			       {activeTab === 'savings' ? 'bg-dark-700 text-dark-100' : 'text-dark-500 hover:text-dark-300'}"
 			on:click={() => switchTab('savings')}
 		>
-			💰 Realized Savings
+			💰 Measured savings
 			{#if savings?.applied_count}
 				<span class="ml-1.5 text-xs px-1.5 py-0.5 rounded-full bg-blue-600/20 text-blue-400">
 					{savings.applied_count}
@@ -1502,23 +1985,34 @@
 								<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">{savings.verified_count} verified</p>
 							{/if}
 						</div>
-						<div class="card-compact text-center">
-							<p class="stat-label">CO₂ Avoided</p>
-							<p class="stat-value text-2xl text-green-400">{formatCO2(savings.total_carbon_saved_co2e_grams)}</p>
+						<div class="card-compact text-center" data-testid="savings-tab-co2e">
+							<p class="stat-label">{SAVINGS_TERMS.allocatedCo2e}</p>
+							<p class="stat-value text-2xl text-green-400">{formatCO2(savingsTabFigures.measuredAllocatedToDate?.co2e_grams ?? savings.measured_carbon_saved_co2e_grams ?? 0)}</p>
 							<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">
-								measured {formatCO2(savings.measured_carbon_saved_co2e_grams ?? 0)} ·
-								projected {formatCO2(savings.prorated_carbon_saved_co2e_grams ?? 0)}
+								measured, to date · projected separately {formatCO2(savingsTabFigures.projectedToDate?.co2e_grams ?? savings.prorated_carbon_saved_co2e_grams ?? 0)}
 							</p>
 						</div>
-						<div class="card-compact text-center">
-							<p class="stat-label">Cost Saved</p>
-							<p class="stat-value text-2xl text-blue-400">{formatCost(savings.total_cost_saved)}</p>
+						<div class="card-compact text-center" data-testid="savings-tab-cost">
+							<p class="stat-label">{SAVINGS_TERMS.measuredAllocated}</p>
+							<p class="stat-value text-2xl text-blue-400">{formatCost(savingsTabFigures.measuredAllocatedToDate?.cost ?? savings.measured_cost_saved ?? 0)}</p>
+							{#if savingsTabFigures.reliabilityCostToDate?.cost}
+								<p class="text-[10px] text-purple-300 mt-1" data-testid="savings-tab-reliability-cost">
+									Reliability fixes cost {formatCost(-savingsTabFigures.reliabilityCostToDate.cost)} to date (not netted)
+								</p>
+							{/if}
 							<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">
-								measured {formatCost(savings.measured_cost_saved ?? 0)} ·
-								projected {formatCost(savings.prorated_cost_saved ?? 0)}
+								measured, to date · projected separately {formatCost(savingsTabFigures.projectedToDate?.cost ?? savings.prorated_cost_saved ?? 0)}
 							</p>
 						</div>
 					</div>
+					{#if realizationText(savingsTabFigures.realizationFactor)}
+						<p class="text-xs text-dark-400" data-testid="savings-tab-realization">{realizationText(savingsTabFigures.realizationFactor)}</p>
+					{/if}
+					{#if savingsTabFigures.realizedBilledToDate}
+						<p class="text-xs text-green-300" data-testid="savings-tab-billed">
+							{SAVINGS_TERMS.realizedBilled}: {formatCost(savingsTabFigures.realizedBilledToDate.cost ?? 0)} · {formatCO2(savingsTabFigures.realizedBilledToDate.co2e_grams ?? 0)} CO₂e
+						</p>
+					{/if}
 
 					{#if appliedRecs.length}
 						<div class="space-y-2">
@@ -1539,6 +2033,12 @@
 												<span class="text-sm font-semibold text-dark-100">
 													{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}
 												</span>
+												<a
+													href="/recommendations/{rec.id}"
+													class="text-[10px] text-green-400 hover:text-green-300"
+													aria-label="Details of recommendation {rec.id}"
+													on:click|stopPropagation
+												>Details</a>
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
 												{#if rec.status === 'verified'}
 													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-green-600/20 text-green-400">✓ verified</span>
@@ -1558,14 +2058,26 @@
 											{#if rec.namespace}
 												<p class="text-xs text-dark-500 mt-0.5">Namespace: <span class="text-dark-400">{rec.namespace}</span></p>
 											{/if}
+											{#each requestChanges(rec) as change (change.resource)}
+												{#if change.after != null && !change.unchanged}
+													<p class="text-xs text-dark-500 mt-0.5 font-mono" data-testid="request-summary-{change.resource}">
+														{change.label} {change.format(change.before)} → <span class="text-blue-400">{change.format(change.after)}</span>
+													</p>
+												{:else if change.after == null && change.proposed != null}
+													<!-- Live value after the change unknown (never detected, or cleared by migration 0061). -->
+													<p class="text-xs text-dark-500 mt-0.5 font-mono" data-testid="request-summary-{change.resource}">
+														{change.label} {change.format(change.before)} → <span class="text-green-400">{change.format(change.proposed)}</span> <span class="font-sans text-[10px] text-dark-600">(proposed)</span>
+													</p>
+												{/if}
+											{/each}
 										</div>
 										<!-- Savings chips -->
 										<div class="flex items-center gap-3 shrink-0">
 											{#if rec.carbon_saved_co2e_grams}
-												<span class="text-xs font-semibold text-green-400">-{formatCO2(rec.carbon_saved_co2e_grams)}</span>
+												<span class="text-xs font-semibold text-green-400">{savingPhrase(rec.carbon_saved_co2e_grams, formatCO2, { verb: 'saved', suffix: ' CO₂e/yr' })}</span>
 											{/if}
 											{#if rec.cost_saved}
-												<span class="text-xs text-blue-400">-{formatCost(rec.cost_saved)}</span>
+												<span class="text-xs text-blue-400">{savingPhrase(rec.cost_saved, formatCost, { verb: 'saved' })}</span>
 											{/if}
 											<span class="text-dark-500 text-xs transition-transform duration-200 {expanded ? 'rotate-180' : ''}">▼</span>
 										</div>
@@ -1593,13 +2105,12 @@
 														</p>
 													</div>
 												{/if}
-												{#if rec.cost_saved}
+												{#if appliedCostFigure(rec).value}
+													{@const costFigure = appliedCostFigure(rec)}
 													<div>
-														<p class="text-[10px] uppercase text-dark-600">
-															{rec.status === 'verified' && rec.measured_cost_saved != null ? 'Cost Measured' : 'Cost Projected'}
-														</p>
-														<p class="text-xs text-blue-400 font-semibold">
-															{formatCost(rec.status === 'verified' && rec.measured_cost_saved != null ? rec.measured_cost_saved : rec.cost_saved)}
+														<p class="text-[10px] uppercase text-dark-600">{costFigure.label}</p>
+														<p class="text-xs font-semibold {costFigure.reliability ? 'text-purple-300' : 'text-blue-400'}">
+															{costFigure.reliability ? '+' : ''}{formatCost(costFigure.value ?? 0)}{costFigure.reliability ? '/yr' : ''}
 														</p>
 													</div>
 												{/if}
@@ -1644,38 +2155,30 @@
 												</div>
 											{/if}
 
-											{#if rec.current_cpu_request_millicores != null || rec.current_memory_request_bytes != null}
-												<div class="flex flex-wrap gap-4">
-													{#if rec.current_cpu_request_millicores != null}
-														<div class="flex items-center gap-2">
-															<span class="text-[10px] uppercase text-dark-600">CPU</span>
-															<span class="text-xs text-dark-400 font-mono">{formatCPU(rec.current_cpu_request_millicores)}</span>
-															{#if rec.actual_cpu_request_millicores != null}
-																<span class="text-dark-600">→</span>
-																<span class="text-xs text-blue-400 font-mono">{formatCPU(rec.actual_cpu_request_millicores)}</span>
-																<span class="text-[10px] text-dark-600">(actual)</span>
-															{:else if rec.recommended_cpu_request_millicores != null}
-																<span class="text-dark-600">→</span>
-																<span class="text-xs text-green-400 font-mono">{formatCPU(rec.recommended_cpu_request_millicores)}</span>
-																<span class="text-[10px] text-dark-600">(recommended)</span>
+											{#if requestChanges(rec).length}
+												<div class="flex flex-col gap-1.5">
+													{#each requestChanges(rec) as change (change.resource)}
+														<div class="flex flex-wrap items-center gap-2" data-testid="request-change-{change.resource}">
+															<span class="text-[10px] uppercase text-dark-600 w-14">{change.label}</span>
+															<span class="text-xs text-dark-400 font-mono" title="Request before the change">{change.format(change.before)}</span>
+															<span class="text-dark-600" aria-hidden="true">→</span>
+															{#if change.after != null && !change.unchanged}
+																<span class="text-xs text-blue-400 font-mono" title="Live request detected after the change">{change.format(change.after)}</span>
+																<span class="text-[10px] text-dark-600">(live after the change)</span>
+																{#if change.proposed != null && change.proposed !== change.after}
+																	<span class="text-[10px] text-dark-600">· proposed {change.format(change.proposed)}</span>
+																{/if}
+															{:else if change.proposed != null}
+																<span class="text-xs text-green-400 font-mono" title="Proposed request">{change.format(change.proposed)}</span>
+																<span class="text-[10px] text-dark-600">(proposed)</span>
+															{/if}
+															{#if change.unchanged}
+																<span class="text-[10px] px-2 py-0.5 rounded-sm bg-yellow-600/20 text-yellow-400" title="The live request detected after the change still equals the request before it.">
+																	live request unchanged ({change.format(change.after)})
+																</span>
 															{/if}
 														</div>
-													{/if}
-													{#if rec.current_memory_request_bytes != null}
-														<div class="flex items-center gap-2">
-															<span class="text-[10px] uppercase text-dark-600">Memory</span>
-															<span class="text-xs text-dark-400 font-mono">{formatBytes(rec.current_memory_request_bytes)}</span>
-															{#if rec.actual_memory_request_bytes != null}
-																<span class="text-dark-600">→</span>
-																<span class="text-xs text-blue-400 font-mono">{formatBytes(rec.actual_memory_request_bytes)}</span>
-																<span class="text-[10px] text-dark-600">(actual)</span>
-															{:else if rec.recommended_memory_request_bytes != null}
-																<span class="text-dark-600">→</span>
-																<span class="text-xs text-green-400 font-mono">{formatBytes(rec.recommended_memory_request_bytes)}</span>
-																<span class="text-[10px] text-dark-600">(recommended)</span>
-															{/if}
-														</div>
-													{/if}
+													{/each}
 												</div>
 											{/if}
 
@@ -1702,47 +2205,13 @@
 				</div>
 			{/if}
 
-		{:else if activeTab === 'pull-requests'}
-			<div class="space-y-3">
-				<div>
-					<h2 class="text-sm font-semibold text-dark-300">Open pull requests</h2>
-					<p class="text-xs text-dark-500 mt-1">
-						Recommendations with a pending or open pull request are kept here until the PR is closed.
-					</p>
-				</div>
-				{#if openPullRequests.length}
-					<div class="space-y-2">
-						{#each openPullRequests as pr (pr.id)}
-							<div class="card flex flex-col sm:flex-row sm:items-center gap-3">
-								<div class="flex-1 min-w-0">
-									<div class="flex items-center gap-2 flex-wrap">
-										<span class="text-sm font-semibold text-dark-100">Recommendation #{pr.recommendation_id}</span>
-										<span class="text-[10px] px-2 py-0.5 rounded-sm bg-blue-600/20 text-blue-400">{pr.status}</span>
-									</div>
-									<p class="text-xs text-dark-500 mt-1">
-										{pr.provider} · {pr.repo} · {pr.head_branch}
-									</p>
-								</div>
-								{#if pr.pr_url}
-									<a class="text-xs text-blue-400 hover:text-blue-300 underline break-all" href={pr.pr_url} target="_blank" rel="noreferrer">
-										View PR
-									</a>
-								{/if}
-							</div>
-						{/each}
-					</div>
-				{:else}
-					<div class="card text-sm text-dark-500">No pending or open pull requests.</div>
-				{/if}
-			</div>
-
 		<!-- ═══ ACTIVE / IGNORED TABS ════════════════════════════════════════════ -->
 		{:else}
 			<!-- Potential savings summary (active only) -->
 			{#if activeTab === 'active' && actionableActiveRecs.length}
 				<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
 					<div class="card-compact text-center">
-						<p class="stat-label">Active Recommendations</p>
+						<p class="stat-label">{serverFiltersActive ? 'Matching Recommendations' : 'Active Recommendations'}</p>
 						<p class="stat-value text-2xl">{actionableActiveRecs.length}</p>
 					</div>
 					<div class="card-compact text-center">
@@ -1754,6 +2223,11 @@
 						<p class="stat-label">Potential Cost Savings</p>
 						<p class="stat-value text-2xl text-blue-400">{formatCost(totalSavingsCost)}</p>
 						<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">{potentialSavingsPeriod}</p>
+						{#if opportunity?.reliabilityCost}
+							<p class="text-[10px] text-dark-500 mt-1" data-testid="opportunity-reliability-cost">
+								Reliability fixes cost {formatCost(opportunity.reliabilityCost)}/yr (not counted)
+							</p>
+						{/if}
 					</div>
 				</div>
 			{/if}
@@ -1762,6 +2236,14 @@
 				<div class="card text-center py-12">
 					<p class="text-4xl mb-3">👀</p>
 					<p class="text-dark-400 text-sm">No ignored recommendations.</p>
+				</div>
+			{:else if activeTab === 'ignored' && currentList.length === 0}
+				<div class="card text-center py-12">
+					<p class="text-dark-400 text-sm">No ignored recommendations match these filters.</p>
+				</div>
+			{:else if activeTab === 'active' && actionableActiveRecs.length === 0 && serverFiltersActive}
+				<div class="card text-center py-12">
+					<p class="text-dark-400 text-sm">No active recommendations match these filters.</p>
 				</div>
 			{:else if activeTab === 'active' && actionableActiveRecs.length === 0}
 				<div class="card text-center py-12">
@@ -1797,6 +2279,10 @@
 				<div class="space-y-3">
 					{#each displayed as rec (rec.id)}
 						{@const cfg = getTypeConfig(rec.type)}
+						{@const topFactor = topRankingFactor(rec.ranking_factors)}
+						{@const evText = describeExpectedValue(rec)}
+						{@const eligibility = eligibilityOf(rec)}
+						{@const diagnostics = visibleDiagnostics(eligibility, $demoMode)}
 						<div class="card hover:border-{cfg.color}-600/30 transition-all duration-200">
 							<div class="flex items-start gap-4">
 								<div class="text-2xl shrink-0 mt-0.5">{cfg.icon}</div>
@@ -1806,15 +2292,31 @@
 										<div class="min-w-0">
 											<div class="flex items-center gap-2 flex-wrap">
 												<h3 class="text-sm font-semibold text-dark-100">
-													{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}
+													<a href="/recommendations/{rec.id}" class="hover:text-green-300" data-testid="recommendation-detail-link">
+														{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}
+													</a>
 												</h3>
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
-												{#if hasSafePerContainerAction(rec)}
+												{#if hasSafePerContainerAction(rec) && automationStatus?.enabled === true && automationStatus?.ready === true}
 													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-green-600/10 text-green-400">Container action ready</span>
-												{:else if RIGHTSIZING_TYPES.includes(rec.type)}
-													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-500">No safe container action</span>
-												{:else}
-													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-400" title="This recommendation has no GitOps action planner; apply it manually.">Manual change required</span>
+												{:else if activeTab === 'active'}
+													<span
+														class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-400"
+														title={manualReason(rec)}
+													>Manual change required</span>
+												{/if}
+												{#if activeTab === 'active' && warmUpText(rec)}
+													<span
+														class="text-[10px] px-2 py-0.5 rounded-sm bg-blue-600/10 text-blue-300"
+														role="status"
+														data-testid="warm-up-eta"
+													>{warmUpText(rec)}</span>
+												{/if}
+												{#if isReliabilityLane(rec)}
+													<span
+														class="text-[10px] px-2 py-0.5 rounded-sm bg-purple-600/10 text-purple-300"
+														title="Increases resources to reduce incident risk; it costs money."
+													>Reliability</span>
 												{/if}
 												<span class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-300">
 													{getSourceConfig(rec.source).label}
@@ -1823,6 +2325,23 @@
 													<span class="text-[10px] px-2 py-0.5 rounded-sm {riskClass(rec.risk_level)}"
 														title={rec.risk_factors?.join(', ')}>
 														{rec.risk_level} risk
+													</span>
+												{/if}
+												{#if evText}
+													<span
+														class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-200"
+														title={describeFactorsInCurrency(rec) || 'No ranking breakdown was returned.'}
+														data-testid="ranking-score"
+													>
+														{evText}{topFactor ? ` · top factor: ${topFactor.label}` : ''}
+													</span>
+												{:else if rec.ranking_score != null}
+													<span
+														class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-200"
+														title={describeRankingFactors(rec.ranking_factors) || 'No ranking breakdown was returned.'}
+														data-testid="ranking-score"
+													>
+														Score {formatRankingScore(rec.ranking_score)}{topFactor ? ` · top factor: ${topFactor.label}` : ''}
 													</span>
 												{/if}
 												{#if activeTab === 'ignored'}
@@ -1837,22 +2356,36 @@
 											{#if rec.potential_savings_co2e_grams || rec.potential_savings_cost}
 												<div class="text-right">
 													{#if rec.potential_savings_co2e_grams}
-														<p class="text-sm font-bold text-green-400">-{formatCO2(rec.potential_savings_co2e_grams)}</p>
+														<p class="text-sm font-bold text-green-400">{savingPhrase(rec.potential_savings_co2e_grams, formatCO2, { suffix: ' CO₂e/yr' })}</p>
 													{/if}
-													{#if rec.potential_savings_cost}
-														<p class="text-xs text-blue-400">-{formatCost(rec.potential_savings_cost)}</p>
+													{#if rec.potential_savings_cost && rec.projected_billable_cost_annual === null}
+														<p class="text-xs text-blue-400" data-testid="row-allocated-unknown">allocated: {savingPhrase(rec.potential_savings_cost, formatCost)}</p>
+													{:else if rec.potential_savings_cost}
+														<p class="text-xs text-blue-400">{savingPhrase(rec.potential_savings_cost, formatCost)}</p>
 													{/if}
+													{#if rec.projection_note}<p class="text-[10px] text-dark-500" data-testid="row-projection-note">{rec.projection_note}</p>{/if}
+												</div>
+											{:else if rec.projected_allocated_cost_annual > 0}
+												<!-- IMP-03: on fixed nodes the billable projection is 0; show the allocated figure, never hide it. -->
+												<div class="text-right" data-testid="row-allocated-saving">
+													<p class="text-xs text-blue-400">allocated: {savingPhrase(rec.projected_allocated_cost_annual, formatCost)}</p>
+													{#if rec.projection_note}<p class="text-[10px] text-dark-500">{rec.projection_note}</p>{/if}
 												</div>
 											{/if}
+											{#if capacitySummary(rec.released_capacity)}
+												<p class="text-[11px] text-dark-400 text-right" data-testid="row-released-capacity" title="Reserved capacity, not money: never added to cost savings">
+													{capacitySummary(rec.released_capacity)}
+												</p>
+											{/if}
 											{#if activeTab === 'active'}
-												{#if canPreviewRecommendation(rec)}
+												{#if canWrite && canPreviewRecommendation(rec)}
 													<button
 														class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
 														       hover:border-green-600/50 hover:text-green-400 transition-colors"
-														title="Preview the server-resolved GitOps plan for this container action"
+														title="Preview the diff of the server-resolved GitOps plan, then open the pull request in one click"
 														on:click={() => openPrModal(rec)}
 													>
-														Preview plan
+														Open PR
 													</button>
 												{:else if rec.scope === 'workload' && rec.owner_kind && rec.owner_name && hasOpenPr(rec)}
 													<button
@@ -1862,13 +2395,22 @@
 														disabled
 													>PR created</button>
 												{/if}
-												<button
+												<a
 													class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
-													       hover:border-yellow-600/50 hover:text-yellow-400 transition-colors"
-													title="Ignore this recommendation"
-													on:click={() => openIgnoreModal(rec)}
-												>Ignore</button>
-											{:else}
+													       hover:border-green-600/50 hover:text-green-400 transition-colors"
+													title="kubectl steps for clusters without GitOps, then mark the recommendation as applied"
+													href="/recommendations/{rec.id}#manual"
+													data-testid="apply-manually"
+												>Apply manually</a>
+												{#if canWrite}
+													<button
+														class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
+														       hover:border-yellow-600/50 hover:text-yellow-400 transition-colors"
+														title="Ignore this recommendation"
+														on:click={() => openIgnoreModal(rec)}
+													>Ignore</button>
+												{/if}
+											{:else if canWrite}
 												<button
 													class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
 													       hover:border-green-600/50 hover:text-green-400 transition-colors disabled:opacity-40"
@@ -1888,9 +2430,33 @@
 											<span class="text-dark-600 uppercase text-[10px] mr-1">Reason:</span>{rec.ignored_reason}
 										</div>
 									{/if}
+									{#if activeTab === 'ignored' && rec.changed_since_ignored}
+										<div class="mt-2 text-xs text-orange-300/90 bg-orange-600/5 border border-orange-600/20 rounded-lg px-3 py-2">
+											Advice changed since you ignored it{rec.changed_since_ignored.reason ? `: ${rec.changed_since_ignored.reason}` : '.'}
+										</div>
+									{/if}
 
 									<!-- Description / reason -->
 									<p class="text-sm text-dark-400 mt-2">{rec.reason}</p>
+
+									<!-- Server eligibility (F10): why no pull request, and how to fix it -->
+									{#if activeTab === 'active' && eligibility && (diagnostics.blockers.length || diagnostics.warnings.length)}
+										<ul class="mt-2 space-y-1 text-xs" data-testid="eligibility-blockers">
+											{#each diagnostics.blockers as blocker (blocker.code + blocker.message)}
+												<li class="text-dark-400">
+													<span class="text-amber-300">{blocker.message}</span>
+													{#if blocker.fix}<span class="text-dark-500"> — {blocker.fix}</span>{/if}
+												</li>
+											{/each}
+											{#each diagnostics.warnings.filter((entry) => entry.code !== 'oom_history_unknown') as warning (warning.code + warning.message)}
+												<li class="text-dark-500">
+													<span class="text-yellow-500/80">⚠ {warning.message}</span>
+													{#if warning.fix}<span> — {warning.fix}</span>{/if}
+												</li>
+											{/each}
+										</ul>
+										<OomHistoryWarning warning={oomHistoryWarningOf(rec)} />
+									{/if}
 
 									<!-- CPU / Memory details -->
 									{#if rec.current_cpu_request_millicores != null || rec.current_memory_request_bytes != null}
@@ -1947,11 +2513,6 @@
 										{#if rec.confidence != null}
 											<span class="text-[10px] text-dark-400">
 												confidence {percent(rec.confidence)}
-											</span>
-										{/if}
-										{#if rec.ranking_score != null}
-											<span class="text-[10px] text-dark-500" title={JSON.stringify(rec.ranking_factors ?? {})}>
-												rank score {rec.ranking_score.toFixed(2)}
 											</span>
 										{/if}
 										{#if rec.evidence}

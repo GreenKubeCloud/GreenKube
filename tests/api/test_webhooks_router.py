@@ -1,5 +1,6 @@
 """HTTP boundary tests for provider pull-request webhooks."""
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -7,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Literal
+from typing import Any, Literal, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -424,19 +425,51 @@ def test_open_webhook_is_marked_terminal_without_lifecycle_runtime(webhook_clien
     assert response.json()["lifecycle"] == "ignored"
 
 
-def test_unlinked_webhook_remains_retryable(webhook_client):
+@pytest.mark.parametrize("action", ["closed", "opened"])
+def test_unlinked_webhook_is_terminally_ignored(webhook_client, action):
+    """D11 / BUG-53: PRs GreenKube does not know were retried forever with 503."""
     client, app, _ = webhook_client
-    app.state.webhook_processing_service = _RecordingWebhookService(_processing_result(action="closed"))
+    repository = _MemoryWebhookDeliveryRepository()
+    service = _RecordingWebhookService(_processing_result(action=action))
+    cast(Any, service).delivery_repository = repository
+    app.state.webhook_processing_service = service
+    assert service.result is not None
+    event = service.result.event
+    assert event is not None
+    asyncio.run(repository.record_webhook_delivery(event))
+    asyncio.run(
+        repository.claim_webhook_delivery(event.provider_id, event.delivery_id, stale_before=datetime.now(timezone.utc))
+    )
 
     async def reconcile(event, *, newly_deduplicated):
         return SimpleNamespace(outcome=SimpleNamespace(value="unlinked"))
 
     app.state.pull_request_lifecycle_reconciler = SimpleNamespace(reconcile=reconcile)
+    from greenkube.core.observability import REGISTRY
+
+    def sample(name: str, labels: dict[str, str]) -> float:
+        return REGISTRY.get_sample_value(name, labels) or 0.0
+
+    ignored_before = sample("greenkube_webhook_deliveries_total", {"status": "ignored"})
+    error_before = sample("greenkube_webhook_deliveries_total", {"status": "error"})
+    failures_before = sample("greenkube_automation_failures_total", {"reason": "webhook"})
 
     response = client.post("/api/v1/webhooks/provider-main", content=b"{}")
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "webhook_lifecycle_unavailable"
+    assert response.status_code == 202
+    assert response.json()["status"] == "ignored"
+    assert response.json()["lifecycle"] == "unlinked"
+    # Counted as ignored, never as an error or an automation failure.
+    assert sample("greenkube_webhook_deliveries_total", {"status": "ignored"}) == ignored_before + 1
+    assert sample("greenkube_webhook_deliveries_total", {"status": "error"}) == error_before
+    assert sample("greenkube_automation_failures_total", {"reason": "webhook"}) == failures_before
+    stored = repository.deliveries[(event.provider_id, event.delivery_id)]
+    assert stored.status == "ignored"
+    assert stored.processed_at is not None
+    assert stored.error_code == "pull_request_unlinked"
+    assert stored not in asyncio.run(
+        repository.list_pending_webhook_deliveries(limit=10, stale_before=datetime.now(timezone.utc))
+    )
 
 
 @pytest.mark.parametrize(

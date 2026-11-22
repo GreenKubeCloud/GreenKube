@@ -1,0 +1,377 @@
+suite: scheduling, availability and helper images (production readiness)
+templates:
+  - templates/components.yaml
+  - templates/renderer.yaml
+  - templates/postgres-statefulset.yaml
+  - templates/pdb.yaml
+  - templates/tests/test-connection.yaml
+  - templates/configmap.yaml
+  - templates/secret.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # Per-component scheduling
+  # --------------------------------------------------------------------------
+  - it: renders no scheduling constraint by default (single replica)
+    template: templates/components.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.affinity
+      - notExists:
+          path: spec.template.spec.nodeSelector
+      - notExists:
+          path: spec.template.spec.tolerations
+      - notExists:
+          path: spec.template.spec.priorityClassName
+      - notExists:
+          path: spec.template.spec.imagePullSecrets
+      - notExists:
+          path: spec.template.spec.topologySpreadConstraints
+
+  - it: applies nodeSelector, tolerations, priority class and spread constraints per component
+    template: templates/components.yaml
+    set:
+      api.nodeSelector:
+        pool: system
+      api.tolerations:
+        - key: dedicated
+          operator: Equal
+          value: greenkube
+          effect: NoSchedule
+      api.priorityClassName: greenkube-high
+      api.topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: api
+      controller.nodeSelector:
+        pool: batch
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.nodeSelector
+          value:
+            pool: system
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.tolerations[0].key
+          value: dedicated
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.priorityClassName
+          value: greenkube-high
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.topologySpreadConstraints[0].topologyKey
+          value: topology.kubernetes.io/zone
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.nodeSelector
+          value:
+            pool: batch
+      - documentIndex: 1
+        notExists:
+          path: spec.template.spec.priorityClassName
+
+  - it: merges podAnnotations with the config checksum and podLabels under the selector labels
+    template: templates/components.yaml
+    set:
+      api.podAnnotations:
+        prometheus.io/scrape: "false"
+      api.podLabels:
+        team: platform
+        app.kubernetes.io/component: hijacked
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.metadata.annotations["prometheus.io/scrape"]
+          value: "false"
+      - documentIndex: 0
+        exists:
+          path: spec.template.metadata.annotations["checksum/config"]
+      - documentIndex: 0
+        equal:
+          path: spec.template.metadata.labels.team
+          value: platform
+      # A user label can never detach the pod from its Deployment selector.
+      - documentIndex: 0
+        equal:
+          path: spec.template.metadata.labels["app.kubernetes.io/component"]
+          value: api
+
+  - it: renders global imagePullSecrets on every pod, from names or entries
+    set:
+      global.imagePullSecrets:
+        - regcred
+        - name: mirror
+    asserts:
+      - equal:
+          path: spec.template.spec.imagePullSecrets
+          value:
+            - name: regcred
+            - name: mirror
+        template: templates/components.yaml
+      - equal:
+          path: spec.template.spec.imagePullSecrets[1].name
+          value: mirror
+        template: templates/renderer.yaml
+        documentSelector:
+          path: kind
+          value: Deployment
+      - equal:
+          path: spec.template.spec.imagePullSecrets[0].name
+          value: regcred
+        template: templates/postgres-statefulset.yaml
+      - equal:
+          path: spec.imagePullSecrets[0].name
+          value: regcred
+        template: templates/tests/test-connection.yaml
+
+  # --------------------------------------------------------------------------
+  # Multi-replica availability
+  # --------------------------------------------------------------------------
+  - it: spreads multi-replica components over nodes with soft anti-affinity by default
+    template: templates/components.yaml
+    set:
+      api.replicas: 2
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm.topologyKey
+          value: kubernetes.io/hostname
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm.labelSelector.matchLabels["app.kubernetes.io/component"]
+          value: api
+      - documentIndex: 1
+        notExists:
+          path: spec.template.spec.affinity
+
+  - it: supports hard and disabled anti-affinity
+    template: templates/components.yaml
+    set:
+      api.replicas: 2
+      api.podAntiAffinity: hard
+      controller.replicas: 2
+      controller.podAntiAffinity: none
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey
+          value: kubernetes.io/hostname
+      - documentIndex: 1
+        notExists:
+          path: spec.template.spec.affinity
+
+  - it: an explicit affinity replaces the default anti-affinity
+    template: templates/components.yaml
+    set:
+      api.replicas: 3
+      api.affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values: [amd64]
+    asserts:
+      - documentIndex: 0
+        exists:
+          path: spec.template.spec.affinity.nodeAffinity
+      - documentIndex: 0
+        notExists:
+          path: spec.template.spec.affinity.podAntiAffinity
+
+  - it: renders no PodDisruptionBudget for single replicas
+    template: templates/pdb.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a minAvailable 1 PodDisruptionBudget for each multi-replica component
+    template: templates/pdb.yaml
+    set:
+      api.replicas: 2
+      controller.replicas: 2
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: PodDisruptionBudget
+      - documentIndex: 0
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-api
+      - documentIndex: 1
+        equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: controller
+      - equal:
+          path: spec.minAvailable
+          value: 1
+
+  - it: maps the deprecated replicaCount onto the api budget and honours enabled=false
+    template: templates/pdb.yaml
+    set:
+      replicaCount: 3
+      controller.replicas: 2
+      controller.podDisruptionBudget.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-api
+
+  # --------------------------------------------------------------------------
+  # Rollout safety with migrations
+  # --------------------------------------------------------------------------
+  - it: recreates the controller so two versions never run side by side
+    template: templates/components.yaml
+    asserts:
+      - documentIndex: 1
+        equal:
+          path: spec.strategy.type
+          value: Recreate
+      - documentIndex: 0
+        notExists:
+          path: spec.strategy
+
+  - it: keeps a custom controller strategy
+    template: templates/components.yaml
+    set:
+      controller.strategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 0
+          maxUnavailable: 1
+    asserts:
+      - documentIndex: 1
+        equal:
+          path: spec.strategy.rollingUpdate.maxSurge
+          value: 0
+
+  - it: recreates optional workers too
+    template: templates/components.yaml
+    set:
+      worker.replicas: 1
+    asserts:
+      - documentIndex: 2
+        equal:
+          path: spec.strategy.type
+          value: Recreate
+
+  # --------------------------------------------------------------------------
+  # Renderer and PostgreSQL
+  # --------------------------------------------------------------------------
+  - it: schedules the renderer with its own settings
+    template: templates/renderer.yaml
+    documentSelector:
+      path: kind
+      value: Deployment
+    set:
+      renderer.nodeSelector:
+        pool: sandbox
+      renderer.podAnnotations:
+        team: platform
+    asserts:
+      - equal:
+          path: spec.template.spec.nodeSelector.pool
+          value: sandbox
+      - equal:
+          path: spec.template.metadata.annotations.team
+          value: platform
+
+  - it: mounts a memory-backed /dev/shm in PostgreSQL
+    template: templates/postgres-statefulset.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 128Mi
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: dshm
+            mountPath: /dev/shm
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 60
+
+  - it: can keep the runtime /dev/shm
+    template: templates/postgres-statefulset.yaml
+    set:
+      postgres.shmSizeLimit: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: dshm
+            mountPath: /dev/shm
+
+  - it: schedules PostgreSQL with its own settings
+    template: templates/postgres-statefulset.yaml
+    set:
+      postgres.nodeSelector:
+        storage: ssd
+      postgres.tolerations:
+        - key: db
+          operator: Exists
+      postgres.priorityClassName: greenkube-db
+      postgres.podLabels:
+        backup: "true"
+    asserts:
+      - equal:
+          path: spec.template.spec.nodeSelector.storage
+          value: ssd
+      - equal:
+          path: spec.template.spec.tolerations[0].key
+          value: db
+      - equal:
+          path: spec.template.spec.priorityClassName
+          value: greenkube-db
+      - equal:
+          path: spec.template.metadata.labels.backup
+          value: "true"
+      - notExists:
+          path: spec.template.spec.affinity
+
+  # --------------------------------------------------------------------------
+  # Helper images pinned by digest
+  # --------------------------------------------------------------------------
+  - it: pins the wait-for-postgres and test images by digest
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: "busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
+        template: templates/components.yaml
+      - equal:
+          path: spec.containers[0].image
+          value: "busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
+        template: templates/tests/test-connection.yaml
+
+  - it: overriding a helper tag drops the default pin, an explicit digest pins it
+    template: templates/postgres-statefulset.yaml
+    set:
+      postgres.image.tag: 17-alpine
+      postgres.image.digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "postgres:17-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+  # Malformed values (anti-affinity mode, digest) are rejected by the values
+  # schema: tests/helm/test_production_readiness_values.py.
+  - it: rejects a helper digest on top of a pinned tag
+    template: templates/postgres-statefulset.yaml
+    set:
+      postgres.image.digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    asserts:
+      - failedTemplate:
+          errorPattern: "set either a tag with @sha256 or a digest, not both"

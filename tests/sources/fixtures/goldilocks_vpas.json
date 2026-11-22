@@ -1,0 +1,76 @@
+{
+  "apiVersion": "autoscaling.k8s.io/v1",
+  "kind": "VerticalPodAutoscalerList",
+  "items": [
+    {
+      "apiVersion": "autoscaling.k8s.io/v1",
+      "kind": "VerticalPodAutoscaler",
+      "metadata": {
+        "name": "goldilocks-api",
+        "namespace": "shop",
+        "labels": {
+          "creator": "Fairwinds",
+          "source": "goldilocks"
+        }
+      },
+      "spec": {
+        "targetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": "api"},
+        "updatePolicy": {"updateMode": "Off"}
+      },
+      "status": {
+        "conditions": [{"type": "RecommendationProvided", "status": "True"}],
+        "recommendation": {
+          "containerRecommendations": [
+            {
+              "containerName": "web",
+              "lowerBound": {"cpu": "120m", "memory": "300Mi"},
+              "target": {"cpu": "300m", "memory": "512Mi"},
+              "uncappedTarget": {"cpu": "300m", "memory": "512Mi"},
+              "upperBound": {"cpu": "320m", "memory": "2Gi"}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "apiVersion": "autoscaling.k8s.io/v1",
+      "kind": "VerticalPodAutoscaler",
+      "metadata": {
+        "name": "api-vpa",
+        "namespace": "shop",
+        "labels": {"app.kubernetes.io/managed-by": "platform-team"}
+      },
+      "spec": {
+        "targetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": "api"},
+        "updatePolicy": {"updateMode": "Off"}
+      },
+      "status": {
+        "recommendation": {
+          "containerRecommendations": [
+            {
+              "containerName": "web",
+              "lowerBound": {"cpu": "100m", "memory": "300Mi"},
+              "target": {"cpu": "250m", "memory": "512Mi"},
+              "uncappedTarget": {"cpu": "250m", "memory": "512Mi"},
+              "upperBound": {"cpu": "1", "memory": "2Gi"}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "apiVersion": "autoscaling.k8s.io/v1",
+      "kind": "VerticalPodAutoscaler",
+      "metadata": {
+        "name": "goldilocks-worker",
+        "namespace": "shop",
+        "labels": {"creator": "Fairwinds", "source": "goldilocks"}
+      },
+      "spec": {
+        "targetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": "worker"},
+        "updatePolicy": {"updateMode": "Auto"}
+      },
+      "status": {}
+    }
+  ]
+}

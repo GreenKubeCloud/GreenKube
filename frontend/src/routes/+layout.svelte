@@ -1,26 +1,48 @@
 <script>
 	import '../app.css';
-	import { page } from '$app/stores';
-	import { sidebarCollapsed, servicesHealth, healthPopupDismissed } from '$lib/stores.js';
-	import { ApiError, clearApiToken, getHealth, getServicesHealth, setApiToken } from '$lib/api.js';
+	import { page } from '$app/state';
+	import { sidebarCollapsed, servicesHealth, healthPopupDismissed, currentUser, hasScope, demoMode } from '#lib/stores.js';
+	import {
+		ApiError,
+		AUTH_REQUIRED_EVENT,
+		PASSWORD_CHANGE_REQUIRED_EVENT,
+		getConfig,
+		getHealth,
+		getMe,
+		getServicesHealth,
+		getSetupStatus,
+		logout
+	} from '#lib/api.js';
 	import { onMount } from 'svelte';
-	import HealthBadge from '$lib/components/HealthBadge.svelte';
-	import HealthPopup from '$lib/components/HealthPopup.svelte';
+	import HealthPopup from '#lib/components/HealthPopup.svelte';
+	import LoginForm from '#lib/components/LoginForm.svelte';
+	import PasswordChangeForm from '#lib/components/PasswordChangeForm.svelte';
+	import SetupBanner from '#lib/components/SetupBanner.svelte';
+	import { normalizeSetupStatus, setupBannerDismissed, setupStatus } from '#lib/setup.js';
+	import { setDisplayCurrency } from '#lib/utils/format.js';
 
 	let health = null;
 	let healthError = false;
 	let showHealthPopup = false;
-	let showAuthDialog = false;
-	let authToken = '';
+	/** loading | signed-out | password-change | ready | error */
+	let authState = 'loading';
 	let authError = '';
-	let authenticating = false;
+	let initialSecretErased = false;
+	let insecureRemote = false;
+	// Bumped after a sign-in so the current page remounts and reloads its data.
+	let authEpoch = 0;
+
+	const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 	const navItems = [
-		{ href: '/', label: 'Dashboard' },
+		{ href: '/', label: 'Overview' },
 		{ href: '/recommendations', label: 'Recommendations' },
+		{ href: '/changes', label: 'Changes' },
+		{ href: '/ledger', label: 'Ledger' },
+		{ href: '/footprint', label: 'Footprint' },
 		{ href: '/automation', label: 'Automation' },
-		{ href: '/report', label: 'Report' },
-		{ href: '/nodes', label: 'Nodes' },
+		{ href: '/sources', label: 'Sources' },
+		{ href: '/setup', label: 'Setup' },
 		{ href: '/settings', label: 'Settings' }
 	];
 
@@ -36,59 +58,129 @@
 			if (hasIssues && !$healthPopupDismissed) {
 				showHealthPopup = true;
 			}
-			return true;
-		} catch (error) {
-			if (error instanceof ApiError && error.status === 401) {
-				showAuthDialog = true;
-			}
-			return false;
+		} catch {
+			// The sidebar indicators stay empty; a 401 already switched to the sign-in view.
 		}
 	}
 
-	async function authenticate() {
-		const token = authToken.trim();
-		if (!token) {
-			authError = 'Enter an API key.';
+	async function refreshSetupStatus() {
+		try {
+			setupStatus.set(normalizeSetupStatus(await getSetupStatus()));
+		} catch {
+			// An older server (404) or a transient error: no banner rather than a wrong one.
+			setupStatus.set(null);
+		}
+	}
+
+	/**
+	 * Every amount is shown in the pricing currency (GET /config `currency`),
+	 * read before the pages render so none flashes a wrong symbol. A slow or
+	 * older server (no field) keeps USD after a short wait.
+	 */
+	async function loadDisplayCurrency() {
+		let timer;
+		try {
+			const config = await Promise.race([
+				getConfig(),
+				new Promise((resolve) => {
+					timer = setTimeout(() => resolve(null), 3000);
+				})
+			]);
+			setDisplayCurrency(config?.currency);
+		} catch {
+			// Keep the current currency; the pages still load.
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	async function enter(principal) {
+		currentUser.set(principal);
+		authError = '';
+		if (principal?.must_change_password) {
+			authState = 'password-change';
 			return;
 		}
-		authenticating = true;
-		authError = '';
-		setApiToken(token);
-		if (await refreshServicesHealth()) {
-			showAuthDialog = false;
-			authToken = '';
-		} else {
-			clearApiToken();
-			authError = 'The API key was rejected.';
+		await loadDisplayCurrency();
+		authState = 'ready';
+		authEpoch += 1;
+		refreshServicesHealth();
+		refreshSetupStatus();
+	}
+
+	async function loadPrincipal() {
+		authState = 'loading';
+		try {
+			enter(await getMe());
+		} catch (error) {
+			currentUser.set(null);
+			if (error instanceof ApiError && error.status === 401) {
+				authState = 'signed-out';
+			} else {
+				authState = 'error';
+				authError = error?.message || 'GreenKube is not reachable.';
+			}
 		}
-		authenticating = false;
+	}
+
+	/** Users and browsers signed in with an API key (F-09) have an account page and can sign out. */
+	function signsOut(principal) {
+		return principal?.kind === 'user' || principal?.kind === 'apikey';
+	}
+
+	function handleSignedIn(event) {
+		enter(event.detail);
+	}
+
+	function handlePasswordChanged(event) {
+		initialSecretErased = Boolean(event.detail?.initial_admin_secret_erased);
+		enter(event.detail);
 	}
 
 	function handleAuthRequired() {
-		showAuthDialog = true;
-		authError = '';
+		currentUser.set(null);
+		showHealthPopup = false;
+		authState = 'signed-out';
 	}
 
-	onMount(async () => {
-		window.addEventListener('greenkube-auth-required', handleAuthRequired);
+	function handlePasswordChangeRequired() {
+		authState = 'password-change';
+	}
+
+	async function signOut() {
 		try {
-			health = await getHealth();
+			await logout();
 		} catch {
-			healthError = true;
+			// The server session may already be gone; forget it locally anyway.
 		}
+		currentUser.set(null);
+		showHealthPopup = false;
+		authState = 'signed-out';
+	}
 
-		await refreshServicesHealth();
+	onMount(() => {
+		insecureRemote = window.location.protocol === 'http:' && !LOCAL_HOSTS.has(window.location.hostname);
+		window.addEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
+		window.addEventListener(PASSWORD_CHANGE_REQUIRED_EVENT, handlePasswordChangeRequired);
+		(async () => {
+			try {
+				health = await getHealth();
+				demoMode.set(health?.demo === true);
+			} catch {
+				healthError = true;
+			}
+		})();
+		loadPrincipal();
 
-		return () => window.removeEventListener('greenkube-auth-required', handleAuthRequired);
+		return () => {
+			window.removeEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
+			window.removeEventListener(PASSWORD_CHANGE_REQUIRED_EVENT, handlePasswordChangeRequired);
+		};
 	});
 
 	function handlePopupDismiss() {
 		showHealthPopup = false;
 		healthPopupDismissed.set(true);
-	}
-
-	function handlePopupUpdated(event) {
-		servicesHealth.set(event.detail);
 	}
 
 	function isActive(href, pathname) {
@@ -116,49 +208,58 @@
 	};
 </script>
 
-{#if showAuthDialog}
-	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70" role="presentation">
-		<div
-			class="w-full max-w-md rounded-2xl border border-dark-700/50 bg-dark-900 p-6 shadow-2xl"
-			role="dialog"
-			aria-modal="true"
-			aria-labelledby="api-auth-title"
-		>
-			<h2 id="api-auth-title" class="text-lg font-bold text-dark-100">API authentication required</h2>
-			<p class="mt-2 text-sm text-dark-400">
-				This GreenKube instance requires an API key. The key is kept in memory only.
-			</p>
-			<form class="mt-5 space-y-4" on:submit|preventDefault={authenticate}>
-				<label for="api-token" class="block text-sm font-medium text-dark-300">API key</label>
-				<input
-					id="api-token"
-					type="password"
-					bind:value={authToken}
-					autocomplete="off"
-					class="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-dark-100 outline-hidden focus:border-green-500"
-					placeholder="Paste the GreenKube API key"
-				/>
-				{#if authError}
-					<p class="text-sm text-red-400" role="alert">{authError}</p>
-				{/if}
-				<button
-					type="submit"
-					disabled={authenticating}
-					class="w-full rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-green-500 disabled:cursor-wait disabled:opacity-60"
-				>
-					{authenticating ? 'Connecting…' : 'Connect'}
-				</button>
-			</form>
-		</div>
+{#if authState === 'loading'}
+	<div class="flex h-screen items-center justify-center bg-dark-950 text-sm text-dark-500" role="status">
+		Loading…
 	</div>
-{/if}
-
+{:else if authState === 'signed-out' || authState === 'password-change' || authState === 'error'}
+	<div class="flex min-h-screen flex-col bg-dark-950">
+		{#if insecureRemote}
+			<div
+				class="border-b border-yellow-700/50 bg-yellow-900/40 px-4 py-2 text-center text-xs text-yellow-200"
+				role="status"
+				data-testid="tls-warning"
+			>
+				This connection is not encrypted (plain HTTP). Your password and session can be read on the
+				network: serve GreenKube over HTTPS (Ingress with TLS) for remote access.
+			</div>
+		{/if}
+		<main class="flex flex-1 items-center justify-center p-4">
+			<div class="w-full max-w-md rounded-2xl border border-dark-700/50 bg-dark-900 p-6 shadow-2xl">
+				<div class="mb-5 flex items-center gap-3">
+					<img src="/greenkube-logo.png" alt="" class="h-8 w-8 rounded-lg" />
+					<h1 class="text-lg font-bold text-dark-100">
+						{authState === 'password-change' ? 'Choose a new password' : 'Sign in to GreenKube'}
+					</h1>
+				</div>
+				{#if authState === 'signed-out'}
+					<LoginForm on:signedin={handleSignedIn} />
+				{:else if authState === 'password-change'}
+					<p class="mb-4 text-sm text-dark-400">
+						You signed in with the initial password. Choose your own password to continue; the
+						initial password then stops working and is erased from its Kubernetes Secret.
+					</p>
+					<PasswordChangeForm
+						username={$currentUser?.name || ''}
+						submitLabel="Save and continue"
+						on:changed={handlePasswordChanged}
+					/>
+					<button type="button" class="mt-3 text-xs text-dark-500 hover:text-dark-300" on:click={signOut}>
+						Sign out
+					</button>
+				{:else}
+					<p class="text-sm text-red-400" role="alert">{authError}</p>
+					<button type="button" class="btn-secondary mt-4 text-sm" on:click={loadPrincipal}>Retry</button>
+				{/if}
+			</div>
+		</main>
+	</div>
+{:else}
 <!-- Health Popup (shown once on first load if issues detected) -->
 <HealthPopup
 	services={$servicesHealth?.services}
-	visible={showHealthPopup}
+	visible={showHealthPopup && !$demoMode}
 	on:dismiss={handlePopupDismiss}
-	on:updated={handlePopupUpdated}
 />
 
 <div class="flex h-screen overflow-hidden">
@@ -171,18 +272,20 @@
 			{#if !$sidebarCollapsed}
 				<div class="overflow-hidden">
 					<h1 class="text-base font-bold text-dark-100 truncate">GreenKube</h1>
-					<p class="text-[10px] text-dark-500 truncate">FinGreenOps Platform</p>
+					<p class="text-[10px] text-dark-500 truncate">Kubernetes optimization loop</p>
 				</div>
 			{/if}
 		</div>
 
 		<!-- Navigation -->
-		<nav class="flex-1 py-4 px-2 space-y-1 overflow-y-auto">
+		<nav class="flex-1 py-4 px-2 space-y-1 overflow-y-auto" aria-label="Main">
 			{#each navItems as item}
 				<a
 					href={item.href}
+					aria-label={item.label}
+					aria-current={isActive(item.href, page.url.pathname) ? 'page' : undefined}
 					class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all duration-200
-					       {isActive(item.href, $page.url.pathname)
+					       {isActive(item.href, page.url.pathname)
 								? 'bg-green-600/15 text-green-400 font-medium'
 								: 'text-dark-400 hover:text-dark-200 hover:bg-dark-800'}"
 				>
@@ -196,8 +299,8 @@
 
 		<!-- Bottom section -->
 		<div class="p-3 border-t border-dark-700/50">
-			<!-- Service health indicators -->
-			{#if Object.keys(activeServices).length > 0}
+			<!-- Service health indicators (none in the demo: it has no cluster to connect to) -->
+			{#if !$demoMode && Object.keys(activeServices).length > 0}
 				<div class="space-y-1 mb-2">
 					{#each Object.entries(activeServices) as [name, svc]}
 						<div class="flex items-center gap-2 px-2 py-0.5" title="{svc.message}">
@@ -223,6 +326,61 @@
 				{/if}
 			</div>
 
+			{#if $currentUser}
+				<div class="mt-1 border-t border-dark-700/50 pt-2" data-testid="account-menu">
+					{#if $currentUser.kind === 'anonymous' && $demoMode}
+						{#if !$sidebarCollapsed}
+							<p class="px-2 text-[10px] text-dark-400" title="Demo mode: synthetic data, no cluster, pull requests disabled." data-testid="demo-badge">
+								Demo
+							</p>
+						{/if}
+					{:else if $currentUser.kind === 'anonymous'}
+						{#if !$sidebarCollapsed}
+							<p class="px-2 text-[10px] text-yellow-500" title="No account exists yet and no API key is configured.">
+								Sign-in disabled (development)
+							</p>
+						{/if}
+					{:else}
+						{#if !$sidebarCollapsed}
+							<p class="truncate px-2 text-xs text-dark-300" title={$currentUser.actor}>
+								{$currentUser.name}
+								{#if $currentUser.role}<span class="text-dark-500">· {$currentUser.role}</span>{/if}
+							</p>
+						{/if}
+						{#if signsOut($currentUser)}
+							<a
+								href="/settings/account"
+								class="block rounded-lg px-2 py-1 text-xs text-dark-500 hover:bg-dark-800 hover:text-dark-200"
+							>
+								{$sidebarCollapsed ? 'Acct' : $currentUser.kind === 'apikey' ? 'Account' : 'Account & sessions'}
+							</a>
+						{/if}
+						{#if hasScope($currentUser, 'admin')}
+							<a
+								href="/settings/api-keys"
+								class="block rounded-lg px-2 py-1 text-xs text-dark-500 hover:bg-dark-800 hover:text-dark-200"
+							>
+								{$sidebarCollapsed ? 'Keys' : 'API keys'}
+							</a>
+						{/if}
+						{#if signsOut($currentUser)}
+							<button
+								type="button"
+								on:click={signOut}
+								class="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-xs text-dark-500 transition-colors hover:bg-dark-800 hover:text-dark-200"
+								aria-label="Sign out"
+							>
+								<svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+										  d="M15 12H3m0 0l4-4m-4 4l4 4m6-10h5a2 2 0 012 2v12a2 2 0 01-2 2h-5" />
+								</svg>
+								{#if !$sidebarCollapsed}<span>Sign out</span>{/if}
+							</button>
+						{/if}
+					{/if}
+				</div>
+			{/if}
+
 			<!-- Collapse toggle -->
 			<button
 				on:click={() => sidebarCollapsed.update(v => !v)}
@@ -241,6 +399,27 @@
 
 	<!-- Main Content -->
 	<main class="flex-1 overflow-y-auto">
-		<slot />
+		{#if insecureRemote}
+			<div
+				class="border-b border-yellow-700/50 bg-yellow-900/40 px-4 py-2 text-center text-xs text-yellow-200"
+				role="status"
+				data-testid="tls-warning"
+			>
+				This connection is not encrypted (plain HTTP). Your password and session can be read on the
+				network: serve GreenKube over HTTPS (Ingress with TLS) for remote access.
+			</div>
+		{/if}
+		{#if initialSecretErased}
+			<div class="border-b border-green-700/40 bg-green-900/30 px-4 py-2 text-center text-xs text-green-300" role="status">
+				Password changed. The initial admin password was erased from its Kubernetes Secret.
+			</div>
+		{/if}
+		{#if !$demoMode && !$setupBannerDismissed && !page.url.pathname.startsWith('/setup')}
+			<SetupBanner status={$setupStatus} on:dismiss={() => setupBannerDismissed.set(true)} />
+		{/if}
+		{#key authEpoch}
+			<slot />
+		{/key}
 	</main>
 </div>
+{/if}

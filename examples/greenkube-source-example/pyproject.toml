@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "greenkube-source-example"
+version = "0.1.0"
+description = "Example third-party GreenKube recommendation source (Source SDK)."
+requires-python = ">=3.13"
+license = "Apache-2.0"
+# The SDK (greenkube.signals) ships with GreenKube: install this package into
+# the environment GreenKube runs in (its container image), not on its own.
+dependencies = []
+
+# GreenKube discovers sources through this entry-point group.
+[project.entry-points."greenkube.sources"]
+"example.file" = "greenkube_source_example:FileSource"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/greenkube_source_example"]

@@ -11,28 +11,33 @@ version = "0.3.1"
 authors = [
   { name = "Hugo Lelievre", email = "hugo.lelievre@greenkube.cloud" },
 ]
-description = "Open-source FinGreenOps platform for Kubernetes - measure CO2e emissions, energy usage, cloud costs, and get optimization recommendations."
+description = "Open-source Kubernetes optimization loop: aggregate recommendations (GreenKube, VPA, Goldilocks, Karpenter), deliver them as GitOps pull requests, and measure the cost and CO2e savings each change realizes."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.13"
 keywords = [
     "kubernetes",
+    "k8s",
+    "optimization",
+    "rightsizing",
+    "gitops",
+    "argocd",
+    "flux",
+    "pull-request",
+    "vpa",
+    "karpenter",
+    "finops",
+    "cloud-cost",
+    "greenops",
     "carbon",
     "co2",
-    "sustainability",
-    "finops",
-    "greenops",
-    "fingreenops",
     "carbon-footprint",
-    "cloud-cost",
-    "prometheus",
-    "energy",
-    "k8s",
-    "devops",
-    "sre",
+    "sustainability",
     "green-software",
-    "carbon-monitoring",
-    "cloud-sustainability",
+    "prometheus",
+    "opencost",
+    "sre",
+    "devops",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -60,21 +65,19 @@ dependencies = [
     "typer>=0.9.0", # For building a clean command-line interface (CLI)
     "httpx>=0.25.0",  # Async HTTP client
     "pydantic>=2.4.0",   # For data validation and modeling
-    "rich>=13.5.0",      # For displaying beautiful tables and text in the terminal
     "pydantic-settings>=2.3.0", # For settings management via env vars, .env files, and secrets
     "asyncpg>=0.28.0", # Async PostgreSQL database adapter
     "aiosqlite>=0.19.0", # Async SQLite driver
     "kubernetes_asyncio>=28.0.0", # Async Kubernetes client
-    "anyio>=4.0.0", # High level async library
     "aiofiles>=23.2.0", # Async file I/O
     "fastapi>=0.109.0", # Web API framework
     "uvicorn[standard]>=0.25.0", # ASGI server for FastAPI
     "prometheus_client>=0.19.0", # Prometheus metrics exposition
     "limits>=3.0", # Sliding-window rate limiting
     "packaging>=23.0", # Required by limits on Python 3.14+
-    "pyrefly>=1.1.1",
     "structlog>=24.1.0",
     "ruamel.yaml>=0.18.0", # Round-trip YAML editing for the GitOps PR bot
+    "cryptography>=43.0.0", # RS256 JSON Web Tokens for GitHub App authentication
 ]
 
 [project.urls]
@@ -121,6 +124,7 @@ test = [
 ]
 dev = [
     "pre-commit",
+    "pyrefly>=1.1.1",
     "ruff",
     "toml",
     "ruamel.yaml",
@@ -152,9 +156,17 @@ omit = [
     "*/greenkube/data/*",
 ]
 
+[tool.coverage.paths]
+# CI combines the coverage data of its test shards: map an installed copy of
+# the package onto the source tree.
+source = [
+    "src/greenkube",
+    "*/site-packages/greenkube",
+]
+
 [tool.coverage.report]
-# Fail if total coverage drops below this percentage
-fail_under = 70
+# Fail if total coverage drops below this percentage (enforced by pytest-cov in CI)
+fail_under = 80
 show_missing = true
 skip_covered = false
 
@@ -165,3 +177,4 @@ project-includes = [
 ]
 # scripts/leads is a local, gitignored commercial tool — not part of the project.
 project-excludes = ["scripts/leads/**"]
+search-path = ["src", "examples/greenkube-source-example/src"]

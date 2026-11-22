@@ -54,3 +54,21 @@ class TestConfigEndpoint:
         assert "password" not in raw
         assert "secret" not in raw
         assert "bearer" not in raw
+
+    def test_config_exposes_the_pricing_currency(self, client, monkeypatch):
+        """The UI formats every amount in the pricing currency (no hard-coded '$')."""
+        from greenkube.core.config import get_config
+
+        monkeypatch.setattr(get_config(), "IMPACT_PRICING_CURRENCY", "EUR", raising=False)
+
+        data = client.get("/api/v1/config").json()
+
+        assert data["currency"] == "EUR"
+
+    def test_config_exposes_the_vintage_of_the_bundled_intensity_defaults(self, client):
+        """Rows computed with defaults use annual means of this year (NRG-04)."""
+        from greenkube.data.electricity_maps_regions_grid_intensity_default import DEFAULT_INTENSITY_YEAR
+
+        data = client.get("/api/v1/config").json()
+
+        assert data["intensity_defaults_year"] == DEFAULT_INTENSITY_YEAR == 2024

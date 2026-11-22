@@ -696,7 +696,7 @@ data:
             [binary, "version", "--short"],
             workspace=snapshot.workspace,
             cwd=snapshot.workspace,
-            timeout_seconds=5,
+            timeout_seconds=30,
             max_stdout_bytes=1_024,
             max_stderr_bytes=1_024,
         )
@@ -715,5 +715,102 @@ data:
         assert result.resources[0].source_path == "charts/demo/templates/configmap.yaml"
         assert result.resources[0].manifest["data"]["mode"] == "prod"
         assert result.resources[0].manifest["metadata"]["namespace"] == "prod"
+    finally:
+        snapshot.close()
+
+
+def _vendored_chart_files(*, vendored: bool = True, template: str = "{{- /* static */ -}}\n") -> dict[str, str]:
+    files = {
+        "staged/web/Chart.yaml": (
+            "apiVersion: v2\nname: web\nversion: 1.0.0\ndependencies:\n"
+            "  - name: common\n    repository: oci://registry-1.docker.io/bitnamicharts\n    version: 2.x.x\n"
+        ),
+        "staged/web/Chart.lock": (
+            "dependencies:\n  - name: common\n    repository: oci://registry-1.docker.io/bitnamicharts\n"
+            "    version: 2.27.0\n"
+        ),
+        "staged/web/templates/configmap.yaml": template,
+    }
+    if vendored:
+        files["staged/web/charts/common/Chart.yaml"] = "apiVersion: v2\nname: common\nversion: 2.27.0\ntype: library\n"
+        files["staged/web/charts/common/templates/_secrets.tpl"] = (
+            '{{- define "common.secret" -}}{{ randAlphaNum 10 }}{{ lookup "v1" "Secret" "ns" "name" }}{{- end -}}\n'
+        )
+    return files
+
+
+def test_remote_charts_accept_vendored_dependencies_and_skip_the_static_scan():
+    snapshot = _snapshot(_vendored_chart_files())
+    runner = _FakeRunner()
+
+    try:
+        with pytest.raises(HelmRemoteReferenceError):
+            HelmRenderer(expected_version=_VERSION, runner=_FakeRunner()).render(
+                snapshot, "staged/web", release_name="web", namespace="prod"
+            )
+        result = HelmRenderer(expected_version=_VERSION, runner=runner).render(
+            snapshot, "staged/web", release_name="web", namespace="prod", remote_chart=True
+        )
+
+        assert result.resources[0].target.name == "settings"
+        templates = [call for call in runner.calls if call.argv[1] == "template"]
+        assert len(templates) == 2
+    finally:
+        snapshot.close()
+
+
+def test_remote_charts_must_vendor_every_remote_dependency():
+    snapshot = _snapshot(_vendored_chart_files(vendored=False))
+
+    try:
+        with pytest.raises(HelmRemoteReferenceError, match="not vendored"):
+            HelmRenderer(expected_version=_VERSION, runner=_FakeRunner()).render(
+                snapshot, "staged/web", release_name="web", namespace="prod", remote_chart=True
+            )
+    finally:
+        snapshot.close()
+
+
+class _NondeterministicRunner(_FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.renders = 0
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        workspace: Path,
+        cwd: Path,
+        timeout_seconds: float,
+        max_stdout_bytes: int,
+        max_stderr_bytes: int,
+    ) -> SandboxResult:
+        result = super().run(
+            argv,
+            workspace=workspace,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            max_stdout_bytes=max_stdout_bytes,
+            max_stderr_bytes=max_stderr_bytes,
+        )
+        if tuple(argv)[1] != "template":
+            return result
+        self.renders += 1
+        return SandboxResult(
+            returncode=0,
+            stdout=_RESOURCE.replace("stable", f"random-{self.renders}").encode(),
+            stderr=b"",
+        )
+
+
+def test_remote_charts_with_nondeterministic_output_fail_closed():
+    snapshot = _snapshot(_vendored_chart_files())
+
+    try:
+        with pytest.raises(HelmClusterDependentError, match="nondeterministic-chart-render"):
+            HelmRenderer(expected_version=_VERSION, runner=_NondeterministicRunner()).render(
+                snapshot, "staged/web", release_name="web", namespace="prod", remote_chart=True
+            )
     finally:
         snapshot.close()

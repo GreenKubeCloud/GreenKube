@@ -34,6 +34,8 @@ _SCD_COMPARE_COLS = (
     "memory_capacity_bytes",
     "is_active",
     "embodied_emissions_kg",
+    "host_id",
+    "provider_id",
 )
 
 
@@ -66,7 +68,7 @@ class SQLiteNodeRepository(NodeRepository):
                         SELECT id, instance_type, cpu_capacity_cores, architecture,
                                cloud_provider, region, zone, node_pool,
                                is_active,
-                               memory_capacity_bytes, embodied_emissions_kg
+                               memory_capacity_bytes, embodied_emissions_kg, host_id, provider_id
                         FROM node_snapshots_scd
                         WHERE node_name = ? AND is_current = 1
                         """,
@@ -85,6 +87,15 @@ class SQLiteNodeRepository(NodeRepository):
                                 break
 
                         if not changed:
+                            # Unchanged: the version is confirmed until this observation (review 1).
+                            await conn.execute(
+                                """
+                                UPDATE node_snapshots_scd
+                                SET last_seen = CASE WHEN last_seen IS NULL OR last_seen < ? THEN ? ELSE last_seen END
+                                WHERE id = ?
+                                """,
+                                (ts, ts, current["id"]),
+                            )
                             continue
 
                         # Close the current record
@@ -104,8 +115,8 @@ class SQLiteNodeRepository(NodeRepository):
                             node_name, instance_type, cpu_capacity_cores,
                             architecture, cloud_provider, region, zone, node_pool,
                             memory_capacity_bytes, is_active, embodied_emissions_kg,
-                            valid_from, valid_to, is_current
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)
+                            valid_from, valid_to, is_current, last_seen, host_id, provider_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, ?)
                         """,
                         (
                             node.name,
@@ -120,6 +131,9 @@ class SQLiteNodeRepository(NodeRepository):
                             node.is_active,
                             node.embodied_emissions_kg,
                             ts,
+                            ts,
+                            node.host_id,
+                            node.provider_id,
                         ),
                     )
                     new_records += 1
@@ -182,8 +196,8 @@ class SQLiteNodeRepository(NodeRepository):
                     """
                     SELECT node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                              memory_capacity_bytes, is_active, embodied_emissions_kg,
-                           valid_from
+                              memory_capacity_bytes, is_active, embodied_emissions_kg, host_id, provider_id,
+                           valid_from, COALESCE(valid_to, last_seen) AS confirmed_until
                     FROM node_snapshots_scd
                     WHERE valid_from <= ?
                       AND (valid_to IS NULL OR valid_to >= ?)
@@ -212,6 +226,9 @@ class SQLiteNodeRepository(NodeRepository):
                                     is_active=bool(row["is_active"]),
                                     timestamp=parse_iso_date(row["valid_from"]),
                                     embodied_emissions_kg=row["embodied_emissions_kg"],
+                                    host_id=row["host_id"],
+                                    provider_id=row["provider_id"],
+                                    confirmed_until=parse_iso_date(row["confirmed_until"]),
                                 ),
                             )
                         )
@@ -282,8 +299,8 @@ class SQLiteNodeRepository(NodeRepository):
                     f"""
                     SELECT node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                           memory_capacity_bytes, is_active, embodied_emissions_kg,
-                           valid_from
+                           memory_capacity_bytes, is_active, embodied_emissions_kg, host_id, provider_id,
+                           valid_from, COALESCE(valid_to, last_seen) AS confirmed_until
                     FROM node_snapshots_scd
                     WHERE {" AND ".join(conditions)}
                     ORDER BY valid_from DESC
@@ -313,6 +330,9 @@ class SQLiteNodeRepository(NodeRepository):
                                     is_active=bool(row["is_active"]),
                                     timestamp=parse_iso_date(row["valid_from"]),
                                     embodied_emissions_kg=row["embodied_emissions_kg"],
+                                    host_id=row["host_id"],
+                                    provider_id=row["provider_id"],
+                                    confirmed_until=parse_iso_date(row["confirmed_until"]),
                                 )
                             )
                     return results

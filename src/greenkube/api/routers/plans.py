@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+import re
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, ConfigDict, Field
 
 from greenkube.api.dependencies import (
     AutomationPlanApiService,
     get_authenticated_actor,
     get_automation_plan_service,
+    get_recommendation_repository,
+    require_scope,
 )
 from greenkube.api.schemas import (
     AutomationPlanApproveRequest,
@@ -22,8 +25,12 @@ from greenkube.api.schemas import (
     AutomationPlanSourceResponse,
     AutomationPlanValidationResponse,
 )
-from greenkube.automation.plans import AutomationPlanError
-from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus
+from greenkube.auth.principal import Scope
+from greenkube.automation.plans import AutomationPlanError, ensure_recommendations_active, maybe_auto_approve
+from greenkube.core.config import get_config
+from greenkube.core.optimization.eligibility import AutoApprovePolicy
+from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus, public_repository_url
+from greenkube.storage.base_repository import RecommendationRepository
 
 router = APIRouter()
 
@@ -45,7 +52,12 @@ _DOMAIN_ERRORS: dict[AutomationErrorCode, tuple[int, str]] = {
     AutomationErrorCode.AMBIGUOUS_BINDING: (422, "The workload does not have one unambiguous resolved binding."),
     AutomationErrorCode.NEEDS_CHART_MAPPING: (422, "The workload requires a supported chart mapping before planning."),
     AutomationErrorCode.RENDER_VALIDATION_FAILED: (422, "The plan did not pass render validation."),
+    AutomationErrorCode.NO_EFFECTIVE_CHANGE: (
+        409,
+        "The source already declares the proposed requests; a pull request would change nothing.",
+    ),
     AutomationErrorCode.REQUIRES_CONTAINER_TARGET: (422, "The action requires a supported container target."),
+    AutomationErrorCode.NOT_ACTIVE: (409, "Only active recommendations can be planned."),
     AutomationErrorCode.UNSAFE_PATH: (422, "The plan contains an unsafe repository path."),
     AutomationErrorCode.PROVIDER_NOT_READY: (424, "A required Git provider dependency is not ready."),
     AutomationErrorCode.PROVIDER_CAPABILITY_MISSING: (424, "The configured Git provider lacks a required capability."),
@@ -60,6 +72,10 @@ _DOMAIN_ERRORS: dict[AutomationErrorCode, tuple[int, str]] = {
         "The recommendation confidence is below the configured minimum.",
     ),
     AutomationErrorCode.CHANGE_FREEZE_ACTIVE: (409, "A configured change freeze is active for this workload."),
+    AutomationErrorCode.DELIVERY_PAUSED: (
+        409,
+        "Pull-request delivery is paused by policy (automation.policy.pauseDelivery).",
+    ),
     AutomationErrorCode.WORKLOAD_PR_LIMIT_EXCEEDED: (429, "The workload has reached its open pull-request limit."),
     AutomationErrorCode.WORKLOAD_COOLDOWN_ACTIVE: (429, "The workload is inside its configured change cooldown."),
     AutomationErrorCode.WORKLOAD_PLAN_ALREADY_EXISTS: (409, "Another plan for this workload is still active."),
@@ -73,11 +89,45 @@ _DOMAIN_ERRORS: dict[AutomationErrorCode, tuple[int, str]] = {
     AutomationErrorCode.ROLLBACK_UNSUPPORTED: (422, "This plan cannot be reversed safely."),
     AutomationErrorCode.ROLLBACK_CONFLICT: (409, "The original plan or current source changed."),
 }
+#: Codes whose message is the planner's own explanation of the targeting, binding, source or
+#: render decision (written by GreenKube, redacted before it is returned). Provider, policy and
+#: chart-mapping errors keep their stable detail only: they have structured fields or may quote
+#: provider responses.
+_PUBLIC_REASON_CODES = frozenset(
+    {
+        AutomationErrorCode.PLAN_STALE,
+        AutomationErrorCode.PLAN_EXPIRED,
+        AutomationErrorCode.SOURCE_CHANGED,
+        AutomationErrorCode.REVISION_CONFLICT,
+        AutomationErrorCode.UNSUPPORTED_SOURCE,
+        AutomationErrorCode.AMBIGUOUS_BINDING,
+        AutomationErrorCode.RENDER_VALIDATION_FAILED,
+        AutomationErrorCode.NO_EFFECTIVE_CHANGE,
+        AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
+        AutomationErrorCode.NOT_ACTIVE,
+        AutomationErrorCode.UNSAFE_PATH,
+        AutomationErrorCode.ROLLBACK_NOT_READY,
+        AutomationErrorCode.ROLLBACK_UNSUPPORTED,
+        AutomationErrorCode.ROLLBACK_CONFLICT,
+    }
+)
 _CANCELLABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
+_MAX_PUBLIC_WARNINGS = 20
+_MAX_PUBLIC_WARNING_CHARS = 300
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]+")
+_URL_CREDENTIALS = re.compile(r"(?P<scheme>\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@")
+_URL_QUERY = re.compile(r"(?P<url>\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s?#]+)\?[^\s#]*")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?P<key>\b(?:token|password|passwd|secret|api[_-]?key|access[_-]?token|authorization|credentials?)\b)"
+    r"(?P<separator>\s*[=:]\s*)[^\s,;]+",
+    re.IGNORECASE,
+)
+_PROVIDER_TOKEN = re.compile(r"\b(?:ghp|gho|ghs|ghu|ghr|github_pat|glpat)_[A-Za-z0-9_]{8,}\b")
 
 
 @router.post(
     "/automation/plans",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
     response_model=AutomationPlanResponse,
     status_code=201,
     responses=_ERROR_RESPONSES,
@@ -86,11 +136,19 @@ async def create_automation_plan(
     request: AutomationPlanCreateRequest,
     http_request: Request,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
+    recommendations: RecommendationRepository = Depends(get_recommendation_repository),
 ) -> AutomationPlanResponse | JSONResponse:
-    """Prepare a plan from persisted recommendation actions and resolved sources."""
+    """Prepare a plan from persisted recommendation actions and resolved sources.
+
+    With ``automation.autoApprove`` (F5), a preview that meets the policy is approved in
+    the same request on behalf of the requester (who needs the ``approve`` scope);
+    otherwise ``auto_approve_blockers`` says why it waits for the approval click.
+    """
     if service is None:
         return _service_unavailable("plan_preparation_unavailable", "Server-side plan preparation is not configured.")
     try:
+        # A dismissed, applied or expired recommendation is "not_active", not a targeting problem.
+        await ensure_recommendations_active(recommendations, request.recommendation_ids)
         if request.values_mapping is None:
             plan = await service.prepare_plan(
                 request.recommendation_ids,
@@ -103,8 +161,30 @@ async def create_automation_plan(
                 values_mapping=request.values_mapping.model_dump(mode="python"),
             )
     except AutomationPlanError as error:
-        return _domain_error_response(error)
-    return _plan_response(plan)
+        return _domain_error_response(error, with_reason=True)
+    policy = AutoApprovePolicy.from_config(get_config())
+    if not policy.enabled:
+        return _plan_response(plan)
+    records = []
+    for recommendation_id in plan.recommendation_ids:
+        try:
+            record = await recommendations.get_recommendation_by_id(recommendation_id)
+        except Exception:
+            record = None
+        if record is not None:
+            records.append(record)
+    principal = getattr(http_request.state, "principal", None)
+    approved, blockers = await maybe_auto_approve(
+        service,
+        plan,
+        records,
+        actor=get_authenticated_actor(http_request),
+        policy=policy,
+        may_approve=bool(principal is not None and principal.has_scope(Scope.APPROVE.value)),
+    )
+    operation = await service.read_operation_for_plan(approved.plan_id) if not blockers else None
+    response = _plan_response(approved, operation)
+    return response.model_copy(update={"auto_approved": not blockers, "auto_approve_blockers": blockers})
 
 
 @router.get(
@@ -130,6 +210,7 @@ async def get_automation_plan(
 
 @router.post(
     "/automation/plans/{plan_id}/rollback-preview",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
     response_model=AutomationPlanResponse,
     status_code=201,
     responses=_ERROR_RESPONSES,
@@ -146,12 +227,13 @@ async def preview_automation_plan_rollback(
     try:
         plan = await service.prepare_rollback(plan_id)
     except AutomationPlanError as error:
-        return _domain_error_response(error)
+        return _domain_error_response(error, with_reason=True)
     return _plan_response(plan)
 
 
 @router.post(
     "/automation/plans/{plan_id}/approve",
+    dependencies=[Depends(require_scope(Scope.APPROVE))],
     response_model=AutomationPlanResponse,
     status_code=202,
     responses=_ERROR_RESPONSES,
@@ -181,6 +263,7 @@ async def approve_automation_plan(
 
 @router.post(
     "/automation/plans/{plan_id}/cancel",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
     response_model=AutomationPlanResponse,
     responses=_ERROR_RESPONSES,
 )
@@ -189,7 +272,7 @@ async def cancel_automation_plan(
     http_request: Request,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
 ) -> AutomationPlanResponse | JSONResponse:
-    """Invalidate a plan before it starts applying."""
+    """Cancel a plan before it starts applying: it becomes ``cancelled``, reason ``cancelled_by_user``."""
     if service is None:
         return _service_unavailable(
             "plan_service_unavailable", "Server-side automation plan service is not configured."
@@ -197,16 +280,12 @@ async def cancel_automation_plan(
     plan = await service.read_plan(plan_id)
     if plan is None:
         return _error_response(404, "plan_not_found", "Automation plan not found.")
-    if plan.status is PlanStatus.STALE:
+    if plan.status in {PlanStatus.STALE, PlanStatus.CANCELLED}:
         return _plan_response(plan)
     if plan.status not in _CANCELLABLE_STATUSES:
         return _error_response(409, AutomationErrorCode.PLAN_STALE.value, "Only non-applying plans can be cancelled.")
     try:
-        cancelled = await service.mark_stale(
-            plan_id,
-            actor=get_authenticated_actor(http_request),
-            reason_code="cancelled_by_user",
-        )
+        cancelled = await service.cancel_by_user(plan_id, actor=get_authenticated_actor(http_request))
     except AutomationPlanError as error:
         return _domain_error_response(error)
     if cancelled is None:
@@ -214,13 +293,105 @@ async def cancel_automation_plan(
     return _plan_response(cancelled)
 
 
+class AutomationPlanAbandonRequest(BaseModel):
+    """Why an operator abandons a stuck plan; recorded in the audit trail."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@router.post(
+    "/automation/plans/{plan_id}/abandon",
+    dependencies=[Depends(require_scope(Scope.APPROVE))],
+    response_model=AutomationPlanResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def abandon_automation_plan(
+    plan_id: str,
+    http_request: Request,
+    request: AutomationPlanAbandonRequest | None = None,
+    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
+) -> AutomationPlanResponse | JSONResponse:
+    """Fail a plan stuck in APPLYING (operator or admin; audited).
+
+    Cancels its operation unless a worker holds a live lease on it, closes its pending
+    pull-request records and releases the recommendations so they can be re-planned.
+    Refused when a pull request was already recorded for the plan: close that request on
+    the provider instead.
+    """
+    if service is None:
+        return _service_unavailable(
+            "plan_service_unavailable", "Server-side automation plan service is not configured."
+        )
+    abandon = getattr(service, "abandon_plan", None)
+    if not callable(abandon):
+        return _service_unavailable("plan_abandon_unavailable", "Server-side plan abandon is not configured.")
+    try:
+        abandoned = await cast(Any, abandon)(
+            plan_id,
+            actor=get_authenticated_actor(http_request),
+            reason=request.reason if request is not None else None,
+        )
+    except AutomationPlanError as error:
+        if error.code is AutomationErrorCode.PLAN_STALE:
+            return _error_response(409, AutomationErrorCode.PLAN_STALE.value, str(error.detail))
+        return _domain_error_response(error)
+    if abandoned is None:
+        return _error_response(404, "plan_not_found", "Automation plan not found.")
+    operation = await service.read_operation_for_plan(plan_id)
+    return _plan_response(abandoned, operation)
+
+
+@router.delete(
+    "/automation/plans/{plan_id}",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
+    status_code=204,
+    response_class=Response,
+    responses=_ERROR_RESPONSES,
+)
+async def delete_automation_plan(
+    plan_id: str,
+    http_request: Request,
+    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
+) -> Response:
+    """Cancel an unapproved preview: a DRAFT or VALIDATED plan becomes SUPERSEDED.
+
+    Called by the UI when a preview is dismissed so re-opening it never returns 409.
+    Deleting an already superseded plan is a no-op; any other status returns 409.
+    """
+    if service is None:
+        return _service_unavailable(
+            "plan_service_unavailable", "Server-side automation plan service is not configured."
+        )
+    cancel = getattr(service, "cancel_plan", None)
+    if not callable(cancel):
+        return _service_unavailable("plan_cancel_unavailable", "Server-side plan cancellation is not configured.")
+    try:
+        cancelled = await cast(Any, cancel)(plan_id, actor=get_authenticated_actor(http_request))
+    except AutomationPlanError as error:
+        if error.code is AutomationErrorCode.PLAN_STALE:
+            return _error_response(
+                409,
+                AutomationErrorCode.PLAN_STALE.value,
+                "Only draft or validated plans can be cancelled.",
+            )
+        return _domain_error_response(error)
+    if cancelled is None:
+        return _error_response(404, "plan_not_found", "Automation plan not found.")
+    return Response(status_code=204)
+
+
 def _plan_response(plan: Plan, operation: Operation | None = None) -> AutomationPlanResponse:
     file_plan = plan.file_plan
-    validation = file_plan.validation if file_plan is not None else None
+    # Retention may have pruned file contents; the summary keeps paths and validation (D2).
+    rendered = file_plan if file_plan is not None else plan.file_plan_summary
+    validation = rendered.validation if rendered is not None else None
     return AutomationPlanResponse(
         plan_id=plan.plan_id,
         recommendation_ids=plan.recommendation_ids,
         status=plan.status,
+        status_reason=plan.status_reason,
         digest=plan.digest,
         policy_result=plan.policy_result,
         operation_id=operation.operation_id if operation is not None else None,
@@ -228,9 +399,9 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
         rollback_of_plan_id=plan.rollback_of_plan_id,
         source=AutomationPlanSourceResponse(
             controller=f"{plan.source.controller_kind.value}/{plan.source.controller_name}",
-            repo=_safe_repository_url(plan.source.repo_url),
+            repo=public_repository_url(plan.source.repo_url),
             base_branch=plan.source.ref,
-            base_revision=file_plan.base_revision if file_plan is not None else None,
+            base_revision=rendered.base_revision if rendered is not None else None,
             path=plan.source.path,
             renderer=plan.source.renderer,
         ),
@@ -240,14 +411,14 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
                 operation=edit.operation,
                 original_sha=edit.original_sha,
             )
-            for edit in file_plan.files
+            for edit in rendered.files
         ]
-        if file_plan is not None
+        if rendered is not None
         else [],
         diff=file_plan.diff if file_plan is not None else None,
         rendered_diff=file_plan.rendered_diff if file_plan is not None else None,
-        warnings=["render-warning"] * min(len(file_plan.warnings), 20) if file_plan is not None else [],
-        warnings_truncated=bool(file_plan and len(file_plan.warnings) > 20),
+        warnings=_public_warnings(rendered.warnings) if rendered is not None else [],
+        warnings_truncated=bool(rendered is not None and len(rendered.warnings) > _MAX_PUBLIC_WARNINGS),
         validation=(
             AutomationPlanValidationResponse(
                 passed=validation.passed,
@@ -262,36 +433,53 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
         ),
         created_at=plan.created_at,
         expires_at=plan.expires_at,
+        delivery_mode=plan.delivery_mode,
     )
 
 
-def _safe_repository_url(value: str) -> str:
-    if value == "unresolved":
-        return value
-    try:
-        parts = urlsplit(value)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return "redacted"
-    if parts.scheme.lower() not in {"http", "https", "ssh", "git"} or not host:
-        return "redacted"
-    netloc = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    if port is not None:
-        netloc = f"{netloc}:{port}"
-    return urlunsplit((parts.scheme.lower(), netloc, parts.path, "", ""))
+def _public_warnings(warnings: list[str]) -> list[str]:
+    """Return renderer warnings with credentials redacted and length bounded (D12, BUG-56).
+
+    Renderer warnings name repository paths and manifest keys, never values; URL
+    credentials, query strings and ``secret=value`` pairs are still redacted defensively.
+    """
+    public: list[str] = []
+    for warning in warnings[:_MAX_PUBLIC_WARNINGS]:
+        if not isinstance(warning, str):
+            continue
+        text = _public_text(warning)
+        if text:
+            public.append(text)
+    return public
 
 
-def _domain_error_response(error: AutomationPlanError) -> JSONResponse:
+def _public_text(value: str) -> str:
+    """``value`` with credentials, query strings and tokens redacted, on one line and bounded."""
+    text = _CONTROL_CHARACTERS.sub(" ", value)
+    text = _URL_CREDENTIALS.sub(r"\g<scheme>[redacted]@", text)
+    text = _URL_QUERY.sub(r"\g<url>?[redacted]", text)
+    text = _SECRET_ASSIGNMENT.sub(r"\g<key>\g<separator>[redacted]", text)
+    text = _PROVIDER_TOKEN.sub("[redacted]", text).strip()
+    if len(text) > _MAX_PUBLIC_WARNING_CHARS:
+        text = text[: _MAX_PUBLIC_WARNING_CHARS - 3] + "..."
+    return text
+
+
+def _domain_error_response(error: AutomationPlanError, *, with_reason: bool = False) -> JSONResponse:
+    """The stable error body; ``with_reason`` adds the planner's redacted explanation (plan creation, preview)."""
     status_code, detail = _DOMAIN_ERRORS.get(
         error.code,
         (422, "The automation plan request could not be completed."),
     )
     mapping_options = error.mapping_options if error.code is AutomationErrorCode.NEEDS_CHART_MAPPING else None
+    reason = None
+    if with_reason and error.code in _PUBLIC_REASON_CODES and isinstance(error.detail, str):
+        reason = _public_text(error.detail) or None
     return _error_response(
         status_code,
         error.code.value,
         detail,
+        reason=reason,
         policy_result=error.policy_result,
         mapping_options=mapping_options,
     )
@@ -306,12 +494,14 @@ def _error_response(
     code: str,
     detail: str,
     *,
+    reason: str | None = None,
     policy_result: dict[str, Any] | None = None,
     mapping_options: dict[str, list[str]] | None = None,
 ) -> JSONResponse:
     body = AutomationPlanErrorResponse(
         code=code,
         detail=detail,
+        reason=reason,
         policy_result=policy_result,
         mapping_options=mapping_options,
     ).model_dump(mode="json", exclude_none=True)

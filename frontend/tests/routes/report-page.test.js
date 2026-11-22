@@ -3,10 +3,11 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/svelte';
-import ReportPage from '../../src/routes/report/+page.svelte';
+import { downloadReport } from '#lib/api.js';
+import ReportPage from '../../src/routes/footprint/report/+page.svelte';
 
 
-vi.mock('$lib/api.js', () => ({
+vi.mock('#lib/api.js', () => ({
 	getNamespaces: vi.fn(() => Promise.resolve(['default', 'prod'])),
 	getReportYears: vi.fn(() => Promise.resolve([2026, 2025])),
 	getReportSummary: vi.fn(() => Promise.resolve({
@@ -66,5 +67,20 @@ describe('ReportPage', () => {
 		render(ReportPage);
 		expect(await screen.findByRole('button', { name: 'Pod' })).toBeInTheDocument();
 		expect(screen.getByRole('button', { name: 'Namespace' })).toBeInTheDocument();
+	});
+
+	it('exports without the node idle share unless the checkbox is ticked', async () => {
+		render(ReportPage);
+		const checkbox = await screen.findByRole('checkbox', { name: /Include node idle share/i });
+		expect(checkbox).not.toBeChecked();
+		await fireEvent.click(screen.getByRole('button', { name: /Download CSV Report/ }));
+		await vi.waitFor(() => expect(downloadReport).toHaveBeenCalledTimes(1));
+		expect(downloadReport.mock.calls[0][0].include_idle).toBeUndefined();
+
+		await fireEvent.click(checkbox);
+		expect(screen.getByText(/do not sum all rows/i)).toBeInTheDocument();
+		await fireEvent.click(screen.getByRole('button', { name: /Download CSV Report/ }));
+		await vi.waitFor(() => expect(downloadReport).toHaveBeenCalledTimes(2));
+		expect(downloadReport.mock.calls[1][0].include_idle).toBe(true);
 	});
 });

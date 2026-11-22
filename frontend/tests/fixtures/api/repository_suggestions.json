@@ -1,0 +1,18 @@
+{
+  "suggestions": [
+    {
+      "allowlisted": true,
+      "api_base_url": null,
+      "inferred_from": "host",
+      "provider_type": "github",
+      "repo_url": "https://github.com/acme/gitops.git"
+    },
+    {
+      "allowlisted": false,
+      "api_base_url": "https://gitea.example.com/api/v1",
+      "inferred_from": "probe",
+      "provider_type": "gitea",
+      "repo_url": "https://gitea.example.com/platform/apps.git"
+    }
+  ]
+}

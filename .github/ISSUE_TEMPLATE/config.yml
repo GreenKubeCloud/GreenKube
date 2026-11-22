@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/GreenKubeCloud/GreenKube/security/advisories/new
+    about: Never open a public issue for a vulnerability; see SECURITY.md.
+  - name: Documentation
+    url: https://github.com/GreenKubeCloud/GreenKube/tree/main/docs
+    about: Installation, configuration, the first pull request and troubleshooting.

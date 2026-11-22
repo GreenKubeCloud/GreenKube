@@ -1,21 +1,38 @@
 /**
  * GreenKube API client.
- * 
+ *
  * The API base URL is resolved at runtime:
  * - In development, Vite proxies /api to localhost:8000
- * - In production (K8s), NGINX proxies /api to the greenkube-api service
+ * - In production (K8s), the API serves the UI from the same origin
+ *
+ * Browsers authenticate with the HttpOnly session cookie set by
+ * POST /auth/login (F14); the client never sees or stores it. Mutations send
+ * the session's CSRF token, learnt from /auth/me or the sign-in response and
+ * kept in memory only. Machines use Bearer API keys directly, not this client;
+ * in API_AUTH_MODE=api_key a browser exchanges its key for the same kind of
+ * HttpOnly cookie (POST /auth/api-key-login).
  */
 
 const BASE = '/api/v1';
-let apiToken = '';
 
-/** Set a request-scoped bearer token without persisting it in browser storage. */
-export function setApiToken(token) {
-	apiToken = typeof token === 'string' ? token : '';
+/** Window event dispatched when the API rejects the current credentials (401). */
+export const AUTH_REQUIRED_EVENT = 'greenkube-auth-required';
+
+/** Window event dispatched when the account must change its initial password. */
+export const PASSWORD_CHANGE_REQUIRED_EVENT = 'greenkube-password-change-required';
+
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+let csrfToken = '';
+
+/** Remember the session's CSRF token (from /auth/me, sign-in or password change). */
+export function setCsrfToken(token) {
+	csrfToken = typeof token === 'string' ? token : '';
 }
 
-export function clearApiToken() {
-	apiToken = '';
+/** Forget the CSRF token (sign-out, or the session ended). */
+export function clearCsrfToken() {
+	csrfToken = '';
 }
 
 export class ApiError extends Error {
@@ -50,8 +67,20 @@ function addSearchParam(url, key, value) {
 
 function requestOptions(options = {}) {
 	const headers = { ...(options.headers || {}) };
-	if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
-	return { ...options, headers, credentials: 'include' };
+	const method = String(options.method || 'GET').toUpperCase();
+	if (csrfToken && UNSAFE_METHODS.has(method) && !headers['X-CSRF-Token']) {
+		headers['X-CSRF-Token'] = csrfToken;
+	}
+	return { ...options, headers, credentials: 'same-origin' };
+}
+
+function jsonOptions(method, body, options = {}) {
+	return {
+		...options,
+		method,
+		headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+		body: JSON.stringify(body)
+	};
 }
 
 function errorDetails(body, status) {
@@ -70,21 +99,59 @@ function errorDetails(body, status) {
 	};
 }
 
-async function request(path, params = {}, options = {}) {
+function notify(eventName) {
+	if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+	try {
+		window.dispatchEvent(new CustomEvent(eventName));
+	} catch {
+		// A missing CustomEvent implementation must not hide the API error.
+	}
+}
+
+function buildUrl(path, params) {
 	const url = new URL(path, window.location.origin);
 	Object.entries(params).forEach(([k, v]) => {
 		addSearchParam(url, k, v);
 	});
+	return url.toString();
+}
 
-	const res = await fetch(url.toString(), requestOptions(options));
+/**
+ * Send one API request and return the raw Response.
+ *
+ * Every helper goes through here so that a 401 always opens the sign-in view
+ * and a stale CSRF token (another tab changed the password, for example) is
+ * refreshed once, whatever the HTTP method.
+ */
+async function send(path, params = {}, options = {}, { retryCsrf = true } = {}) {
+	const res = await fetch(buildUrl(path, params), requestOptions(options));
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
 		const details = errorDetails(body, res.status);
-		if (res.status === 401 && typeof window !== 'undefined') {
-			window.dispatchEvent(new CustomEvent('greenkube-auth-required'));
+		if (res.status === 403 && details.code === 'CSRF_REJECTED' && retryCsrf && !path.startsWith(`${BASE}/auth/me`)) {
+			const me = await fetch(buildUrl(`${BASE}/auth/me`, {}), requestOptions({})).catch(() => null);
+			const refreshed = me?.ok ? await me.json().catch(() => null) : null;
+			if (refreshed?.csrf_token) {
+				setCsrfToken(refreshed.csrf_token);
+				const headers = { ...(options.headers || {}) };
+				delete headers['X-CSRF-Token'];
+				return send(path, params, { ...options, headers }, { retryCsrf: false });
+			}
+		}
+		if (res.status === 401) {
+			clearCsrfToken();
+			notify(AUTH_REQUIRED_EVENT);
+		} else if (res.status === 403 && details.code === 'PASSWORD_CHANGE_REQUIRED') {
+			notify(PASSWORD_CHANGE_REQUIRED_EVENT);
 		}
 		throw new ApiError(details.message, { status: res.status, ...details });
 	}
+	return res;
+}
+
+async function request(path, params = {}, options = {}) {
+	const res = await send(path, params, options);
+	if (res.status === 204) return null;
 	return res.json();
 }
 
@@ -105,40 +172,6 @@ export function getServicesHealth(force = false) {
  */
 export function getServiceHealth(serviceName, force = false) {
 	return request(`${BASE}/health/services/${serviceName}`, { force: force || undefined });
-}
-
-/**
- * Update service URLs/tokens at runtime.
- * @param {Object} config
- * @param {string} [config.prometheus_url]
- * @param {string} [config.opencost_url]
- * @param {string} [config.electricity_maps_token]
- * @param {string} [config.boavizta_url]
- * @param {string} [config.wattnet_email]
- * @param {string} [config.wattnet_password]
- * @returns {Promise<Object>}
- */
-export async function updateServiceConfig(config) {
-	const url = new URL(`${BASE}/config/services`, window.location.origin);
-	const res = await fetch(url.toString(), requestOptions({
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(config)
-	}));
-	if (!res.ok) {
-		const body = await res.json().catch(() => ({}));
-		const details = errorDetails(body, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
-	const data = await res.json();
-	Object.defineProperty(data, 'configurationAcknowledgement', {
-		value: {
-			version: res.headers?.get?.('X-Configuration-Version') || data.configuration_version || null,
-			persisted: res.headers?.get?.('X-Configuration-Persisted') === 'true' || data.configuration_persisted === true
-		},
-		enumerable: false
-	});
-	return data;
 }
 
 /** @returns {Promise<{version: string}>} */
@@ -239,9 +272,117 @@ export function getRecommendations({ namespace } = {}) {
 	return request(`${BASE}/recommendations`, { namespace });
 }
 
-/** @returns {Promise<Object[]>} */
-export function getActiveRecommendations({ namespace, refresh } = {}) {
-	return request(`${BASE}/recommendations/active`, { namespace, refresh });
+/**
+ * Active recommendations in server order (risk-adjusted expected value first),
+ * each with its `value` and delivery `eligibility`.
+ *
+ * The UI never passes `refresh`: a scan is requested explicitly through
+ * {@link requestOptimizationRun} so page loads stay read-only (BUG-25).
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @param {string} [opts.source] — greenkube | vpa | …
+ * @param {string} [opts.risk_level] — low | medium | high
+ * @param {string} [opts.capability] — e.g. cpu_rightsizing
+ * @param {string} [opts.profile] — balanced | carbon_first | cost_first | quick_wins | low_risk
+ * @param {number} [opts.carbon_price] — carbon price override (currency per tonne CO2e)
+ * @param {boolean} [opts.refresh] — deprecated server-side scan trigger
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<Object[]>}
+ */
+export function getActiveRecommendations({
+	namespace,
+	source,
+	risk_level,
+	capability,
+	profile,
+	carbon_price,
+	refresh,
+	signal
+} = {}) {
+	return request(
+		`${BASE}/recommendations/active`,
+		{ namespace, source, risk_level, capability, profile, carbon_price, refresh: refresh || undefined },
+		{ signal }
+	);
+}
+
+/**
+ * Measured realization rate per source family and capability (Beta(α, β) entries).
+ * @param {Object} [opts]
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<{method: string, prior: Object, entries: Object[]}>}
+ */
+export function getSourceTrackRecord({ signal } = {}) {
+	return request(`${BASE}/sources/track-record`, {}, { signal });
+}
+
+// ---------------------------------------------------------------------------
+// Sources, setup, changes (K1, K3, K6, F1, F2)
+// ---------------------------------------------------------------------------
+
+const BASE_V2 = '/api/v2';
+
+/**
+ * Every registered recommendation source with its status, health, last run
+ * and counts, plus registry problems (E5).
+ * @returns {Promise<{sources: Object[], problems: Object[]}>}
+ */
+export function listSources({ signal } = {}) {
+	return request(`${BASE}/sources`, {}, { signal });
+}
+
+/**
+ * A source's runs, newest first.
+ * @param {string} sourceId
+ * @param {{limit?: number, signal?: AbortSignal}} [opts]
+ * @returns {Promise<Object[]>}
+ */
+export function listSourceRuns(sourceId, { limit, signal } = {}) {
+	return request(`${BASE}/sources/${encodeURIComponent(sourceId)}/runs`, { limit }, { signal });
+}
+
+/**
+ * Guided setup checklist and capability state (F1):
+ * `{complete, checks: [{id, category, title, status, reason, fix, docs_url}], capabilities}`.
+ */
+export function getSetupStatus({ signal } = {}) {
+	return request(`${BASE}/setup/status`, {}, { signal });
+}
+
+/** Repositories found by GitOps discovery with their inferred provider and allowlist state (F2). */
+export function getRepositorySuggestions({ signal } = {}) {
+	return request(`${BASE}/automation/repositories/suggestions`, {}, { signal });
+}
+
+/**
+ * Add discovered repositories to the delivery allowlist (admin scope, F2).
+ * @param {string[]} repoUrls
+ */
+export function allowlistRepositories(repoUrls) {
+	return request(
+		`${BASE}/automation/repositories/allowlist`,
+		{},
+		jsonOptions('POST', { repo_urls: repoUrls })
+	);
+}
+
+/**
+ * Applied changes, newest first (C2): `{items, next_cursor}`. `planId` keeps
+ * the changes of one GitOps plan (the ledger link of a pull request, J1).
+ * @param {{namespace?: string, state?: string[], planId?: string, limit?: number, cursor?: string, signal?: AbortSignal}} [opts]
+ */
+export function listChanges({ namespace, state, planId, limit, cursor, signal } = {}) {
+	return request(`${BASE_V2}/changes`, { namespace, state, plan_id: planId, limit, cursor }, { signal });
+}
+
+/** One change with its state, baseline snapshot and lifecycle events. */
+export function getChange(changeId, { signal } = {}) {
+	return request(`${BASE_V2}/changes/${encodeURIComponent(changeId)}`, {}, { signal });
+}
+
+/** Decided measurements of one change, oldest first, with their per-recommendation split. */
+export function getChangeMeasurements(changeId, { signal } = {}) {
+	return request(`${BASE_V2}/changes/${encodeURIComponent(changeId)}/measurements`, {}, { signal });
 }
 
 /**
@@ -249,12 +390,16 @@ export function getActiveRecommendations({ namespace, refresh } = {}) {
  * @param {Object} opts
  * @param {string} [opts.namespace]
  * @param {number} [opts.limit]
- * @param {'co2'|'cost'} [opts.metric]
+ * @param {'co2'|'cost'|'value'} [opts.metric]
  * @param {string} [opts.profile] — balanced | carbon_first | cost_first | quick_wins | low_risk
  * @returns {Promise<Object[]>}
  */
-export function getTopRecommendations({ namespace, limit, metric, profile, refresh } = {}) {
-	return request(`${BASE}/recommendations/top`, { namespace, limit, metric, profile, refresh });
+export function getTopRecommendations({ namespace, limit, metric, profile, refresh, signal } = {}) {
+	return request(
+		`${BASE}/recommendations/top`,
+		{ namespace, limit, metric, profile, refresh: refresh || undefined },
+		{ signal }
+	);
 }
 
 /**
@@ -262,28 +407,49 @@ export function getTopRecommendations({ namespace, limit, metric, profile, refre
  * @param {number} id
  * @returns {Promise<Object>}
  */
-export function getRecommendation(id) {
-	return request(`${BASE}/recommendations/${id}`);
+export function getRecommendation(id, { signal } = {}) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}`, {}, { signal });
 }
 
-/** @returns {Promise<Object[]>} */
-export function getIgnoredRecommendations() {
-	return request(`${BASE}/recommendations/ignored`);
+/**
+ * One recommendation in the v2 shape (E4, E6, E7): typed proposal, consensus
+ * with every vote, `source_ids`, `revision`, `queued_revision` and `revisions`.
+ * @param {number|string} id
+ * @returns {Promise<Object>}
+ */
+export function getRecommendationV2(id, { signal } = {}) {
+	return request(`${BASE_V2}/recommendations/${encodeURIComponent(id)}`, {}, { signal });
 }
 
-/** @returns {Promise<Object[]>} */
-export function getAppliedRecommendations() {
-	return request(`${BASE}/recommendations/applied`);
+/**
+ * @param {Object} [opts]
+ * @param {string} [opts.namespace]
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<Object[]>}
+ */
+export function getIgnoredRecommendations({ namespace, signal } = {}) {
+	return request(`${BASE}/recommendations/ignored`, { namespace }, { signal });
+}
+
+/**
+ * @param {Object} [opts]
+ * @param {string} [opts.namespace]
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<Object[]>}
+ */
+export function getAppliedRecommendations({ namespace, signal } = {}) {
+	return request(`${BASE}/recommendations/applied`, { namespace }, { signal });
 }
 
 /**
  * @param {Object} opts
  * @param {string} [opts.namespace]
  * @param {string} [opts.last]
+ * @param {AbortSignal} [opts.signal]
  * @returns {Promise<Object>}
  */
-export function getRecommendationSavings({ namespace, last } = {}) {
-	return request(`${BASE}/recommendations/savings`, { namespace, last });
+export function getRecommendationSavings({ namespace, last, signal } = {}) {
+	return request(`${BASE}/recommendations/savings`, { namespace, last }, { signal });
 }
 
 /**
@@ -291,19 +457,8 @@ export function getRecommendationSavings({ namespace, last } = {}) {
  * @param {{ carbon_saved_co2e_grams?: number, cost_saved?: number }} [body]
  * @returns {Promise<Object>}
  */
-export async function applyRecommendation(id, body = {}) {
-	const url = new URL(`${BASE}/recommendations/${id}/apply`, window.location.origin);
-	const res = await fetch(url.toString(), requestOptions({
-		method: 'PATCH',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body)
-	}));
-	if (!res.ok) {
-		const b = await res.json().catch(() => ({}));
-		const details = errorDetails(b, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
-	return res.json();
+export function applyRecommendation(id, body = {}) {
+	return request(`${BASE}/recommendations/${id}/apply`, {}, jsonOptions('PATCH', body));
 }
 
 /**
@@ -311,34 +466,50 @@ export async function applyRecommendation(id, body = {}) {
  * @param {{ reason: ?string }} body
  * @returns {Promise<Object>}
  */
-export async function ignoreRecommendation(id, body) {
-	const url = new URL(`${BASE}/recommendations/${id}/ignore`, window.location.origin);
-	const res = await fetch(url.toString(), requestOptions({
-		method: 'PATCH',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body)
-	}));
-	if (!res.ok) {
-		const b = await res.json().catch(() => ({}));
-		const details = errorDetails(b, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
-	return res.json();
+export function ignoreRecommendation(id, body) {
+	return request(`${BASE}/recommendations/${id}/ignore`, {}, jsonOptions('PATCH', body));
 }
 
 /**
  * @param {number} id
  * @returns {Promise<Object>}
  */
-export async function unignoreRecommendation(id) {
-	const url = new URL(`${BASE}/recommendations/${id}/ignore`, window.location.origin);
-	const res = await fetch(url.toString(), requestOptions({ method: 'DELETE' }));
-	if (!res.ok) {
-		const b = await res.json().catch(() => ({}));
-		const details = errorDetails(b, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
-	return res.json();
+export function unignoreRecommendation(id) {
+	return request(`${BASE}/recommendations/${id}/ignore`, {}, { method: 'DELETE' });
+}
+
+/**
+ * Ask the controller for a recommendation scan (E1). The server deduplicates
+ * while a run is pending and answers 202 `{run_id, status}`. Older servers
+ * answer 404/405; callers then fall back to plain reads.
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<{run_id: number, status: string}>}
+ */
+export function requestOptimizationRun({ signal } = {}) {
+	return request(`${BASE}/optimization/runs`, {}, jsonOptions('POST', {}, { signal }));
+}
+
+/**
+ * Status of one recommendation scan run.
+ * @param {number|string} runId
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<{run_id: number, status: 'queued'|'running'|'succeeded'|'failed',
+ *   requested_at?: string, started_at?: string, completed_at?: string,
+ *   recommendation_count?: number, error?: string}>}
+ */
+export function getOptimizationRun(runId, { signal } = {}) {
+	return request(`${BASE}/optimization/runs/${encodeURIComponent(runId)}`, {}, { signal });
+}
+
+/**
+ * Most recent recommendation scan runs, newest first.
+ * @param {{limit?: number, signal?: AbortSignal}} [opts]
+ * @returns {Promise<Object[]>}
+ */
+export async function listOptimizationRuns({ limit, signal } = {}) {
+	const data = await request(`${BASE}/optimization/runs`, { limit }, { signal });
+	if (Array.isArray(data)) return data;
+	return Array.isArray(data?.items) ? data.items : Array.isArray(data?.runs) ? data.runs : [];
 }
 
 /**
@@ -368,15 +539,6 @@ export function getAutomationPlan(planId) {
 }
 
 /**
- * Read the execution state of one plan operation.
- * @param {string} operationId
- * @returns {Promise<Object>}
- */
-export function getAutomationOperation(operationId) {
-	return request(`${BASE}/automation/operations/${encodeURIComponent(operationId)}`);
-}
-
-/**
  * Approve a previously previewed plan using the digest returned by the API.
  * @param {string} planId
  * @param {string} digest
@@ -391,6 +553,31 @@ export function approveAutomationPlan(planId, digest) {
 }
 
 /**
+ * Report the pull request opened outside GreenKube for an approved plan (patch and ci modes, F4).
+ * @param {string} planId
+ * @param {string} prUrl
+ * @param {string|null} [headSha]
+ * @returns {Promise<Object>}
+ */
+export function reportPlanDelivery(planId, prUrl, headSha = null) {
+	const body = headSha ? { pr_url: prUrl, head_sha: headSha } : { pr_url: prUrl };
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}/delivery`, {}, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * URL of an approved plan as a git format-patch (patch mode, F4).
+ * @param {string} planId
+ * @returns {string}
+ */
+export function planPatchUrl(planId) {
+	return `${BASE}/automation/plans/${encodeURIComponent(planId ?? '')}/patch`;
+}
+
+/**
  * Cancel a plan before it starts applying.
  * @param {string} planId
  * @returns {Promise<Object>}
@@ -399,6 +586,22 @@ export function cancelAutomationPlan(planId) {
 	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}/cancel`, {}, {
 		method: 'POST'
 	});
+}
+
+/**
+ * Discard an unapproved (DRAFT/VALIDATED) preview so that previewing the same
+ * workload again does not hit WORKLOAD_PLAN_ALREADY_EXISTS (D6, BUG-48).
+ *
+ * `DELETE /automation/plans/{id}` answers 204 and marks the plan SUPERSEDED;
+ * any other plan status answers 409. There is deliberately no fallback to
+ * POST .../cancel: that endpoint also cancels APPROVED plans. A server
+ * without the route rejects with 404/405 and the preview simply expires.
+ * @param {string} planId
+ * @returns {Promise<{discarded: boolean, status: number}>}
+ */
+export async function discardAutomationPlan(planId) {
+	const res = await send(`${BASE}/automation/plans/${encodeURIComponent(planId)}`, {}, { method: 'DELETE' });
+	return { discarded: true, status: res.status };
 }
 
 /**
@@ -416,25 +619,26 @@ export function previewAutomationPlanRollback(planId) {
  * @param {number} id
  * @returns {Promise<Object[]>}
  */
-export function getRecommendationPullRequests(id) {
-	return request(`${BASE}/recommendations/${id}/pull-requests`);
+export function getRecommendationPullRequests(id, { signal } = {}) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}/pull-requests`, {}, { signal });
 }
 
-export function getOpenPullRequests() {
-	return request(`${BASE}/automation/pull-requests`);
+/** Pending or open pull requests (cluster-wide: the API has no namespace filter). */
+export function getOpenPullRequests({ signal } = {}) {
+	return request(`${BASE}/automation/pull-requests`, {}, { signal });
 }
 
 /**
  * @param {number} id
  * @returns {Promise<Object[]>}
  */
-export function getRecommendationEvents(id) {
-	return request(`${BASE}/recommendations/${id}/events`);
+export function getRecommendationEvents(id, { signal } = {}) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}/events`, {}, { signal });
 }
 
 /** @returns {Promise<Object>} */
-export function getAutomationStatus() {
-	return request(`${BASE}/automation/status`);
+export function getAutomationStatus({ signal } = {}) {
+	return request(`${BASE}/automation/status`, {}, { signal });
 }
 
 /** @returns {Promise<Object>} */
@@ -538,9 +742,10 @@ export function getReportYears({ namespace } = {}) {
  * @param {string} [opts.granularity]
  * @param {string} [opts.group_by]
  * @param {string} [opts.format]
+ * @param {boolean} [opts.include_idle] append the node idle share and cluster-total rows (opt-in)
  * @returns {string}
  */
-export function buildReportExportUrl({ namespace, last, start, end, years, aggregate, granularity, group_by, format } = {}) {
+export function buildReportExportUrl({ namespace, last, start, end, years, aggregate, granularity, group_by, format, include_idle } = {}) {
 	const url = new URL(`${BASE}/report/export`, window.location.origin);
 	addSearchParam(url, 'namespace', namespace);
 	addSearchParam(url, 'last', last);
@@ -551,6 +756,7 @@ export function buildReportExportUrl({ namespace, last, start, end, years, aggre
 	addSearchParam(url, 'granularity', granularity);
 	addSearchParam(url, 'group_by', group_by);
 	addSearchParam(url, 'format', format);
+	addSearchParam(url, 'include_idle', include_idle ? 'true' : undefined);
 	return url.toString();
 }
 
@@ -589,27 +795,17 @@ export function getDashboardTimeseries({ windowSlug, namespace, signal } = {}) {
  * @param {string} [opts.namespace]
  * @returns {Promise<{detail: string}>}
  */
-export async function refreshDashboardSummary({ namespace } = {}) {
-	const url = new URL(`${BASE}/metrics/dashboard-summary/refresh`, window.location.origin);
-	if (namespace) url.searchParams.set('namespace', namespace);
-	const res = await fetch(url.toString(), requestOptions({ method: 'POST' }));
-	if (!res.ok) {
-		const body = await res.json().catch(() => ({}));
-		const details = errorDetails(body, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
-	return res.json();
+export function refreshDashboardSummary({ namespace } = {}) {
+	return request(`${BASE}/metrics/dashboard-summary/refresh`, { namespace }, { method: 'POST' });
 }
 
-/** Download a report with credentials/headers that anchor navigation cannot send. */
+/**
+ * Download a report with credentials/headers that anchor navigation cannot send.
+ * `include_idle: true` appends the node idle share and cluster-total rows; omitted otherwise.
+ */
 export async function downloadReport(params = {}) {
-	const url = new URL(`${BASE}/report/export`, window.location.origin);
-	Object.entries(params).forEach(([key, value]) => addSearchParam(url, key, value));
-	const res = await fetch(url.toString(), requestOptions());
-	if (!res.ok) {
-		const body = await res.json().catch(() => ({}));
-		throw new Error(body.detail || `API error ${res.status}`);
-	}
+	const { include_idle: includeIdle, ...rest } = params;
+	const res = await send(`${BASE}/report/export`, includeIdle ? { ...rest, include_idle: 'true' } : rest);
 	const blob = await res.blob();
 	const disposition = res.headers.get('Content-Disposition') || '';
 	const filename = disposition.match(/filename="?([^"]+)"?/)?.[1]
@@ -625,4 +821,163 @@ export async function downloadReport(params = {}) {
 	} finally {
 		URL.revokeObjectURL(objectUrl);
 	}
+}
+
+
+// ---------------------------------------------------------------------------
+// Authentication (F14, F15)
+// ---------------------------------------------------------------------------
+
+function rememberCsrf(principal) {
+	if (principal && Object.prototype.hasOwnProperty.call(principal, 'csrf_token')) {
+		setCsrfToken(principal.csrf_token || '');
+	}
+	return principal;
+}
+
+/**
+ * The signed-in principal: {authenticated, kind, name, role, scopes,
+ * must_change_password, csrf_token, session}. Rejects with status 401 when
+ * nobody is signed in.
+ */
+export async function getMe({ signal } = {}) {
+	return rememberCsrf(await request(`${BASE}/auth/me`, {}, { signal }));
+}
+
+/** Sign in; the server sets the session cookie. */
+export async function login({ username, password, remember = false }) {
+	return rememberCsrf(await request(`${BASE}/auth/login`, {}, jsonOptions('POST', { username, password, remember })));
+}
+
+/**
+ * Sign in with an API key (API_AUTH_MODE=api_key, F-09). The server checks the
+ * key and keeps it in its HttpOnly cookie: this client forgets it at once.
+ */
+export async function loginWithApiKey({ key, remember = false }) {
+	return rememberCsrf(await request(`${BASE}/auth/api-key-login`, {}, jsonOptions('POST', { key, remember })));
+}
+
+/** Revoke the current session server-side and clear the cookie. */
+export async function logout() {
+	try {
+		await send(`${BASE}/auth/logout`, {}, { method: 'POST' });
+	} finally {
+		clearCsrfToken();
+	}
+}
+
+/** Change the password; every other session is signed out and a new cookie is set. */
+export async function changePassword({ currentPassword, newPassword }) {
+	return rememberCsrf(
+		await request(
+			`${BASE}/auth/password`,
+			{},
+			jsonOptions('POST', { current_password: currentPassword, new_password: newPassword })
+		)
+	);
+}
+
+/** Active sessions of the signed-in user. */
+export function listSessions() {
+	return request(`${BASE}/auth/sessions`);
+}
+
+/** Sign out one session. */
+export function revokeSession(sessionId) {
+	return request(`${BASE}/auth/sessions/${encodeURIComponent(sessionId)}`, {}, { method: 'DELETE' });
+}
+
+/** Every API key (admin only); secrets are never returned. */
+export function listApiKeys() {
+	return request(`${BASE}/auth/api-keys`);
+}
+
+/** Create a scoped API key; the response `key` is shown once. */
+export function createApiKey({ name, scopes, expiresInDays = null }) {
+	const body = { name, scopes };
+	if (expiresInDays) body.expires_in_days = Number(expiresInDays);
+	return request(`${BASE}/auth/api-keys`, {}, jsonOptions('POST', body));
+}
+
+/** Revoke an API key immediately. */
+export function revokeApiKey(keyId) {
+	return request(`${BASE}/auth/api-keys/${encodeURIComponent(keyId)}`, {}, { method: 'DELETE' });
+}
+
+// ---------------------------------------------------------------------------
+// Single sign-on and roles (F16)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sign-in options: {mode, password, api_key, sso: {kind: 'oidc'|'proxy', name, login_path} | null}.
+ * Public and best effort: resolves to null on any error (the password form stays).
+ */
+export async function getAuthProviders() {
+	try {
+		const res = await fetch(buildUrl(`${BASE}/auth/providers`, {}), { credentials: 'same-origin' });
+		return res.ok ? await res.json() : null;
+	} catch {
+		return null;
+	}
+}
+
+/** URL that starts an OpenID Connect sign-in and comes back to `returnTo` (a local path). */
+export function ssoLoginUrl(loginPath = '/auth/oidc/login', returnTo = '/') {
+	const target = typeof returnTo === 'string' && returnTo.startsWith('/') && !returnTo.startsWith('//') ? returnTo : '/';
+	return buildUrl(`${BASE}${loginPath}`, { return_to: target });
+}
+
+/** Every account with its role and sign-in source (admin only). */
+export function listUsers() {
+	return request(`${BASE}/auth/users`);
+}
+
+/** Create a local account; it chooses a new password at its first sign-in (admin only). */
+export function createUser({ username, password, role = 'viewer' }) {
+	return request(`${BASE}/auth/users`, {}, jsonOptions('POST', { username, password, role }));
+}
+
+/** Change a role ({role}) or disable/enable an account ({disabled}) (admin only). */
+export function updateUser(userId, changes) {
+	return request(`${BASE}/auth/users/${encodeURIComponent(userId)}`, {}, jsonOptions('PATCH', changes));
+}
+
+// --- Manual mode (roadmap H9) ---
+
+/**
+ * What to run by hand for one recommendation: `kubectl` commands, the patch, a diff and notes.
+ * @param {number|string} id
+ * @param {{ signal?: AbortSignal }} [opts]
+ * @returns {Promise<{recommendation_id: number, mode: 'patch'|'delete'|'advisory', action_kind: ?string,
+ *   target: ?Object, commands: {description: string, command: string}[], patch: ?Object, diff: ?string,
+ *   notes: string[], can_mark_applied: boolean}>}
+ */
+export function getManualGuide(id, { signal } = {}) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}/manual`, {}, { signal });
+}
+
+/**
+ * "Mark as applied": record a change applied by hand; it is measured like a merged pull request.
+ * @param {number|string} id
+ * @returns {Promise<Object>} the applied recommendation
+ */
+export function markAppliedManually(id) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}/manual/applied`, {}, { method: 'POST' });
+}
+
+// --- Changes board (K4) ----------------------------------------------------
+
+/**
+ * v2 recommendations whose pull request is open or merged and not applied yet
+ * (`status=pr_open`): the changes board finds merged plans awaiting sync here.
+ * @param {{namespace?: string, limit?: number, signal?: AbortSignal}} [opts]
+ * @returns {Promise<{items: Object[], total: number}>}
+ */
+export function listDeliveringRecommendations({ namespace, limit, signal } = {}) {
+	return request(`${BASE_V2}/recommendations`, { namespace, status: 'pr_open', limit }, { signal });
+}
+
+/** One automation plan (`GET /automation/plans/{id}`), abortable. */
+export function getAutomationPlanStatus(planId, { signal } = {}) {
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}`, {}, { signal });
 }

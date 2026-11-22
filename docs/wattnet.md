@@ -137,9 +137,9 @@ WATTNET_TOKEN_SERVICE_URL="https://api.wattnet.eu/token-request"
 
 - The health endpoint reports a `wattnet` service:
   `GET /api/v1/health/services/wattnet` should return `"healthy"`.
-- The credentials can also be updated at runtime from the Settings page
-  (`POST /api/v1/config/services` with `wattnet_email` / `wattnet_password`),
-  and are persisted to the Kubernetes Secret.
+- The credentials are configuration as code: set them in Helm values
+  (`secrets.wattnetEmail` / `secrets.wattnetPassword`) or in your
+  `secrets.existingSecret`. The Settings page shows the matching snippet.
 
 ## API endpoints used
 

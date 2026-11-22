@@ -87,7 +87,7 @@ def _plan(plan_id: str = "plan-one", digest: str | None = None) -> Plan:
         repo_url="https://github.com/acme/platform",
         ref="refs/heads/main",
         path="apps/api",
-        controller_kind=ControllerKind.EXPLICIT_REPOSITORY,
+        controller_kind=ControllerKind.ARGOCD,
         controller_name="api",
         controller_namespace="production",
         renderer=RendererKind.RAW,
@@ -195,7 +195,6 @@ async def test_enqueue_is_idempotent_per_plan_and_digest(plan_operation_store):
     assert duplicate.plan_id == plan.plan_id
     assert await repository.get_by_operation_id(enqueued.operation_id) == enqueued
     assert await repository.get_by_plan_id(plan.plan_id) == enqueued
-    assert await repository.get_by_idempotency_key(idempotency_key) == enqueued
 
     with pytest.raises(ValueError, match="derived from the plan ID and digest"):
         await repository.enqueue(plan, idempotency_key="not-derived-from-the-plan")
@@ -255,6 +254,30 @@ async def test_claim_is_exclusive_and_updates_worker_heartbeat(plan_operation_st
     assert released_heartbeat is not None
     assert released_heartbeat.lease_plan_operation_id is None
     assert released_heartbeat.lease_id is None
+
+
+@pytest.mark.asyncio
+async def test_idle_worker_claim_polls_refresh_its_heartbeat(plan_operation_store, monkeypatch):
+    repository, gitops_repository, _, _ = plan_operation_store
+    first_at = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(repository, "_now", lambda: first_at)
+
+    assert await repository.claim_next("idle-worker") is None
+    first_heartbeat = await gitops_repository.get_worker_heartbeat("idle-worker")
+    assert first_heartbeat is not None
+    assert first_heartbeat.status == "idle"
+
+    second_at = first_at + timedelta(seconds=5)
+    monkeypatch.setattr(repository, "_now", lambda: second_at)
+
+    assert await repository.claim_next("idle-worker") is None
+    refreshed_heartbeat = await gitops_repository.get_worker_heartbeat("idle-worker")
+
+    assert refreshed_heartbeat is not None
+    assert refreshed_heartbeat.status == "idle"
+    assert refreshed_heartbeat.heartbeat_at > first_heartbeat.heartbeat_at
+    assert refreshed_heartbeat.lease_id is None
+    assert refreshed_heartbeat.lease_expires_at is None
 
 
 @pytest.mark.asyncio
@@ -361,3 +384,71 @@ async def test_lease_heartbeat_renews_only_the_current_owner(plan_operation_stor
     await _expire_lease(manager, backend, lease.operation.operation_id)
     with pytest.raises(PlanOperationLeaseError, match="lease"):
         await repository.heartbeat(lease, lease_seconds=120)
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_failure_reschedules_at_retry_at_without_consuming_an_attempt(plan_operation_store):
+    repository, _, manager, backend = plan_operation_store
+    plan = _plan("plan-rate-limited")
+    await _persist_plan(manager, backend, plan)
+    queued = await repository.enqueue(
+        plan,
+        idempotency_key=f"plan:{plan.plan_id}:{plan.digest}",
+        max_attempts=1,
+        backoff_base_seconds=30,
+        backoff_max_seconds=45,
+    )
+
+    lease = await repository.claim_next("worker-a", lease_seconds=60)
+    assert lease is not None and lease.operation.attempts == 1
+    retry_at = datetime.now(timezone.utc) + timedelta(minutes=17)
+    rescheduled = await repository.mark_failed(lease, "github rate limit reached", retry_at=retry_at)
+
+    # max_attempts=1 would fail the operation; a rate limit is not a failed attempt.
+    assert rescheduled.status is OperationStatus.RETRYING
+    assert rescheduled.attempts == 0
+    assert rescheduled.available_at is not None
+    assert abs(rescheduled.available_at - retry_at) <= timedelta(seconds=1)
+    assert await repository.claim_next("worker-b") is None
+
+    await _force_available_at(manager, backend, queued.operation_id, datetime.now(timezone.utc) - timedelta(seconds=1))
+    again = await repository.claim_next("worker-b", lease_seconds=60)
+    assert again is not None and again.operation.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_failure_ignores_retry_at(plan_operation_store):
+    repository, _, manager, backend = plan_operation_store
+    plan = _plan("plan-permanent")
+    await _persist_plan(manager, backend, plan)
+    await repository.enqueue(plan, idempotency_key=f"plan:{plan.plan_id}:{plan.digest}", max_attempts=3)
+    lease = await repository.claim_next("worker-a", lease_seconds=60)
+    assert lease is not None
+    failed = await repository.mark_failed(
+        lease, "permanent", retryable=False, retry_at=datetime.now(timezone.utc) + timedelta(minutes=5)
+    )
+    assert failed.status is OperationStatus.FAILED
+    assert failed.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_unleased_operation_refuses_a_live_lease_and_cancels_otherwise(plan_operation_store):
+    repository, _, manager, backend = plan_operation_store
+    plan = _plan("plan-abandon")
+    await _persist_plan(manager, backend, plan)
+    queued = await repository.enqueue(plan, idempotency_key=f"plan:{plan.plan_id}:{plan.digest}", max_attempts=3)
+    assert await repository.cancel_unleased_operation("plan-missing", "abandoned") is None
+
+    lease = await repository.claim_next("worker-a", lease_seconds=60)
+    assert lease is not None
+    live = await repository.cancel_unleased_operation(plan.plan_id, "abandoned by user:alice")
+    assert live is not None and live.status is OperationStatus.RUNNING
+
+    await _expire_lease(manager, backend, queued.operation_id)
+    cancelled = await repository.cancel_unleased_operation(plan.plan_id, "abandoned by user:alice")
+    assert cancelled is not None and cancelled.status is OperationStatus.CANCELLED
+    assert cancelled.last_error == "abandoned by user:alice"
+    # The stale owner can no longer finish it, and nothing claims it again.
+    with pytest.raises(PlanOperationLeaseError):
+        await repository.mark_succeeded(lease)
+    assert await repository.claim_next("worker-b") is None

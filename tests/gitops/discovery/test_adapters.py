@@ -39,6 +39,7 @@ def _application(resource: Mapping[str, Any], *, status: dict[str, Any] | None =
         },
         "status": {
             "sync": {"revision": "a" * 40},
+            "sourceType": "Directory",
             "resources": [dict(resource)],
         },
     }
@@ -197,6 +198,91 @@ def test_argo_multi_source_resolves_ordered_local_and_ref_values_files():
     ]
     assert source.renderer_config["release_name"] == "payments"
     assert source.renderer_config["release_namespace"] == "prod"
+
+
+def test_argo_remote_helm_chart_binds_to_git_managed_values_source():
+    application = _fixture("argo-multi-source.yaml")
+    application["metadata"]["annotations"] = {
+        "greenkube.cloud/helm-values-mapping": json.dumps(
+            {
+                "file_path": "environments/prod/payments.yaml",
+                "container": "api",
+                "path": ["controller", "container", "resources"],
+                "source_index": 1,
+            }
+        )
+    }
+    application["spec"]["sources"][0] = {
+        "repoURL": "https://charts.fairwinds.com/stable",
+        "chart": "vpa",
+        "targetRevision": "5.1.0",
+        "helm": {
+            "releaseName": "vpa",
+            "namespace": "prod",
+            "valueFiles": ["$values/environments/prod/payments.yaml"],
+        },
+    }
+    application["spec"]["sources"][1] = {
+        "repoURL": "https://github.com/acme/env-config.git",
+        "targetRevision": "release",
+        "ref": "values",
+    }
+    application["status"]["sync"]["revisions"] = ["5.1.0", "c" * 40]
+
+    source = _argo(application)[0]
+
+    assert source.status is BindingStatus.RESOLVED
+    assert source.repo_url == "https://github.com/acme/env-config.git"
+    assert source.ref == "release"
+    assert source.revision == "c" * 40
+    assert source.renderer_config["chart"]["repo"] == "https://charts.fairwinds.com/stable"
+    assert source.renderer_config["values_mapping"]["source_index"] == 1
+
+
+def test_argo_upstream_git_chart_binds_to_the_ref_values_source():
+    """A chart read from an upstream Git repository with all values in a ``$ref`` source binds to that source."""
+    application = _fixture("argo-multi-source.yaml")
+    application["spec"]["sources"][0] = {
+        "repoURL": "https://github.com/upstream/silo.git",
+        "targetRevision": "main",
+        "path": "helm/silo",
+        "helm": {
+            "releaseName": "silo",
+            "namespace": "prod",
+            "valueFiles": ["$values/demo/helm-values/silo/values-demo.yaml"],
+        },
+    }
+    application["spec"]["sources"][1] = {
+        "repoURL": "https://gitlab.example.com/ops/gitops.git",
+        "targetRevision": "release",
+        "ref": "values",
+    }
+    application["status"]["sync"]["revisions"] = ["b" * 40, "c" * 40]
+
+    source = _argo(application, provider_id="gitlab-main")[0]
+
+    # Bound to the values repository (the only file to edit), but the planner cannot render a
+    # chart from another Git repository yet: blocked with an explicit reason, never actionable.
+    assert source.status is BindingStatus.BLOCKED
+    assert source.reason == "cross-repository-git-chart"
+    assert source.repo_url == "https://gitlab.example.com/ops/gitops.git"
+    assert source.ref == "release"
+    assert source.revision == "c" * 40
+    assert source.source_revision == "c" * 40
+    assert source.evidence["source_index"] == 1
+    assert source.evidence["chart_source_index"] == 0
+    assert source.renderer_config["chart"]["repo"] == "https://github.com/upstream/silo.git"
+    assert [entry["source_index"] for entry in source.renderer_config["values_sources"]] == [1]
+
+
+def test_argo_git_chart_with_a_values_file_next_to_it_stays_bound_to_the_chart_source():
+    """A values file beside the chart keeps the chart source as the edit target."""
+    application = _fixture("argo-multi-source.yaml")
+
+    source = _argo(application)[0]
+
+    assert source.repo_url == "https://github.com/acme/apps.git"
+    assert source.evidence["source_index"] == 0
 
 
 def test_argo_local_helm_chart_without_value_files_keeps_chart_defaults_actionable():
@@ -412,6 +498,17 @@ def test_argo_blocks_unsupported_jsonnet_directory_rendering():
     assert source.reason == "unsupported-directory-renderer"
 
 
+def test_argo_accepts_empty_jsonnet_defaults_on_directory_source():
+    application = _application({"kind": "Deployment", "namespace": "prod", "name": "payments-api"})
+    application["spec"]["source"]["directory"] = {"jsonnet": {}, "recurse": True}
+
+    source = _argo(application)[0]
+
+    assert source.status is BindingStatus.RESOLVED
+    assert source.reason is None
+    assert source.renderer is RendererKind.RAW
+
+
 def test_argo_blocks_unresolved_values_source_references():
     application = _application({"kind": "Deployment", "namespace": "prod", "name": "payments-api"})
     application["spec"].pop("source")
@@ -492,6 +589,46 @@ def test_flux_kustomization_maps_inventory_source_and_artifact_revision():
     assert source.source_revision == "main@sha1:" + "d" * 40
     assert source.revision == "d" * 40
     assert source.evidence["inventory_id"] == "apps_v1_Deployment_prod_payments-api"
+
+
+def test_flux_kustomization_reports_the_fields_that_change_its_build():
+    kustomization = _fixture("flux-kustomization.yaml")
+    kustomization["spec"].update(
+        {
+            "targetNamespace": "prod",
+            "namePrefix": "eu-",
+            "nameSuffix": "-v2",
+            "postBuild": {"substitute": {"cluster": "eu-1"}},
+            "patches": [{"patch": "- op: remove\n  path: /spec/replicas", "target": {"kind": "Deployment"}}],
+            "images": [{"name": "payments-api", "newTag": "1.2.3"}],
+            "components": ["../../components/tracing"],
+        }
+    )
+
+    config = discover_flux_kustomization(
+        kustomization,
+        [_fixture("flux-gitrepository.yaml")],
+        cluster="prod",
+        provider_id="github-main",
+    )[0].renderer_config
+
+    assert config["target_namespace"] == "prod"
+    assert (config["name_prefix"], config["name_suffix"], config["post_build"]) == ("eu-", "-v2", True)
+    # Recorded so that the Kustomize planner fails closed on them.
+    assert config["patches"] == kustomization["spec"]["patches"]
+    assert config["images"] == kustomization["spec"]["images"]
+    assert config["components"] == ["../../components/tracing"]
+
+
+def test_flux_kustomization_without_build_overrides_keeps_a_minimal_renderer_config():
+    config = discover_flux_kustomization(
+        _fixture("flux-kustomization.yaml"),
+        [_fixture("flux-gitrepository.yaml")],
+        cluster="prod",
+        provider_id="github-main",
+    )[0].renderer_config
+
+    assert not {"name_prefix", "name_suffix", "post_build", "patches", "images", "components"} & set(config)
 
 
 def test_flux_candidate_carries_controller_and_source_generations():
@@ -792,7 +929,7 @@ def test_flux_helm_release_does_not_hash_or_truncate_flux_default_release_names(
     assert len(expected_name) > 53
 
 
-def test_flux_helm_release_blocks_remote_chart_ref_with_a_precise_reason():
+def test_flux_helm_release_resolves_an_oci_chart_ref_for_remote_rendering():
     release = _fixture("flux-helmrelease.yaml")
     release["spec"].pop("chart")
     release["spec"]["chartRef"] = {
@@ -804,8 +941,10 @@ def test_flux_helm_release_blocks_remote_chart_ref_with_a_precise_reason():
     oci_repository = {
         "kind": "OCIRepository",
         "metadata": {"name": "payments-chart", "namespace": "flux-system"},
-        "spec": {"url": "oci://registry.example.test/payments"},
+        "spec": {"url": "oci://registry.example.test/payments", "ref": {"semver": "1.x"}},
+        "status": {"artifact": {"revision": "1.4.2@sha256:" + "d" * 64}},
     }
+    release["status"] = {"history": [{"chartVersion": "1.4.2", "status": "deployed"}]}
 
     source = discover_flux_helm_release(
         release,
@@ -820,8 +959,16 @@ def test_flux_helm_release_blocks_remote_chart_ref_with_a_precise_reason():
         },
     )[0]
 
-    assert source.status is BindingStatus.BLOCKED
-    assert source.reason == "remote-chart-not-in-snapshot"
+    assert source.status is BindingStatus.RESOLVED
+    assert source.reason is None
+    assert source.renderer_config["chart"] == {
+        "name": None,
+        "version": None,
+        "repo_url": "oci://registry.example.test/payments",
+        "source_kind": "OCIRepository",
+        "resolved_version": "1.4.2",
+        "digest": "sha256:" + "d" * 64,
+    }
     assert source.evidence["chart_ref"] == {
         "kind": "OCIRepository",
         "name": "payments-chart",
@@ -1078,7 +1225,7 @@ def test_argo_tracking_id_fallback_reads_the_managed_live_resource():
                 "path": "apps/payments",
             },
         },
-        "status": {"sync": {"revision": "a" * 40}},
+        "status": {"sync": {"revision": "a" * 40}, "sourceType": "Directory"},
     }
     live_resource = {
         "apiVersion": "apps/v1",

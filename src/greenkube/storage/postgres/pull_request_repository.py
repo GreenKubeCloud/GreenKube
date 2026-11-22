@@ -240,6 +240,33 @@ class PostgresPullRequestRepository(PullRequestRepository):
             rows = await conn.fetch(query, *params)
             return [row_to_pull_request(row) for row in rows]
 
+    async def list_feedback_pull_requests(
+        self,
+        *,
+        merged_since: datetime,
+        limit: int,
+        after_id: int | None = None,
+    ) -> List[PullRequestRecord]:
+        self.validate_poll_page(limit, after_id)
+        params: list = [merged_since]
+        query = (
+            "SELECT * FROM recommendation_pull_requests "
+            "WHERE status = 'merged' "
+            "AND plan_id IS NOT NULL AND plan_id <> '' "
+            "AND provider_id IS NOT NULL AND provider_id <> '' "
+            "AND repo <> '' AND pr_number IS NOT NULL AND pr_number > 0 "
+            "AND merged_at >= $1"
+        )
+        if after_id is not None:
+            params.append(after_id)
+            query += f" AND id > ${len(params)}"
+        params.append(limit)
+        query += f" ORDER BY id ASC LIMIT ${len(params)}"
+
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch(query, *params)
+            return [row_to_pull_request(row) for row in rows]
+
     async def list_branch_cleanup_candidates(
         self,
         *,
@@ -254,7 +281,10 @@ class PostgresPullRequestRepository(PullRequestRepository):
             "LEFT JOIN automation_branch_cleanup_completed cleanup "
             "ON cleanup.plan_id = pr.plan_id AND cleanup.provider_id = pr.provider_id "
             "AND cleanup.repo = pr.repo AND cleanup.branch_name = pr.head_branch "
-            "WHERE cleanup.plan_id IS NULL "
+            # The branch_cleanup_completed_at predicate drives idx_reco_pr_branch_cleanup_pending,
+            # so each pass walks only rows whose plan branch is still pending cleanup (D15).
+            "WHERE pr.branch_cleanup_completed_at IS NULL "
+            "AND cleanup.plan_id IS NULL "
             "AND pr.plan_id IS NOT NULL AND pr.plan_id <> '' "
             "AND pr.head_branch IS NOT NULL AND pr.head_branch <> '' "
             f"AND (pr.status IN ('closed', 'merged') OR plan.status IN ({status_placeholders}))"
@@ -277,7 +307,7 @@ class PostgresPullRequestRepository(PullRequestRepository):
         repo: str,
         branch_name: str,
     ) -> None:
-        async with self.db_manager.connection_scope() as conn:
+        async with self.db_manager.transaction() as conn:
             await conn.execute(
                 """
                 INSERT INTO automation_branch_cleanup_completed
@@ -293,6 +323,39 @@ class PostgresPullRequestRepository(PullRequestRepository):
                 provider_id,
                 repo,
                 branch_name,
+            )
+            await conn.execute(
+                """
+                UPDATE recommendation_pull_requests SET branch_cleanup_completed_at = NOW()
+                WHERE plan_id = $1 AND provider_id = $2 AND repo = $3 AND head_branch = $4
+                  AND branch_cleanup_completed_at IS NULL
+                """,
+                plan_id,
+                provider_id,
+                repo,
+                branch_name,
+            )
+
+    async def set_provider_retry_state(
+        self,
+        pr_ids: Sequence[int],
+        *,
+        failures: int,
+        retry_at: datetime | None,
+        detached_reason: str | None,
+    ) -> None:
+        ids = self.validate_provider_retry_state(pr_ids, failures, retry_at)
+        if not ids:
+            return
+        async with self.db_manager.transaction() as conn:
+            await conn.execute(
+                "UPDATE recommendation_pull_requests "
+                "SET provider_retry_failures = $1, provider_retry_at = $2, provider_detached_reason = $3 "
+                "WHERE id = ANY($4::bigint[])",
+                failures,
+                retry_at,
+                detached_reason,
+                list(ids),
             )
 
     async def reconcile_open_pull_requests(self, *, stale_before: datetime, limit: int) -> int:

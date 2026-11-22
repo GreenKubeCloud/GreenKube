@@ -1,11 +1,12 @@
 # tests/core/optimization/test_risks.py
 """Tests for risk, confidence and effort assessment."""
 
+import pytest
+
 from greenkube.core.config import Config
 from greenkube.core.optimization.risks import assess
 from greenkube.models.evidence import RecommendationEvidence, ResourceSnapshot, UtilizationStats
 from greenkube.models.metrics import (
-    EffortLevel,
     Recommendation,
     RecommendationSource,
     RecommendationType,
@@ -72,27 +73,18 @@ class TestOtherTypes:
         assert result.risk_level == RiskLevel.HIGH
         assert "restart_history" in result.risk_factors
 
-    def test_node_recommendation_is_high_effort(self):
-        rec = Recommendation(
-            type=RecommendationType.UNDERUTILIZED_NODE,
-            scope="node",
-            target_node="node-1",
-            description="drain",
-        )
+    @pytest.mark.parametrize(
+        ("rec_type", "level"),
+        [
+            (RecommendationType.ORPHANED_LOAD_BALANCER, RiskLevel.MEDIUM),
+            (RecommendationType.ORPHANED_PERSISTENT_VOLUME, RiskLevel.HIGH),
+        ],
+    )
+    def test_deletions_are_never_low_risk_and_flag_irreversible_deletion(self, rec_type, level):
+        rec = Recommendation(pod_name="target", type=rec_type, scope="cluster", description="delete it")
         result = assess(rec, None, Config())
-        assert result.risk_level == RiskLevel.HIGH
-        assert result.effort == EffortLevel.HIGH
-        assert result.requires_restart is True
-
-    def test_cleanup_recommendations_are_low_risk(self):
-        rec = Recommendation(
-            pod_name="pv-1",
-            type=RecommendationType.ORPHANED_PERSISTENT_VOLUME,
-            scope="cluster",
-            description="delete pv",
-        )
-        result = assess(rec, None, Config())
-        assert result.risk_level == RiskLevel.LOW
+        assert result.risk_level == level
+        assert "irreversible_deletion" in result.risk_factors
         assert result.reversible is False
 
 

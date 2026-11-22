@@ -23,3 +23,8 @@ DATACENTER_PUE_PROFILES = {
     # --- Scaleway ---
     "default_scaleway": 1.37,
 }
+
+# Private datacenters publish no fleet-wide PUE: ``cloudProvider`` set to one of
+# these names maps explicitly to the operator's ``config.defaults.pue``
+# (``DEFAULT_PUE``, 1.3 unless set), which should be the measured PUE of the site.
+ON_PREMISES_PROVIDERS = frozenset({"on-prem", "on-premise", "on-premises", "onprem", "on_prem"})

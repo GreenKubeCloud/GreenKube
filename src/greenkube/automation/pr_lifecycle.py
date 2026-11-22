@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol, cast
 
-from greenkube.automation.git.base import PullRequestInfo
+from greenkube.automation.git.base import MergeCommitSource, PullRequestInfo
 from greenkube.core.observability import record_pull_request_merge_detection
 from greenkube.gitops.contracts import ActionStatus, PlanStatus, PullRequestEvent
 
@@ -135,6 +135,15 @@ class _VerifiedProviderState:
     merge_commit_sha: str | None
     merged_at: datetime | None
     closed_at: datetime | None
+    merge_commit_source: str | None = None
+
+
+#: Plan audit reason per provider field that identified the landed commit (D4).
+_MERGED_REASON_CODES = {
+    MergeCommitSource.MERGE_COMMIT.value: "pull_request_merged",
+    MergeCommitSource.SQUASH_COMMIT.value: "pull_request_merged_squash_commit",
+    MergeCommitSource.FAST_FORWARD_HEAD.value: "pull_request_merged_fast_forward_head",
+}
 
 
 _SUPPORTED_ACTIONS = frozenset({"opened", "synchronized", "closed", "reopened"})
@@ -142,7 +151,7 @@ _PULL_REQUEST_STATUSES = frozenset({"pending", "open", "merged", "closed", "erro
 _PLAN_IN_FLIGHT_STATUSES = frozenset({PlanStatus.APPLYING, PlanStatus.PR_OPEN})
 _PLAN_ADVANCED_STATUSES = frozenset({PlanStatus.SYNCED, PlanStatus.APPLIED, PlanStatus.SYNC_FAILED})
 _PLAN_TERMINAL_FAILURE_STATUSES = frozenset(
-    {PlanStatus.FAILED, PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED}
+    {PlanStatus.FAILED, PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED, PlanStatus.CANCELLED}
 )
 _ACTION_PRE_MERGE_STATUSES = frozenset(
     {ActionStatus.NONE, ActionStatus.GROUPED, ActionStatus.PLAN_READY, ActionStatus.PR_OPEN, ActionStatus.FAILED}
@@ -278,8 +287,7 @@ class PullRequestLifecycleReconciler:
             if status not in {"closed", "merged"}:
                 return PullRequestLifecycleResult(PullRequestLifecycleOutcome.MISMATCHED, plan_id)
 
-            raw = current.raw if isinstance(current.raw, Mapping) else {}
-            raw_merge_sha = raw.get("merge_commit_sha")
+            landed_sha, _ = _provider_merge_commit(current)
             event = PullRequestEvent(
                 provider_id=event.provider_id,
                 delivery_id=event.delivery_id,
@@ -287,7 +295,9 @@ class PullRequestLifecycleReconciler:
                 number=event.number,
                 action="closed",
                 merged=current.merged,
-                merge_commit_sha=raw_merge_sha if isinstance(raw_merge_sha, str) else None,
+                # Only a merged request has a landed commit; GitHub keeps a
+                # test-merge SHA on requests closed without merging (BUG-45).
+                merge_commit_sha=landed_sha if current.merged and isinstance(landed_sha, str) else None,
                 occurred_at=datetime.now(UTC),
             )
         verified = _verify_provider_state(current, event)
@@ -347,7 +357,7 @@ class PullRequestLifecycleReconciler:
                 reason_code=(
                     "merge_commit_sha_missing"
                     if merge_sha_missing
-                    else "pull_request_merged"
+                    else _MERGED_REASON_CODES.get(verified.merge_commit_source or "", "pull_request_merged")
                     if verified.merged
                     else "pull_request_closed"
                 ),
@@ -653,7 +663,10 @@ def _verify_provider_state(
     raw_merge_sha = raw.get("merge_commit_sha")
     if not _valid_optional_text(raw_merge_sha):
         return None
-    raw_merge_sha = raw_merge_sha if isinstance(raw_merge_sha, str) else None
+    provider_merge_sha, merge_commit_source = _provider_merge_commit(current)
+    if not _valid_optional_text(provider_merge_sha):
+        return None
+    provider_merge_sha = provider_merge_sha if isinstance(provider_merge_sha, str) else None
 
     state_is_merged = current.merged
     if (
@@ -669,11 +682,11 @@ def _verify_provider_state(
     if state_is_merged:
         if (
             event.merge_commit_sha is not None
-            and raw_merge_sha is not None
-            and event.merge_commit_sha.casefold() != raw_merge_sha.casefold()
+            and provider_merge_sha is not None
+            and event.merge_commit_sha.casefold() != provider_merge_sha.casefold()
         ):
             return None
-        merge_commit_sha = raw_merge_sha or event.merge_commit_sha
+        merge_commit_sha = provider_merge_sha or event.merge_commit_sha
         occurred_at = _utc_datetime(event.occurred_at)
         if occurred_at is None:
             return None
@@ -682,10 +695,15 @@ def _verify_provider_state(
             merge_commit_sha=merge_commit_sha,
             merged_at=merged_at or occurred_at,
             closed_at=closed_at,
+            merge_commit_source=(
+                merge_commit_source if provider_merge_sha is not None else MergeCommitSource.MERGE_COMMIT.value
+            )
+            if merge_commit_sha is not None
+            else None,
         )
 
-    if raw_merge_sha is not None or event.merge_commit_sha is not None:
-        return None
+    # A request closed without merging has no landed commit. GitHub still
+    # reports the SHA of its last test merge, which must be ignored (BUG-45).
     occurred_at = _utc_datetime(event.occurred_at)
     if occurred_at is None:
         return None
@@ -695,6 +713,21 @@ def _verify_provider_state(
         merged_at=None,
         closed_at=closed_at or occurred_at,
     )
+
+
+def _provider_merge_commit(current: PullRequestInfo) -> tuple[object, str | None]:
+    """Return the provider-reported landed commit and which field identified it.
+
+    Adapters normalize squash and fast-forward merges into
+    ``merge_commit_sha``/``merge_commit_source`` (D4); payloads without that
+    normalization fall back to the raw ``merge_commit_sha``.
+    """
+    normalized = getattr(current, "merge_commit_sha", None)
+    if isinstance(normalized, str) and normalized:
+        source = getattr(current, "merge_commit_source", None)
+        return normalized, source if isinstance(source, str) else MergeCommitSource.MERGE_COMMIT.value
+    raw = current.raw if isinstance(current.raw, Mapping) else {}
+    return raw.get("merge_commit_sha"), MergeCommitSource.MERGE_COMMIT.value
 
 
 def _parse_datetime(value: object) -> datetime | None:

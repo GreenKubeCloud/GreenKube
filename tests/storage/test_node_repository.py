@@ -52,7 +52,10 @@ async def db_connection():
                 embodied_emissions_kg REAL,
                 valid_from TEXT NOT NULL,
                 valid_to TEXT,
-                is_current BOOLEAN NOT NULL DEFAULT 1
+                last_seen TEXT,
+                is_current BOOLEAN NOT NULL DEFAULT 1,
+                host_id TEXT,
+                provider_id TEXT
             );
         """)
         await conn.commit()

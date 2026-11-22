@@ -41,9 +41,6 @@ class PlanOperationRepository(ABC):
     async def get_by_plan_id(self, plan_id: str) -> Operation | None: ...
 
     @abstractmethod
-    async def get_by_idempotency_key(self, idempotency_key: str) -> Operation | None: ...
-
-    @abstractmethod
     async def claim_next(self, worker_id: str, *, lease_seconds: int = 900) -> PlanOperationLease | None: ...
 
     @abstractmethod
@@ -60,4 +57,20 @@ class PlanOperationRepository(ABC):
     ) -> Operation: ...
 
     @abstractmethod
-    async def mark_failed(self, lease: PlanOperationLease, error: str, *, retryable: bool = True) -> Operation: ...
+    async def mark_failed(
+        self,
+        lease: PlanOperationLease,
+        error: str,
+        *,
+        retryable: bool = True,
+        retry_at: datetime | None = None,
+    ) -> Operation:
+        """Release the lease after a failure.
+
+        ``retry_at`` (a provider rate limit) reschedules a retryable operation at that time
+        without consuming an attempt: the provider throttled the call, the plan did not fail.
+        """
+
+    async def cancel_unleased_operation(self, plan_id: str, reason: str) -> Operation | None:
+        """Cancel the plan's operation unless a worker holds a live lease (an operator abandon)."""
+        raise NotImplementedError

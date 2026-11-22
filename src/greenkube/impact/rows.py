@@ -1,0 +1,560 @@
+# src/greenkube/impact/rows.py
+"""Allocation of stored metric rows by the Impact Model (roadmap B2, B8).
+
+Collection (``HistoricalRangeProcessor``) and the ``greenkube recompute``
+command both turn the pod rows of one node and one interval into
+:class:`~greenkube.impact.types.ResourceSample` values, run
+:meth:`ImpactModel.allocate` on them and write the result back:
+
+* ``joules``, ``co2e_grams`` and ``embodied_co2e_grams`` become the
+  reservation-aware allocation (idle power and embodied emissions by
+  reservation, dynamic power by usage, memory power by memory reservation,
+  GPU power by DCGM attribution);
+* rows without an observed (OpenCost/Kubecost) cost receive the modeled cost
+  of their reservation at the node's unit prices, labeled with the price tier
+  (``pricing_catalog`` or ``custom_rate``); observed costs are kept;
+* ``model_version`` records the model that produced the numbers;
+* the unreserved remainder of the node becomes one :class:`NodeIdleMetric`.
+
+The sum of the allocated rows and the idle row equals the node totals for
+energy, operational and embodied CO2e (and for cost when no row carries an
+observed cost).
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field, replace
+from datetime import datetime
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from greenkube.energy.shared_host import SHARED_HOST_REASON_PREFIX, scale_to_host_share
+from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
+from greenkube.impact.power import (
+    GPU_TDP_ESTIMATE_REASON_PREFIX,
+    GPU_UNMEASURED_REASON_PREFIX,
+    memory_watts_per_gib,
+)
+from greenkube.impact.pricing import CustomRates, PricingCatalog, UnitPriceResolver, observed_rates_from_rows
+from greenkube.impact.projector import sample_from_metric
+from greenkube.impact.types import (
+    BYTES_PER_GIB,
+    IMPACT_MODEL_VERSION,
+    ClusterSnapshot,
+    NodeImpactProfile,
+    PowerSource,
+    UnitPrices,
+    WorkloadImpact,
+    WorkloadRef,
+)
+from greenkube.models.metrics import CombinedMetric
+from greenkube.models.provenance import ALLOCATED_COST_SOURCES, EMBODIED_FALLBACK_REASON_PREFIX, CostSource
+
+#: Joules per kWh.
+JOULES_PER_KWH = 3.6e6
+
+#: Scope of the idle rows (roadmap B2).
+IDLE_SCOPE = "idle"
+
+#: Synthetic node of rows whose node could not be resolved (no idle row is written for it).
+UNRESOLVED_NODE = "__unresolved__"
+
+#: ``estimation_reasons`` prefix written when a row's cost is modeled, not observed.
+MODELED_COST_REASON_PREFIX = "No observed cost for pod"
+#: Estimation reason of a row whose window OpenCost could not price (COST-01).
+OPENCOST_PENDING_REASON = (
+    "OpenCost could not price this window (outage, lag or rejected request); modeled cost kept as "
+    "opencost_pending until the window is re-priced from OpenCost"
+)
+
+
+def mark_cost_pending(row: CombinedMetric) -> CombinedMetric:
+    """Label a modeled row of a window OpenCost could not price as ``opencost_pending`` (COST-01).
+
+    The modeled figure is kept (dashboards stay continuous) but the row is
+    never trusted, and the collection job replaces it with OpenCost's cost
+    once OpenCost answers for the window. Rows with an allocated cost are
+    returned unchanged.
+    """
+    if _is_observed_cost(row):
+        return row
+    reasons = list(dict.fromkeys([*row.estimation_reasons, OPENCOST_PENDING_REASON]))
+    return row.model_copy(
+        update={
+            "cost_source": CostSource.OPENCOST_PENDING.value,
+            "is_estimated": True,
+            "estimation_reasons": reasons,
+        }
+    )
+
+
+@dataclass
+class NodeIdleMetric:
+    """Unreserved capacity of one node over one interval (the ``__idle__`` workload).
+
+    Stored in ``node_idle_metrics``; never mixed into pod rows, so analyzers
+    and pod-level dashboards are unaffected, while node totals stay
+    reconstructible as ``Σ pod rows + idle row``.
+    """
+
+    node: str
+    timestamp: datetime
+    duration_seconds: int
+    joules: float
+    co2e_grams: float
+    embodied_co2e_grams: float
+    total_cost: float
+    cost_cpu: float
+    cost_ram: float
+    cost_source: Optional[str]
+    cpu_unreserved_cores: float
+    memory_unreserved_bytes: float
+    gpu_power_watts: Optional[float] = None
+    pue: Optional[float] = None
+    grid_intensity: Optional[float] = None
+    emaps_zone: Optional[str] = None
+    power_source: Optional[str] = None
+    intensity_source: Optional[str] = None
+    model_version: str = IMPACT_MODEL_VERSION
+    scope: str = IDLE_SCOPE
+    embodied_source: Optional[str] = None
+    #: Where the node's GPU power came from (``GpuSource``), NULL without GPUs (NRG-13).
+    gpu_source: Optional[str] = None
+    #: Inputs ``greenkube recompute`` needs to re-derive the row (0184): the node's share of a
+    #: shared host (1.0 alone, NRG-15) and its root-cgroup CPU (None: the pods' sum, NRG-12).
+    #: ``host_share`` NULL marks a row written before they were recorded.
+    host_share: Optional[float] = None
+    node_cpu_used_cores: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class NodeSpec:
+    """What is known about one node at one interval, before pricing."""
+
+    name: str
+    instance_type: Optional[str] = None
+    provider: Optional[str] = None
+    region: Optional[str] = None
+    cpu_capacity_cores: Optional[float] = None
+    memory_capacity_bytes: Optional[float] = None
+    #: Power profile: idle (min) and full-load (max) watts, vCPUs, provenance.
+    idle_watts: float = 0.0
+    max_watts: float = 0.0
+    vcores: Optional[float] = None
+    power_source: str = PowerSource.DEFAULT_PROFILE.value
+    #: Whole-node embodied emissions per hour (g CO2e / h); 0 when unknown.
+    embodied_g_per_hour: float = 0.0
+    gpu_unattributed_watts: float = 0.0
+    is_fallback: bool = False
+    #: Where ``embodied_g_per_hour`` came from (``EmbodiedSource``) and its row estimation reason (NRG-01).
+    embodied_source: Optional[str] = None
+    embodied_reason: Optional[str] = None
+    #: Share of a host shared with other nodes (1.0 alone) and its row estimation reason (NRG-15).
+    host_share: float = 1.0
+    host_reason: Optional[str] = None
+    #: Estimation reason of a GPU node without DCGM samples (NRG-13).
+    gpu_reason: Optional[str] = None
+    #: Where the node's GPU power came from (``GpuSource``); None without GPUs or when unknown (NRG-13).
+    gpu_source: Optional[str] = None
+    #: Whole-node CPU in use (cores, window average) incl. kubelet, runtime and kernel; None: pods only (NRG-12).
+    node_cpu_used_cores: Optional[float] = None
+
+
+@dataclass
+class AllocatedWindow:
+    """Allocated pod rows of one node and interval, and its idle row (if any)."""
+
+    rows: List[CombinedMetric] = field(default_factory=list)
+    idle: Optional[NodeIdleMetric] = None
+
+
+def _is_observed_cost(row: CombinedMetric) -> bool:
+    source = (row.cost_source or "").strip().lower()
+    if source in ALLOCATED_COST_SOURCES:
+        return True
+    # Legacy rows without provenance: a positive cost came from OpenCost.
+    return not source and (row.total_cost or 0.0) > 0
+
+
+#: Prefixes of node-level estimation reasons the allocator rewrites on every allocation.
+_NODE_REASON_PREFIXES = (SHARED_HOST_REASON_PREFIX, GPU_TDP_ESTIMATE_REASON_PREFIX, GPU_UNMEASURED_REASON_PREFIX)
+
+
+def embodied_g_per_hour(profile: Optional[Mapping[str, Any]]) -> float:
+    """Whole-node embodied emissions per hour from a Boavizta cache entry."""
+    if not profile:
+        return 0.0
+    gwp = profile.get("gwp_manufacture")
+    lifespan = profile.get("lifespan_hours")
+    try:
+        gwp_kg = float(gwp) if gwp is not None else 0.0
+        hours = float(lifespan) if lifespan is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+    return gwp_kg * 1000.0 / hours if gwp_kg > 0 and hours > 0 else 0.0
+
+
+class MetricRowAllocator:
+    """Applies :meth:`ImpactModel.allocate` to the stored rows of one node and interval."""
+
+    def __init__(
+        self,
+        config: Any,
+        *,
+        model: Optional[ImpactModel] = None,
+        catalog: Optional[PricingCatalog] = None,
+    ):
+        self.config = config
+        self.model: ImpactModel = model if model is not None else DEFAULT_IMPACT_MODEL
+        self.catalog = catalog if catalog is not None else PricingCatalog()
+        self.custom_rates = CustomRates.from_config(config)
+        self.memory_watts_per_gib = memory_watts_per_gib(config)
+        cluster = getattr(config, "CLUSTER_NAME", "")
+        self.cluster_uid = cluster if isinstance(cluster, str) else ""
+
+    def node_profile(
+        self,
+        spec: NodeSpec,
+        rows: Sequence[CombinedMetric],
+        *,
+        pue: float,
+        intensity: float,
+        hours: float,
+    ) -> NodeImpactProfile:
+        """Builds the node profile of one interval: power, embodied, prices, environment.
+
+        Unit prices follow the cost chain (observed per-resource costs of the
+        interval's rows, then the catalog, then custom rates). Only rows whose
+        cost is really observed (OpenCost/Kubecost) feed the observed tier: a
+        stored row with a modeled cost must never be read back as an observed
+        price, or a recompute would blend model outputs into "observed" rates.
+        """
+        observed_rows = [row for row in rows if _is_observed_cost(row)]
+        resolver = UnitPriceResolver(
+            catalog=self.catalog,
+            custom_rates=self.custom_rates,
+            observed=observed_rates_from_rows(observed_rows, hours),
+        )
+        cores = spec.cpu_capacity_cores or spec.vcores or 1.0
+        memory_gib = (spec.memory_capacity_bytes or 0.0) / BYTES_PER_GIB
+        prices = resolver.resolve(
+            node_name=spec.name or None,
+            provider=spec.provider,
+            region=spec.region,
+            instance_type=spec.instance_type,
+            vcpus=cores,
+            memory_gib=memory_gib or None,
+        )
+        try:
+            power_source = PowerSource(spec.power_source)
+        except ValueError:
+            power_source = PowerSource.DEFAULT_PROFILE
+        # A shared host (NRG-15): this node gets its share of the host idle, memory and embodied.
+        scaled = scale_to_host_share(
+            idle_watts=spec.idle_watts,
+            max_watts=spec.max_watts,
+            memory_watts_per_gib=self.memory_watts_per_gib,
+            embodied_g_per_hour=spec.embodied_g_per_hour,
+            share=spec.host_share,
+        )
+        return NodeImpactProfile(
+            name=spec.name,
+            cpu_capacity_cores=float(cores),
+            mem_capacity_gib=memory_gib,
+            idle_watts=scaled.idle_watts,
+            max_watts=scaled.max_watts,
+            embodied_g_per_hour=scaled.embodied_g_per_hour,
+            prices=prices,
+            pue=pue,
+            grid_intensity_g_per_kwh=intensity,
+            power_source=power_source,
+            instance_type=spec.instance_type,
+            region=spec.region,
+            provider=spec.provider,
+            is_fallback=spec.is_fallback,
+            memory_watts_per_gib=scaled.memory_watts_per_gib,
+            gpu_unattributed_watts=max(spec.gpu_unattributed_watts, 0.0),
+            embodied_source=spec.embodied_source,
+            embodied_reason=spec.embodied_reason,
+            host_reason=spec.host_reason,
+            host_share=spec.host_share if 0.0 < spec.host_share <= 1.0 else 1.0,
+            gpu_reason=spec.gpu_reason,
+            gpu_source=spec.gpu_source,
+            node_cpu_used_cores=spec.node_cpu_used_cores,
+        )
+
+    def modeled_prices(self, node: NodeImpactProfile) -> UnitPrices:
+        """Unit prices of the node from list prices or custom rates, never from observed costs.
+
+        A row without an observed cost is priced at these: a cost derived from
+        other pods' OpenCost costs is still a model output and must not carry
+        the ``opencost`` label that measurement trusts.
+        """
+        if node.prices.source not in ALLOCATED_COST_SOURCES:
+            return node.prices
+        resolver = UnitPriceResolver(catalog=self.catalog, custom_rates=self.custom_rates)
+        return resolver.resolve(
+            node_name=None,
+            provider=node.provider,
+            region=node.region,
+            instance_type=node.instance_type,
+            vcpus=node.cpu_capacity_cores,
+            memory_gib=node.mem_capacity_gib or None,
+        )
+
+    def _ref(self, row: CombinedMetric) -> WorkloadRef:
+        return WorkloadRef(cluster_uid=self.cluster_uid, namespace=row.namespace, kind="Pod", name=row.pod_name)
+
+    def allocate(
+        self,
+        rows: Sequence[CombinedMetric],
+        node: NodeImpactProfile,
+        hours: float,
+        *,
+        emit_idle: bool = True,
+        idle_fields: Optional[Mapping[str, Any]] = None,
+    ) -> AllocatedWindow:
+        """Allocates the pod rows of one node interval; returns updated copies and the idle row.
+
+        ``rows`` must be pod rows (no container rows) of the same node and
+        interval, at most one per pod. ``emit_idle`` is False for rows whose
+        node is unknown: their synthetic node has no idle capacity to report.
+        """
+        if not rows:
+            return AllocatedWindow()
+        if not node.name:
+            node = replace(node, name=UNRESOLVED_NODE)
+        refs: Dict[WorkloadRef, CombinedMetric] = {}
+        samples = []
+        for row in rows:
+            ref = self._ref(row)
+            refs[ref] = row
+            # Rows without a resolved node (``node=None``) are allocated to the
+            # synthetic node they were grouped under, never left unallocated.
+            samples.append(replace(sample_from_metric(row, ref, hours), node=node.name))
+        result = self.model.allocate(ClusterSnapshot(self.cluster_uid, hours, {node.name: node}, samples))
+        by_ref: Dict[WorkloadRef, WorkloadImpact] = {}
+        idle_impact: Optional[WorkloadImpact] = None
+        for impact in result.impacts:
+            if impact.scope == IDLE_SCOPE:
+                idle_impact = impact
+            else:
+                by_ref[impact.ref] = impact
+
+        modeled = self.modeled_prices(node)
+        allocated: List[CombinedMetric] = []
+        for ref, row in refs.items():
+            impact = by_ref.get(ref)
+            if impact is None:  # pragma: no cover - every sample of a known node is allocated
+                allocated.append(row)
+                continue
+            allocated.append(self._apply(row, impact, node, modeled))
+
+        idle: Optional[NodeIdleMetric] = None
+        if emit_idle and idle_impact is not None:
+            idle = self._idle_row(idle_impact, node, modeled, rows, samples, hours, idle_fields or {})
+        return AllocatedWindow(rows=allocated, idle=idle)
+
+    def _apply(
+        self, row: CombinedMetric, impact: WorkloadImpact, node: NodeImpactProfile, modeled: UnitPrices
+    ) -> CombinedMetric:
+        update: Dict[str, Any] = {
+            "joules": impact.energy_kwh.total * JOULES_PER_KWH,
+            "co2e_grams": impact.co2e_operational_g,
+            "embodied_co2e_grams": impact.co2e_embodied_g,
+            "model_version": impact.model_version,
+        }
+        if node.embodied_source is not None:
+            # NRG-01: the embodied provenance is recomputed with the row; a fallback is flagged.
+            reasons = [r for r in row.estimation_reasons if not r.startswith(EMBODIED_FALLBACK_REASON_PREFIX)]
+            if node.embodied_reason:
+                reasons.append(node.embodied_reason)
+            update["embodied_source"] = node.embodied_source
+            update["estimation_reasons"] = reasons
+            if node.embodied_reason:
+                update["is_estimated"] = True
+        if node.gpu_source is not None:
+            update["gpu_source"] = node.gpu_source
+        # NRG-15 and NRG-13: a node sharing its host, or with GPUs DCGM does not report, says so.
+        node_reasons = [reason for reason in (node.host_reason, node.gpu_reason) if reason]
+        reasons = [
+            r
+            for r in update.get("estimation_reasons", row.estimation_reasons)
+            if not r.startswith(_NODE_REASON_PREFIXES)
+        ]
+        if node_reasons:
+            reasons.extend(node_reasons)
+            update["is_estimated"] = True
+        if reasons != list(row.estimation_reasons) or "estimation_reasons" in update:
+            update["estimation_reasons"] = reasons
+        if not _is_observed_cost(row):
+            # Allocation cost is share × capacity × unit price, so re-pricing a
+            # share at the modeled prices is a per-resource rescale.
+            cpu = _rescale(impact.cost_allocated.cpu, node.prices.cpu_core_hour, modeled.cpu_core_hour)
+            ram = _rescale(impact.cost_allocated.ram, node.prices.ram_gib_hour, modeled.ram_gib_hour)
+            update.update(
+                total_cost=cpu + ram,
+                cost_cpu=cpu,
+                cost_ram=ram,
+                cost_storage=None,
+                cost_network=None,
+                cost_lb=None,
+                cost_source=modeled.source.value,
+            )
+            reason = (
+                f"{MODELED_COST_REASON_PREFIX} '{row.pod_name}'; cost allocated by reservation at "
+                f"{modeled.source.value} unit prices ({modeled.detail or 'unspecified'})"
+            )
+            reasons = [
+                r
+                for r in update.get("estimation_reasons", row.estimation_reasons)
+                if not r.startswith("No cost data for pod")
+            ]
+            reasons = [r for r in reasons if not r.startswith(MODELED_COST_REASON_PREFIX)]
+            update["estimation_reasons"] = [*reasons, reason]
+            update["is_estimated"] = True
+            if (row.cost_source or "").strip().lower() == CostSource.OPENCOST_PENDING.value:
+                # A recompute re-prices the model but the window still waits for OpenCost.
+                update["cost_source"] = CostSource.OPENCOST_PENDING.value
+        if "estimation_reasons" in update:
+            # A re-allocation that drops a reason (a host no longer shared, a GPU now measured)
+            # clears the flag too: a row is estimated when it says why.
+            update["is_estimated"] = bool(update["estimation_reasons"])
+        return row.model_copy(update=update)
+
+    def _idle_row(
+        self,
+        impact: WorkloadImpact,
+        node: NodeImpactProfile,
+        modeled: UnitPrices,
+        rows: Sequence[CombinedMetric],
+        samples: Sequence[Any],
+        hours: float,
+        fields: Mapping[str, Any],
+    ) -> NodeIdleMetric:
+        """Builds the ``__idle__`` row of a node interval.
+
+        OpenCost idle cost is not queried, so the unreserved capacity is always
+        priced at the modeled (catalog or custom) prices and labeled with that
+        tier, never with the observed tier of the pods' OpenCost costs.
+        """
+        reserved_cpu = sum(sample.cpu_reserved_cores * sample.hours for sample in samples)
+        reserved_mem = sum(sample.mem_reserved_gib * sample.hours for sample in samples)
+        unreserved_cpu = max(node.allocatable_cpu * hours - reserved_cpu, 0.0) / hours if hours > 0 else 0.0
+        unreserved_mem = max(node.allocatable_mem * hours - reserved_mem, 0.0) / hours if hours > 0 else 0.0
+        cost_cpu = _rescale(impact.cost_allocated.cpu, node.prices.cpu_core_hour, modeled.cpu_core_hour)
+        cost_ram = _rescale(impact.cost_allocated.ram, node.prices.ram_gib_hour, modeled.ram_gib_hour)
+        first = rows[0]
+        timestamp = fields.get("timestamp") or first.timestamp
+        if timestamp is None:
+            raise ValueError("idle rows require a timestamp")
+        return NodeIdleMetric(
+            node=node.name,
+            timestamp=timestamp,
+            duration_seconds=int(round(hours * 3600)),
+            joules=impact.energy_kwh.total * JOULES_PER_KWH,
+            co2e_grams=impact.co2e_operational_g,
+            embodied_co2e_grams=impact.co2e_embodied_g,
+            total_cost=cost_cpu + cost_ram,
+            cost_cpu=cost_cpu,
+            cost_ram=cost_ram,
+            cost_source=modeled.source.value,
+            cpu_unreserved_cores=unreserved_cpu,
+            memory_unreserved_bytes=unreserved_mem * BYTES_PER_GIB,
+            gpu_power_watts=node.gpu_unattributed_watts or None,
+            pue=node.pue,
+            grid_intensity=node.grid_intensity_g_per_kwh,
+            emaps_zone=fields.get("emaps_zone", first.emaps_zone),
+            power_source=node.power_source.value,
+            intensity_source=fields.get("intensity_source", first.intensity_source),
+            model_version=impact.model_version,
+            embodied_source=node.embodied_source,
+            gpu_source=node.gpu_source,
+            host_share=node.host_share,
+            node_cpu_used_cores=node.node_cpu_used_cores,
+        )
+
+
+def _rescale(cost: float, price: float, new_price: float) -> float:
+    return cost * new_price / price if price > 0 else 0.0
+
+
+def group_rows_by_node_interval(
+    rows: Sequence[CombinedMetric],
+) -> Dict[Tuple[str, Optional[datetime]], List[CombinedMetric]]:
+    """Groups pod rows (container rows excluded) by ``(node, timestamp)``."""
+    groups: Dict[Tuple[str, Optional[datetime]], List[CombinedMetric]] = {}
+    for row in rows:
+        if row.container_name:
+            continue
+        groups.setdefault((row.node or "", row.timestamp), []).append(row)
+    return groups
+
+
+def _reservation(requests: Sequence[Optional[float]], usages: Sequence[Optional[float]]) -> List[float]:
+    weights = []
+    for request, usage in zip(requests, usages, strict=True):
+        values = [float(value) for value in (request, usage) if value is not None and math.isfinite(float(value))]
+        weights.append(max([0.0, *values]))
+    return weights
+
+
+def _unknown(requests: Sequence[Optional[float]], usages: Sequence[Optional[float]]) -> bool:
+    """Whether some container has neither a positive request nor a known usage."""
+    return any(not (request or 0) > 0 and usage is None for request, usage in zip(requests, usages, strict=True))
+
+
+def container_cost_shares(
+    cpu_requests: Sequence[Optional[float]],
+    cpu_usages: Sequence[Optional[float]],
+    memory_requests: Sequence[Optional[float]],
+    memory_usages: Sequence[Optional[float]],
+) -> Tuple[List[float], List[float]]:
+    """CPU and RAM cost shares of a pod's containers by reservation (COST-02, IMP-02).
+
+    OpenCost and the Impact Model charge the reservation ``max(request,
+    usage)``, so the CPU cost of a pod row is split by each container's
+    ``max(cpu_request, cpu_usage)`` and the RAM cost by ``max(memory_request,
+    memory_usage)``, never by usage alone. Without any CPU reservation the
+    memory one is used (and the other way round); the split is equal only
+    when neither is known. Collection and ``greenkube recompute`` share this
+    rule. Each list sums to 1.
+    """
+    count = len(cpu_requests)
+    if count == 0:
+        return [], []
+    cpu = _reservation(cpu_requests, cpu_usages)
+    memory = _reservation(memory_requests, memory_usages)
+    # A container with no request and an unknown usage has an unknown reservation, not a zero one:
+    # the resource falls back to an equal split rather than giving it no cost (review 5).
+    if _unknown(cpu_requests, cpu_usages):
+        cpu = [1.0] * count
+    if _unknown(memory_requests, memory_usages):
+        memory = [1.0] * count
+    if sum(cpu) <= 0:
+        cpu = memory if sum(memory) > 0 else [1.0] * count
+    if sum(memory) <= 0:
+        memory = cpu
+    cpu_total, memory_total = sum(cpu), sum(memory)
+    return [value / cpu_total for value in cpu], [value / memory_total for value in memory]
+
+
+def is_modeled_cost(source: Optional[str]) -> bool:
+    """True for cost tiers the model computes itself (catalog or custom rates, or pending OpenCost re-pricing)."""
+    return (source or "") in {
+        CostSource.PRICING_CATALOG.value,
+        CostSource.CUSTOM_RATE.value,
+        CostSource.OPENCOST_PENDING.value,
+    }
+
+
+def container_gpu_fields(pod: CombinedMetric, container_count: int) -> Dict[str, Any]:
+    """GPU fields of a pod's container rows.
+
+    DCGM attributes GPU power and utilization to pods, not containers: a
+    single container inherits them, several containers get none, so summing
+    container rows never counts the pod's GPU more than once.
+    """
+    if container_count == 1:
+        return {"gpu_power_watts": pod.gpu_power_watts, "gpu_usage_millicores": pod.gpu_usage_millicores}
+    return {"gpu_power_watts": None, "gpu_usage_millicores": None}

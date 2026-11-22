@@ -1,116 +1,391 @@
-# src/greenkube/core/optimization/analyzers/rightsizing_memory.py
-"""Memory rightsizing: targets whose memory requests far exceed actual usage."""
+"""Memory rightsizing: requests far above usage (decrease) or too close to it (increase)."""
 
 import logging
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple
 
 from greenkube.core.optimization.analyzers.base import Analyzer
-from greenkube.core.optimization.statistics import (
-    annualized_nonnegative_window_total,
-    annualized_window_total,
-    balanced_rightsizing_target,
-    latest_request_value,
-    percentile,
-    resource_savings_ratio,
-    usage_stats,
+from greenkube.core.optimization.analyzers.rightsizing import (
+    CONTAINER_USAGE_EXCEEDS_POD,
+    MEMORY_LIMIT_PRESSURE,
+    MEMORY_MAX_FACTOR,
+    MIB,
+    OOM_SPIKE_LIMIT_FACTOR,
+    RELIABILITY_SIGNALS_UNKNOWN,
+    RELIABILITY_SIGNALS_UNKNOWN_TEXT,
+    RightsizingProposal,
+    max_increase_factor,
+    memory_proposal,
+    oom_proven_usage,
+    oom_step_factor,
+    skipped_increase,
+    withheld_decrease,
 )
-from greenkube.core.optimization.targeting import (
-    owner_fields,
-    scope_for_target_kind,
-    split_series_by_container,
-    target_label,
-)
+from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
+from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
+from greenkube.models.workload_usage import POD_LEVEL
+from greenkube.signals.consensus import OOM_FLOOR_REASON
 
 if TYPE_CHECKING:
+    from greenkube.core.config import Config
     from greenkube.core.optimization.context import OptimizationContext
+    from greenkube.models.workload_usage import TargetKey, UsageSnapshot, UsageStats, WorkloadUsageSummary
 
 LOG = logging.getLogger(__name__)
 
+_TRIGGER_TEXT = {
+    "p99_above_request": "p99 working set is close to or above the request",
+    "oom_kills": "containers were OOM-killed",
+    "working_set_near_limit": "the working set exceeds 90% of the memory limit",
+}
+
+#: A skipped target: (target, container or None, resource, reason code).
+Skip = Tuple["TargetKey", Optional[str], str, str]
+
+
+_SIGNAL_LABELS = {"oom_kills": "OOM kills", "restarts": "restarts", "throttling": "CPU throttling"}
+
+#: Skip code: the container's OOM kills happened under a previous memory request or limit (REC-02).
+OOM_KILLS_BEFORE_CHANGE = "oom_kills_before_change"
+
+
+def liveness_diagnostics(gone: int, not_running: int) -> List[Dict[str, Any]]:
+    """Source-run diagnostics of the targets left out because they no longer run (REC-05)."""
+    notes: List[Dict[str, Any]] = []
+    if not_running:
+        notes.append(
+            {
+                "level": "info",
+                "code": "target_not_running",
+                "message": f"{not_running} target(s) not running (scaled to zero, or their pods could not be "
+                "listed): no new rightsizing advice, their recommendations are kept.",
+                "count": not_running,
+            }
+        )
+    if gone:
+        notes.append(
+            {
+                "level": "info",
+                "code": "target_gone",
+                "message": f"{gone} target(s) no longer exist in the cluster (or are finished Jobs): their "
+                "recommendations are retired (target_gone).",
+                "count": gone,
+            }
+        )
+    return notes
+
+
+def static_pod_diagnostics(count: int) -> List[Dict[str, Any]]:
+    """Source-run diagnostic of the static (mirror) pods left out of every analyzer (F-04, REC-09)."""
+    if not count:
+        return []
+    return [
+        {
+            "level": "info",
+            "code": "static_pods_excluded",
+            "message": f"{count} static (mirror) pod(s) left out: their manifests live on the node "
+            "(kubeadm, kind, minikube, k3s control planes), not in Git, so GreenKube does not advise on them.",
+            "count": count,
+        }
+    ]
+
+
+def stale_oom_diagnostics(skipped: List[Skip]) -> List[Dict[str, Any]]:
+    """Source-run diagnostic of the containers whose OOM kills predate their current limit (REC-02)."""
+    stale = [skip for skip in skipped if skip[3] == OOM_KILLS_BEFORE_CHANGE]
+    if not stale:
+        return []
+    return [
+        {
+            "level": "info",
+            "code": OOM_KILLS_BEFORE_CHANGE,
+            "message": f"{len(stale)} container(s) were OOM-killed in the lookback only under a previous memory "
+            "request or limit: those kills are not held against the current limit (no further increase until a "
+            "kill happens under it).",
+            "count": len(stale),
+        }
+    ]
+
+
+def reliability_diagnostics(
+    skipped: List[Skip], signal_status: Mapping[str, str], snapshot: Optional["UsageSnapshot"] = None
+) -> List[Dict[str, Any]]:
+    """Source-run diagnostics of the decreases withheld for unknown reliability signals (REC-04).
+
+    With ``snapshot``, the message also counts the containers whose rollup restart
+    history is unknown only because hours rolled before migration 0130 (upgrade)
+    could not be rebuilt from stored rows.
+    """
+    withheld = [skip for skip in skipped if skip[3] == RELIABILITY_SIGNALS_UNKNOWN]
+    if not withheld:
+        return []
+    legacy = 0
+    if snapshot is not None:
+        for target, container, _resource, _reason in withheld:
+            summaries = snapshot.summaries.get(target, {})
+            candidates = (summaries.get(container or POD_LEVEL), summaries.get(POD_LEVEL))
+            if any(item is not None and item.restart_increase_legacy for item in candidates):
+                legacy += 1
+    upgrade = (
+        f"; {legacy} of them because hours rolled before the upgrade (migration 0130) carry no per-pod restart "
+        "history and their metric rows are no longer stored (resolves as the lookback fills with new hours)"
+        if legacy
+        else ""
+    )
+    unread = [
+        f"{_SIGNAL_LABELS.get(name, name)} {status}"
+        for name, status in sorted(signal_status.items())
+        if name in ("oom_kills", "restarts") and status != "ok"
+    ]
+    detail = f" (signals: {', '.join(unread)})" if unread else ""
+    return [
+        {
+            "level": "warning",
+            "code": RELIABILITY_SIGNALS_UNKNOWN,
+            "message": f"{len(withheld)} {RELIABILITY_SIGNALS_UNKNOWN_TEXT}{detail}{upgrade}; "
+            "previous decreases of these containers are retired.",
+            "count": len(withheld),
+        }
+    ]
+
+
+def record_withheld_decrease(
+    skipped: List[Skip],
+    config: "Config",
+    summary: "WorkloadUsageSummary",
+    pod_summary: Optional["WorkloadUsageSummary"],
+    resource: str,
+    context: Optional["OptimizationContext"] = None,
+) -> None:
+    """Appends a ``reliability_signals_unknown`` skip when the target's decrease was withheld.
+
+    The withheld target is also registered on ``context.withheld_decreases`` so
+    the engine retires its previous decrease with that reason (REC-04).
+    """
+    reason = withheld_decrease(config, summary, pod_summary, "cpu" if resource == "cpu" else "memory")
+    if reason is None:
+        return
+    skipped.append((summary.target, summary.container_name, resource, reason))
+    if context is not None:
+        context.withheld_decreases.add((*summary.target, summary.container_name or "", resource))
+    LOG.info(
+        "%s decrease for %s/%s/%s container %r withheld (%s): restart/OOM history could not be read.",
+        "CPU" if resource == "cpu" else "Memory",
+        *summary.target,
+        summary.container_name,
+        reason,
+    )
+
+
+def increase_sizing_text(
+    config: "Config",
+    proposal: RightsizingProposal,
+    stats: "UsageStats",
+    unit: str,
+    stats_owner: Optional["WorkloadUsageSummary"] = None,
+) -> str:
+    """Explains how an increase was sized (shared wording with the CPU analyzer).
+
+    ``stats_owner`` is the container's summary: it names the limit an OOM-sized increase starts from.
+    """
+
+    def fmt(value: float) -> str:
+        return f"{value / MIB:.0f}MiB" if unit == "MiB" else f"{value:.0f}m"
+
+    bounded = CONTAINER_USAGE_EXCEEDS_POD in proposal.evidence
+    owner = "pod's" if bounded else "per-replica"
+    if proposal.basis == "oom_limit":
+        proven = oom_proven_usage(stats_owner) if stats_owner is not None else 0
+        what = "memory limit" if stats_owner is not None and stats_owner.memory_limit else "memory request"
+        step = oom_step_factor(config, stats_owner, stats.max) if stats_owner is not None else OOM_SPIKE_LIMIT_FACTOR
+        if proven > 0 and stats.max >= proven * MEMORY_LIMIT_PRESSURE:
+            why = (
+                f"the working set reached it (observed maximum {fmt(stats.max)}), so the need above it is unknown: "
+                "one decisive step instead of small ones"
+            )
+        else:
+            why = f"a short spike the samples missed (observed maximum {fmt(stats.max)})"
+        text = (
+            f"Sized from the {what} ({fmt(proven)}) the OOM kills prove was passed x {step:g}, "
+            f"at most {max_increase_factor(config):g}x the current request: {why}."
+        )
+    elif proposal.basis == "observed_max":
+        text = (
+            f"Sized from the {owner} observed maximum ({fmt(stats.max)}) x {MEMORY_MAX_FACTOR:g}, "
+            "because OOM kills or limit pressure show that peaks matter."
+        )
+    else:
+        text = (
+            f"Sized from the {owner} p99 ({fmt(stats.p99)}, container warm-up excluded) "
+            f"x headroom {config.RIGHTSIZING_HEADROOM:g}."
+        )
+    if bounded:
+        text += (
+            " The container's own usage exceeded its pod's cgroup, which contains it "
+            f"({CONTAINER_USAGE_EXCEEDS_POD}): the Metrics API working set likely counts page cache, "
+            "so the pod's per-replica usage bounds the sizing."
+        )
+    if proposal.capped and proposal.cap_factor:
+        text += (
+            f" Capped at {proposal.cap_factor:g}x the current request (usage suggests {fmt(proposal.raw_proposed)}): "
+            "the next scan re-evaluates once this step is applied."
+        )
+    return text
+
 
 class MemoryRightsizingAnalyzer(Analyzer):
-    """Identifies targets with memory requests much larger than actual usage."""
+    """Two-way memory rightsizing from per-container usage summaries (roadmap E3, E9)."""
 
     capability = "memory_rightsizing"
+
+    def __init__(self, config: "Config"):
+        super().__init__(config)
+        #: Targets whose usage calls for a change that was not proposed, with the reason.
+        self.skipped: List[Skip] = []
+        self._signal_status: Dict[str, str] = {}
+        self._snapshot: Optional["UsageSnapshot"] = None
+        #: (gone, not running) target counts of the last scan (REC-05).
+        self._liveness: Tuple[int, int] = (0, 0)
+        #: Static (mirror) pods left out of the last scan (F-04).
+        self._static_pods = 0
+
+    def scan_diagnostics(self) -> List[Dict[str, Any]]:
+        """Decreases withheld for unknown reliability signals in the last scan."""
+        return [
+            *reliability_diagnostics(self.skipped, self._signal_status, self._snapshot),
+            *stale_oom_diagnostics(self.skipped),
+            *liveness_diagnostics(*self._liveness),
+            *static_pod_diagnostics(self._static_pods),
+        ]
 
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
         cfg = self.config
+        projector = ImpactProjector.for_context(context)
+        self.skipped = []
 
-        for (ns, target_kind, target_name), target_series in context.target_series().items():
-            for container_name, series in split_series_by_container(target_series):
-                mem_request = latest_request_value(series, "memory_request")
-                if mem_request == 0:
-                    continue
-
-                avg_usage, observed_max, usages = usage_stats(
-                    series,
-                    "memory_usage_bytes",
-                    "memory_usage_max_bytes",
+        snapshot = context.usage_snapshot()
+        self._liveness = (len(context.gone_targets), len(context.not_running_targets))
+        self._static_pods = context.static_pod_count
+        self._signal_status = dict(snapshot.reliability_signal_status)
+        self._snapshot = snapshot
+        for target, container_name, summary in context.iter_container_summaries():
+            ns, target_kind, target_name = target
+            skip = skipped_increase(cfg, summary, "memory")
+            if skip is not None:
+                self.skipped.append((target, container_name, "memory", skip))
+                LOG.info(
+                    "Memory increase for %s/%s/%s not proposed (%s): usage is only known for the whole pod.",
+                    ns,
+                    target_kind,
+                    target_name,
+                    skip,
                 )
-                if not usages:
-                    continue
+                continue
+            pod_summary = snapshot.summaries.get(target, {}).get(POD_LEVEL)
+            proposal = memory_proposal(cfg, summary, pod_summary)
+            if proposal is None:
+                record_withheld_decrease(self.skipped, cfg, summary, pod_summary, "memory", context)
+            if summary.oom_kills_before_change and (proposal is None or "oom_kills" not in proposal.triggers):
+                self.skipped.append((target, container_name, "memory", OOM_KILLS_BEFORE_CHANGE))
+                LOG.info(
+                    "Memory of %s/%s/%s container %r: %d OOM kill(s) happened under a previous request or limit, "
+                    "not under the current limit (%s): no OOM-driven increase.",
+                    ns,
+                    target_kind,
+                    target_name,
+                    container_name,
+                    summary.oom_kills_before_change,
+                    f"{summary.memory_limit // MIB}MiB" if summary.memory_limit else "none",
+                )
+            stats = proposal.stats if proposal is not None and proposal.stats is not None else summary.memory
+            if proposal is None or stats is None:
+                continue
 
-                usage_ratio = avg_usage / mem_request
+            # The Impact Model prices only the moved memory reservation (BUG-15); an
+            # increase is a negative cost delta, kept as such (reliability value).
+            delta = projector.container_resources(
+                projector.workload_ref(ns, target_kind, target_name, container_name),
+                context.container_rows(target, container_name),
+                memory_bytes=(proposal.current, proposal.proposed),
+            )
+            label = target_label(target_kind, target_name)
+            if container_name:
+                label = f"{label} container '{container_name}'"
+            usage_ratio = stats.avg / proposal.current
+            limit_text = proposal.limit_text
 
-                if usage_ratio < cfg.RIGHTSIZING_MEMORY_THRESHOLD:
-                    p95 = percentile(usages, 95)
-                    raw_recommended = balanced_rightsizing_target(cfg, avg_usage, observed_max, p95)
-                    recommended = max(raw_recommended, cfg.RECOMMENDATION_MIN_MEMORY_BYTES)
-                    savings_ratio = resource_savings_ratio(mem_request, recommended)
-                    if savings_ratio is None:
-                        LOG.debug(
-                            "Skipping memory rightsizing for %s/%s: final %s bytes is not below current %s bytes.",
-                            ns,
-                            target_name,
-                            recommended,
-                            mem_request,
-                        )
-                        continue
-
-                    total_cost = sum(m.total_cost for m in series)
-                    total_co2 = sum(m.co2e_grams for m in series)
-                    annual_cost = annualized_nonnegative_window_total(total_cost, context.analysis_window_seconds)
-                    annual_co2 = annualized_window_total(total_co2, context.analysis_window_seconds)
-                    label = target_label(target_kind, target_name)
-                    if container_name:
-                        label = f"{label} container '{container_name}'"
-                    floor_description = ""
-                    floor_reason = ""
-                    if recommended != raw_recommended:
-                        min_memory_mib = cfg.RECOMMENDATION_MIN_MEMORY_BYTES // (1024 * 1024)
-                        floor_description = f" (Floored to minimum: {min_memory_mib}MiB memory.)"
-                        floor_reason = (
-                            f" Recommended memory was below the minimum of {min_memory_mib}MiB; "
-                            "floored to avoid impractically small requests."
-                        )
-
-                    recs.append(
-                        Recommendation(
-                            pod_name=target_name,
-                            container_name=container_name,
-                            namespace=ns,
-                            type=RecommendationType.RIGHTSIZING_MEMORY,
-                            scope=scope_for_target_kind(target_kind),
-                            **owner_fields(target_kind, target_name),
-                            description=(
-                                f"{label} uses avg {avg_usage / (1024 * 1024):.0f}MiB and max "
-                                f"{observed_max / (1024 * 1024):.0f}MiB of "
-                                f"{mem_request / (1024 * 1024):.0f}MiB memory requested ({usage_ratio:.0%}). "
-                                f"Recommend reducing to {recommended / (1024 * 1024):.0f}MiB."
-                                f"{floor_description}"
-                            ),
-                            reason=(
-                                f"Average memory usage is {usage_ratio:.0%} of the request. "
-                                f"P95 usage is {p95 / (1024 * 1024):.0f}MiB and observed max is "
-                                f"{observed_max / (1024 * 1024):.0f}MiB."
-                                f"{floor_reason}"
-                            ),
-                            priority="medium",
-                            current_memory_request_bytes=mem_request,
-                            recommended_memory_request_bytes=recommended,
-                            potential_savings_cost=annual_cost * savings_ratio,
-                            potential_savings_co2e_grams=annual_co2 * savings_ratio,
-                        )
+            if proposal.direction == "increase":
+                causes = "; ".join(_TRIGGER_TEXT.get(trigger, trigger) for trigger in proposal.triggers)
+                description = (
+                    f"{label} uses p99 {stats.p99 / MIB:.0f}MiB and max {stats.max / MIB:.0f}MiB per replica of "
+                    f"{proposal.current / MIB:.0f}MiB memory requested. "
+                    f"Recommend increasing to {proposal.proposed / MIB:.0f}MiB.{limit_text}"
+                )
+                reason = (
+                    f"Reliability: {causes}. Average usage is {usage_ratio:.0%} of the request. "
+                    f"{increase_sizing_text(cfg, proposal, stats, 'MiB', summary)}"
+                )
+                priority = "high"
+            else:
+                floor_description = ""
+                floor_reason = ""
+                if proposal.floored:
+                    min_memory_mib = cfg.RECOMMENDATION_MIN_MEMORY_BYTES // MIB
+                    floor_description = f" (Floored to minimum: {min_memory_mib}MiB memory.)"
+                    floor_reason = (
+                        f" Recommended memory was below the minimum of {min_memory_mib}MiB; "
+                        "floored to avoid impractically small requests."
                     )
+                description = (
+                    f"{label} uses avg {stats.avg / MIB:.0f}MiB and max {stats.max / MIB:.0f}MiB of "
+                    f"{proposal.current / MIB:.0f}MiB memory requested ({usage_ratio:.0%}). "
+                    f"Recommend reducing to {proposal.proposed / MIB:.0f}MiB."
+                    f"{floor_description}{limit_text}"
+                )
+                reason = (
+                    f"Average memory usage is {usage_ratio:.0%} of the request. "
+                    f"P95 usage is {stats.p95 / MIB:.0f}MiB and observed max is {stats.max / MIB:.0f}MiB."
+                    f"{floor_reason}{_pod_level_note(container_name)}{_jvm_note(summary.jvm_hint)}"
+                )
+                priority = "medium"
+
+            recs.append(
+                Recommendation(
+                    pod_name=target_name,
+                    container_name=container_name,
+                    namespace=ns,
+                    type=RecommendationType.RIGHTSIZING_MEMORY,
+                    scope=scope_for_target_kind(target_kind),
+                    **owner_fields(target_kind, target_name),
+                    description=description,
+                    reason=reason,
+                    priority=priority,
+                    current_memory_request_bytes=proposal.current,
+                    recommended_memory_request_bytes=proposal.proposed,
+                    # An OOM kill proves the need: the increase is a lower bound of every consensus policy.
+                    floor_reason=OOM_FLOOR_REASON
+                    if proposal.direction == "increase" and "oom_kills" in proposal.triggers
+                    else None,
+                    **impact_fields(delta),
+                )
+            )
         return recs
+
+
+def _pod_level_note(container_name: Optional[str]) -> str:
+    if container_name:
+        return ""
+    return (
+        " Pod-level usage only (no container series): the values are the pod's total request and usage; "
+        "split the change between containers by their requests."
+    )
+
+
+def _jvm_note(hint: Optional[str]) -> str:
+    if not hint:
+        return ""
+    return (
+        f" JVM runtime suspected ({hint}): the heap is sized by the JVM, not by the working set; "
+        "check -Xmx before lowering the request."
+    )

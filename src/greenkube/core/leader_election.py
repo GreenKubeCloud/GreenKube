@@ -7,7 +7,9 @@ import logging
 import math
 import os
 import socket
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -77,7 +79,19 @@ class KubernetesLeaseElector:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._leader = False
         self._valid_until: datetime | None = None
+        self._lease_transitions: int | None = None
         self._attempt_lock = asyncio.Lock()
+
+    @property
+    def fencing_token(self) -> int | None:
+        """Lease generation (``leaseTransitions``) held by this process, or ``None`` when not leader.
+
+        The value only changes when another holder took the Lease in between,
+        so an unchanged token proves no other controller could have written.
+        """
+        if not self.is_leader:
+            return None
+        return self._lease_transitions
 
     @property
     def is_leader(self) -> bool:
@@ -122,19 +136,60 @@ class KubernetesLeaseElector:
                 self._log_api_error("request", error)
                 return False
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Continuously renew or contend until stopped."""
+    async def run(self, stop_event: asyncio.Event) -> bool:
+        """Continuously renew or contend until stopped.
+
+        Returns whether this replica held the Lease when it stopped. The Lease is NOT
+        released here: leader work may still be running or unwinding, so the caller
+        calls :meth:`release` only once all of it has stopped.
+        """
+        held = False
         try:
             while not stop_event.is_set():
                 await self.try_acquire_or_renew()
                 if stop_event.is_set():
-                    return
+                    break
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=self.retry_period_seconds)
                 except TimeoutError:
                     continue
         finally:
+            held = self._leader
             self._lose_leadership()
+        return held
+
+    async def release(self, timeout_seconds: float = 5.0) -> bool:
+        """Hand the Lease over on shutdown so a standby takes over without waiting for expiry.
+
+        Call it only after every piece of leader work has stopped: once the holder is
+        cleared, a standby can acquire within one retry period. Clearing is a
+        compare-and-set on this replica's identity. Best effort: any error leaves the
+        Lease to expire as before.
+        """
+        self._lose_leadership()
+        try:
+            return await asyncio.wait_for(self._release_once(), timeout=timeout_seconds)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._log_api_error("release", error)
+            return False
+
+    async def _release_once(self) -> bool:
+        async with self._attempt_lock:
+            api = await self._get_api()
+            if api is None:
+                return False
+            lease = await api.read_namespaced_lease(name=self.name, namespace=self.namespace)
+            spec = getattr(lease, "spec", None)
+            if spec is None or getattr(spec, "holder_identity", None) != self.identity:
+                return False
+            body = deepcopy(lease)
+            body.spec.holder_identity = None
+            body.spec.renew_time = self._now()
+            await api.replace_namespaced_lease(name=self.name, namespace=self.namespace, body=body)
+            logger.info("Released Kubernetes Lease %s/%s on shutdown.", self.namespace, self.name)
+            return True
 
     async def _get_api(self) -> Any | None:
         if self._api_provider is not None:
@@ -159,7 +214,7 @@ class KubernetesLeaseElector:
             self._lose_leadership()
             self._log_api_error("create", error)
             return False
-        self._confirm_leadership(now, self.lease_duration_seconds)
+        self._confirm_leadership(now, self.lease_duration_seconds, lease_transitions=0)
         return True
 
     async def _renew_or_take_over(self, api: Any, lease: Any) -> bool:
@@ -223,11 +278,12 @@ class KubernetesLeaseElector:
             self._log_api_error("replace", error)
             return False
 
-        self._confirm_leadership(write_time, duration)
+        self._confirm_leadership(write_time, duration, lease_transitions=transitions)
         return True
 
-    def _confirm_leadership(self, renewed_at: datetime, duration_seconds: int) -> None:
+    def _confirm_leadership(self, renewed_at: datetime, duration_seconds: int, *, lease_transitions: int) -> None:
         self._leader = True
+        self._lease_transitions = lease_transitions
         safe_deadline = min(
             duration_seconds * _LOCAL_RENEW_DEADLINE_FRACTION,
             DEFAULT_LEADER_ELECTION_RENEW_DEADLINE_SECONDS,
@@ -237,6 +293,7 @@ class KubernetesLeaseElector:
     def _lose_leadership(self) -> None:
         self._leader = False
         self._valid_until = None
+        self._lease_transitions = None
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -261,6 +318,74 @@ class KubernetesLeaseElector:
             operation,
             status if status is not None else "unknown",
         )
+
+
+class LeadershipLostError(RuntimeError):
+    """Raised by :meth:`LeaderFence.check` when the job must not commit."""
+
+
+class LeaderFence:
+    """Fencing token for one run of a leader-gated job (roadmap A14, BUG-13).
+
+    The fence captures the Lease generation when the job starts.  Before every
+    commit the job calls :meth:`check`, which raises
+    :class:`LeadershipLostError` if this process is no longer the Lease holder
+    or if another holder owned the Lease in between (generation changed).
+    ``is_leader`` fails closed well before the Lease can expire (at most 10 s
+    after the last renewal for a 30 s Lease), so a short commit that follows a
+    successful check cannot overlap another leader's writes.
+    A fence without an elector (single replica, CLI) never blocks.
+    """
+
+    def __init__(self, elector: KubernetesLeaseElector | None = None) -> None:
+        self._elector = elector
+        self.token: int | None = elector.fencing_token if elector is not None else None
+
+    @property
+    def enforced(self) -> bool:
+        return self._elector is not None
+
+    @property
+    def valid(self) -> bool:
+        if self._elector is None:
+            return True
+        return self.token is not None and self._elector.fencing_token == self.token
+
+    def check(self, operation: str = "commit") -> None:
+        if not self.valid:
+            raise LeadershipLostError(f"Lost the controller Lease before '{operation}'; aborting the job.")
+
+
+class LeaderGate:
+    """Callable ``should_run`` predicate that also hands out per-run fences."""
+
+    def __init__(self, elector: KubernetesLeaseElector) -> None:
+        self._elector = elector
+
+    def __call__(self) -> bool:
+        return self._elector.is_leader
+
+    def fence(self) -> LeaderFence:
+        return LeaderFence(self._elector)
+
+
+_UNFENCED = LeaderFence()
+_current_fence: ContextVar[LeaderFence | None] = ContextVar("greenkube_leader_fence", default=None)
+
+
+def current_leader_fence() -> LeaderFence:
+    """Return the fence of the running leader-gated job, or a no-op fence."""
+    return _current_fence.get() or _UNFENCED
+
+
+@contextmanager
+def leader_fence_scope(fence: LeaderFence | None) -> Iterator[LeaderFence]:
+    """Make ``fence`` the current fence for the duration of a job run."""
+    token = _current_fence.set(fence)
+    try:
+        yield fence or _UNFENCED
+    finally:
+        _current_fence.reset(token)
 
 
 def _lease_expired(spec: Any, now: datetime) -> bool:

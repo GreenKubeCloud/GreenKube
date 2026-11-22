@@ -36,16 +36,6 @@ tests:
           path: data.LOG_LEVEL
           value: "DEBUG"
 
-  - it: exposes the exact service host allowlist to the API
-    set:
-      config.serviceUrlAllowlist:
-        - prometheus.monitoring.svc
-        - api.example.test
-    asserts:
-      - equal:
-          path: data.SERVICE_URL_ALLOWLIST
-          value: prometheus.monitoring.svc,api.example.test
-
   - it: passes the Helm render capabilities of the installed cluster
     asserts:
       - isNotEmpty:
@@ -59,13 +49,16 @@ tests:
           path: data.DB_TYPE
           value: "postgres"
 
-  - it: should reflect sqlite db type
+  - it: always runs on PostgreSQL, even with the deprecated config.db.type set
     set:
-      config.db.type: sqlite
+      config.db.type: postgres
+      config.db.path: /data/old.db
     asserts:
       - equal:
           path: data.DB_TYPE
-          value: "sqlite"
+          value: "postgres"
+      - notExists:
+          path: data.DB_PATH
 
   - it: should set CLOUD_PROVIDER
     asserts:
@@ -110,6 +103,62 @@ tests:
           path: data.PROMETHEUS_QUERY_RANGE_STEP
           value: "5m"
 
+  - it: should set the collection catch-up settings
+    asserts:
+      - equal:
+          path: data.PROMETHEUS_SCRAPE_INTERVAL
+          value: "30s"
+      - equal:
+          path: data.COLLECTION_SAFETY_LAG
+          value: "1m"
+      - equal:
+          path: data.COLLECTION_MAX_BACKFILL
+          value: "24h"
+
+  - it: should allow overriding the collection catch-up settings
+    set:
+      config.prometheus.scrapeInterval: 15s
+      config.collection.safetyLag: 2m
+      config.collection.maxBackfill: 6h
+    asserts:
+      - equal:
+          path: data.PROMETHEUS_SCRAPE_INTERVAL
+          value: "15s"
+      - equal:
+          path: data.COLLECTION_SAFETY_LAG
+          value: "2m"
+      - equal:
+          path: data.COLLECTION_MAX_BACKFILL
+          value: "6h"
+
+  - it: should set the Kubernetes list failure budget of the collection
+    asserts:
+      - equal:
+          path: data.COLLECTION_K8S_LIST_MAX_FAILURES
+          value: "3"
+
+  - it: should allow overriding the Kubernetes list failure budget of the collection
+    set:
+      config.collection.k8sListMaxFailures: 5
+    asserts:
+      - equal:
+          path: data.COLLECTION_K8S_LIST_MAX_FAILURES
+          value: "5"
+
+  - it: should refuse a cluster UID change by default
+    asserts:
+      - equal:
+          path: data.ALLOW_CLUSTER_UID_CHANGE
+          value: "false"
+
+  - it: should allow adopting a database of another cluster once
+    set:
+      config.collection.allowClusterUidChange: true
+    asserts:
+      - equal:
+          path: data.ALLOW_CLUSTER_UID_CHANGE
+          value: "true"
+
   - it: should set PROMETHEUS_NODE_INSTANCE_LABEL
     asserts:
       - equal:
@@ -131,11 +180,52 @@ tests:
           path: data.API_PORT
           value: "8000"
 
-  - it: should set CORS_ORIGINS
+  - it: should keep CORS same-origin by default (BUG-59)
     asserts:
       - equal:
           path: data.CORS_ORIGINS
-          value: "*"
+          value: ""
+
+  - it: should render explicit CORS origins
+    set:
+      config.corsOrigins: "https://greenkube.example.com"
+    asserts:
+      - equal:
+          path: data.CORS_ORIGINS
+          value: "https://greenkube.example.com"
+
+  # Service URLs come from a Secret: the values Secret when set in values,
+  # otherwise a Settings-page override in the release Secret.
+  - it: should not carry service URLs that live in a Secret
+    set:
+      config.prometheus.url: "http://prometheus:9090"
+      config.opencost.url: "http://opencost:9003"
+      config.boavizta.url: "https://custom-boavizta.example.com"
+    asserts:
+      - notExists:
+          path: data.PROMETHEUS_URL
+      - notExists:
+          path: data.OPENCOST_API_URL
+      - notExists:
+          path: data.BOAVIZTA_API_URL
+
+  # secrets.existingSecret replaces the values Secret, so the ConfigMap carries
+  # the Boavizta URL (as in 0.3.x); a key in that Secret still wins.
+  - it: should carry BOAVIZTA_API_URL set in values when secrets.existingSecret is used
+    set:
+      secrets.existingSecret: gitops-credentials
+      config.boavizta.url: "https://custom-boavizta.example.com"
+    asserts:
+      - equal:
+          path: data.BOAVIZTA_API_URL
+          value: "https://custom-boavizta.example.com"
+
+  - it: should leave BOAVIZTA_API_URL to the app default with secrets.existingSecret
+    set:
+      secrets.existingSecret: gitops-credentials
+    asserts:
+      - notExists:
+          path: data.BOAVIZTA_API_URL
 
   - it: should set API_RATE_LIMIT
     asserts:
@@ -149,14 +239,127 @@ tests:
           path: data.ROOT_PATH
           value: ""
 
-  - it: should omit API keys when api.enabled is false
+  - it: keeps the API settings with the deprecated config.api.enabled false
     set:
       config.api.enabled: false
     asserts:
-      - isNull:
-          path: data.API_HOST
-      - isNull:
+      - equal:
           path: data.API_PORT
+          value: "8000"
+
+  # --------------------------------------------------------------------------
+  # Always-on automation (F12) and 0.3.x compatibility (F17)
+  # --------------------------------------------------------------------------
+  - it: renders always-on automation defaults
+    asserts:
+      - equal:
+          path: data.AUTOMATION_PAUSE_DELIVERY
+          value: "false"
+      - equal:
+          path: data.AUTOMATION_REPOSITORY_ALLOWLIST
+          value: '["@discovered"]'
+      - equal:
+          path: data.GITOPS_DEFAULT_CREDENTIALS_SECRET
+          value: greenkube-git-credentials
+      - notExists:
+          path: data.AUTOMATION_ENABLED
+      - notExists:
+          path: data.AUTOMATION_MODE
+      - notMatchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: pauseDelivery
+
+  - it: passes pauseDelivery as its own setting
+    set:
+      automation.policy.pauseDelivery: true
+    asserts:
+      - equal:
+          path: data.AUTOMATION_PAUSE_DELIVERY
+          value: "true"
+
+  - it: maps automation.enabled=false of 0.3.x to pauseDelivery
+    set:
+      automation.enabled: false
+    asserts:
+      - equal:
+          path: data.AUTOMATION_PAUSE_DELIVERY
+          value: "true"
+
+  - it: maps automation.mode=disabled of 0.3.x to pauseDelivery
+    set:
+      automation.enabled: true
+      automation.mode: disabled
+    asserts:
+      - equal:
+          path: data.AUTOMATION_PAUSE_DELIVERY
+          value: "true"
+
+  - it: keeps delivery on for a 0.3.x install with automation enabled
+    set:
+      automation.enabled: true
+      automation.mode: inline
+    asserts:
+      - equal:
+          path: data.AUTOMATION_PAUSE_DELIVERY
+          value: "false"
+
+  - it: narrows the allowlist with explicit repositories
+    set:
+      automation.repositoryAllowlist:
+        - acme/payments
+        - acme/infra-*
+    asserts:
+      - equal:
+          path: data.AUTOMATION_REPOSITORY_ALLOWLIST
+          value: '["acme/payments","acme/infra-*"]'
+
+  - it: sets every sample gate from the single minSamples knob (N3)
+    set:
+      config.recommendations.minSamples: 12
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_MIN_SAMPLES
+          value: "12"
+      - equal:
+          path: data.VERIFICATION_MIN_SAMPLES
+          value: "12"
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"minSamples":12'
+
+  - it: still honours the deprecated per-gate minSamples knobs
+    set:
+      config.recommendations.minSamples: 12
+      automation.policy.minSamples: 20
+      config.recommendations.verification.minSamples: 30
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_MIN_SAMPLES
+          value: "12"
+      - equal:
+          path: data.VERIFICATION_MIN_SAMPLES
+          value: "30"
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"minSamples":20'
+
+  - it: installs an old values file that still sets keys of removed features and renders nothing from them
+    set:
+      sources.priority: greenkube,vpa
+      config.recommendations.consensusPolicy: median
+      config.recommendations.karpenterEnabled: false
+      config.recommendations.zombieCostThreshold: 0.5
+    asserts:
+      - hasDocuments:
+          count: 1
+      - notExists:
+          path: data.ZOMBIE_COST_THRESHOLD
+      - notExists:
+          path: data.RECOMMENDATION_KARPENTER_ENABLED
+      - notExists:
+          path: data.RECOMMENDATION_CONSENSUS_POLICY
+      - notExists:
+          path: data.RECOMMENDATION_SOURCE_PRIORITY
 
   # --------------------------------------------------------------------------
   # Recommendation engine config
@@ -165,7 +368,65 @@ tests:
     asserts:
       - equal:
           path: data.RECOMMENDATION_LOOKBACK_DAYS
+          value: "14"
+
+  - it: should set the two-way rightsizing and limits policy defaults
+    asserts:
+      - equal:
+          path: data.RIGHTSIZING_INCREASE_THRESHOLD
+          value: "0.9"
+      - equal:
+          path: data.RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS
           value: "7"
+      - equal:
+          path: data.RECOMMENDATION_LIMITS_POLICY
+          value: "keep"
+      - equal:
+          path: data.RIGHTSIZING_MAX_INCREASE_FACTOR
+          value: "2"
+      - equal:
+          path: data.RIGHTSIZING_WARMUP_MINUTES
+          value: "10"
+
+  - it: should render the target staleness of rightsizing, default and configured
+    set:
+      config.recommendations.targetMaxStalenessHours: 6
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_TARGET_MAX_STALENESS_HOURS
+          value: "6"
+
+  - it: should default the target staleness of rightsizing to 2 hours
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_TARGET_MAX_STALENESS_HOURS
+          value: "2"
+
+  - it: should let the increase cap and the warm-up be configured, including a disabled warm-up
+    set:
+      config.recommendations.rightsizingMaxIncreaseFactor: 3
+      config.recommendations.rightsizingWarmupMinutes: 0
+    asserts:
+      - equal:
+          path: data.RIGHTSIZING_MAX_INCREASE_FACTOR
+          value: "3"
+      - equal:
+          path: data.RIGHTSIZING_WARMUP_MINUTES
+          value: "0"
+
+  - it: should set the deletion evidence period
+    asserts:
+      - equal:
+          path: data.DELETION_MIN_UNUSED_DAYS
+          value: "7"
+
+  - it: should override the deletion evidence period
+    set:
+      config.recommendations.deletionMinUnusedDays: 14
+    asserts:
+      - equal:
+          path: data.DELETION_MIN_UNUSED_DAYS
+          value: "14"
 
   - it: should set RIGHTSIZING_CPU_THRESHOLD
     asserts:
@@ -204,17 +465,108 @@ tests:
   # --------------------------------------------------------------------------
   # Verification & automation (Phases 3–4)
   # --------------------------------------------------------------------------
-  - it: should enable VPA and Karpenter connectors by default
+  - it: should enable the VPA connector by default
     asserts:
       - equal:
           path: data.RECOMMENDATION_VPA_ENABLED
           value: "true"
       - equal:
-          path: data.RECOMMENDATION_KARPENTER_ENABLED
-          value: "true"
-      - equal:
           path: data.KUBERNETES_METRICS_API_ENABLED
           value: "true"
+
+  - it: should disable the VPA connector
+    set:
+      config.recommendations.vpaEnabled: false
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_VPA_ENABLED
+          value: "false"
+
+  - it: should load source plugins with no per-source settings by default
+    asserts:
+      - equal:
+          path: data.SOURCES_PLUGINS_ENABLED
+          value: "true"
+      - equal:
+          path: data.SOURCES_CONFIG
+          value: "{}"
+
+  - it: should render per-source settings as JSON
+    set:
+      sources.pluginsEnabled: false
+      sources.settings:
+        greenkube.orphaned_lb:
+          enabled: false
+        vpa:
+          enabled: auto
+    asserts:
+      - equal:
+          path: data.SOURCES_PLUGINS_ENABLED
+          value: "false"
+      - equal:
+          path: data.SOURCES_CONFIG
+          value: '{"greenkube.orphaned_lb":{"enabled":false},"vpa":{"enabled":"auto"}}'
+
+  - it: should render the tool floors, minimum change and VPA maturity defaults
+    asserts:
+      - equal:
+          path: data.SIGNAL_TOOL_FLOORS
+          value: '{"krr":{"cpu":"10m","memory":"100Mi"},"vpa":{"cpu":"15m","memory":"100Mi"}}'
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_PERCENT
+          value: "5"
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_CPU_MILLICORES
+          value: "10"
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_MEMORY_BYTES
+          value: "16777216"
+      - equal:
+          path: data.VPA_MIN_SAMPLE_HOURS
+          value: "24"
+
+  - it: should render overridden tool floors and thresholds
+    set:
+      sources.toolFloors:
+        krr:
+          memory: 64Mi
+        vpa: null
+      sources.minChange:
+        percent: 10
+        cpuMillicores: 20
+        memoryBytes: 33554432
+      sources.vpa:
+        minSampleHours: 0
+    asserts:
+      - equal:
+          path: data.SIGNAL_TOOL_FLOORS
+          value: '{"krr":{"cpu":"10m","memory":"64Mi"}}'
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_PERCENT
+          value: "10"
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_CPU_MILLICORES
+          value: "20"
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_MEMORY_BYTES
+          value: "33554432"
+      - equal:
+          path: data.VPA_MIN_SAMPLE_HOURS
+          value: "0"
+
+  - it: should schedule recommendation scans hourly by default
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_SCAN_INTERVAL
+          value: "1h"
+
+  - it: should reflect a custom recommendation scan interval
+    set:
+      config.recommendations.scanInterval: 30m
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_SCAN_INTERVAL
+          value: "30m"
 
   - it: should set verification window defaults
     asserts:
@@ -240,6 +592,145 @@ tests:
           path: data.VERIFICATION_MIN_SAVINGS_RATIO
           value: "0.75"
 
+  - it: should set change measurement defaults
+    asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_ENABLED
+          value: "true"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS
+          value: "7"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_POST_WINDOW_DAYS
+          value: "7"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_WARMUP_HOURS
+          value: "1"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_MIN_COVERAGE
+          value: "0.8"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES
+          value: "1000"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_EPSILON_RATIO
+          value: "0.02"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_PRIOR_WEEK_CV
+          value: "0.05"
+
+  - it: should reflect custom change measurement settings
+    set:
+      config.recommendations.changeMeasurement.enabled: false
+      config.recommendations.changeMeasurement.postWindowDays: 14
+      config.recommendations.changeMeasurement.warmupHours: 0
+      config.recommendations.changeMeasurement.epsilonRatio: 0
+      config.recommendations.changeMeasurement.priorWeekCv: 0
+    asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_PRIOR_WEEK_CV
+          value: "0"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_ENABLED
+          value: "false"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_POST_WINDOW_DAYS
+          value: "14"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_WARMUP_HOURS
+          value: "0"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_EPSILON_RATIO
+          value: "0"
+
+  - it: should set the drift monitor defaults (C8)
+    asserts:
+      - equal:
+          path: data.CHANGE_DRIFT_THRESHOLD
+          value: "0.5"
+      - equal:
+          path: data.CHANGE_DRIFT_SUSTAINED_DAYS
+          value: "3"
+
+  - it: should reflect custom drift monitor settings (C8)
+    set:
+      config.recommendations.changeMeasurement.driftThreshold: 0.3
+      config.recommendations.changeMeasurement.driftSustainedDays: 5
+    asserts:
+      - equal:
+          path: data.CHANGE_DRIFT_THRESHOLD
+          value: "0.3"
+      - equal:
+          path: data.CHANGE_DRIFT_SUSTAINED_DAYS
+          value: "5"
+
+  - it: should reject a drift threshold outside (0, 1]
+    set:
+      config.recommendations.changeMeasurement.driftThreshold: 0
+    asserts:
+      - failedTemplate: {}
+
+  - it: should keep change measurement unaccelerated by default and verify the ledger chain hourly (C6)
+    asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_ACCELERATED
+          value: "false"
+      - equal:
+          path: data.LEDGER_CHAIN_VERIFY_INTERVAL
+          value: "1h"
+
+  - it: should accept accelerated demo windows only when acceleration is explicit
+    set:
+      config.recommendations.changeMeasurement.accelerated: true
+      config.recommendations.changeMeasurement.preWindowDays: 0.25
+      config.recommendations.changeMeasurement.postWindowDays: 0.05
+      config.ledger.chainVerifyInterval: 15m
+    asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_ACCELERATED
+          value: "true"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS
+          value: "0.25"
+      - equal:
+          path: data.LEDGER_CHAIN_VERIFY_INTERVAL
+          value: "15m"
+
+  - it: should reject a baseline shorter than a week without acceleration
+    set:
+      config.recommendations.changeMeasurement.preWindowDays: 0.25
+    asserts:
+      - failedTemplate: {}
+
+  - it: should keep rendering a post-window shorter than five days (the controller raises it to 5 days, MEA-10)
+    set:
+      config.recommendations.changeMeasurement.postWindowDays: 3
+    asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_POST_WINDOW_DAYS
+          value: "3"
+
+  - it: should reject an accelerated baseline shorter than an hour
+    set:
+      config.recommendations.changeMeasurement.accelerated: true
+      config.recommendations.changeMeasurement.preWindowDays: 0.01
+    asserts:
+      - failedTemplate: {}
+
+  - it: should reject an invalid ledger chain verification interval
+    set:
+      config.ledger.chainVerifyInterval: 1d
+    asserts:
+      - failedTemplate: {}
+
+  - it: should fail closed on missing policy evidence even without automation.policy values (D13)
+    set:
+      automation.policy: null
+    asserts:
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"missingEvidence":"fail"'
+
   - it: should not render legacy single-provider git settings
     asserts:
       - isNull:
@@ -247,11 +738,11 @@ tests:
       - isNull:
           path: data.GIT_TOKEN
 
-  - it: should pass the documented pull-request defaults to the runtime
+  - it: should default to repository-agnostic pull-request options
     asserts:
       - equal:
           path: data.GITOPS_PULL_REQUESTS_JSON
-          value: '{"draft":false,"labels":["greenkube","sustainability"],"reviewers":[],"teamReviewers":[]}'
+          value: '{"draft":false,"labels":[],"reviewers":[],"teamReviewers":[]}'
 
   - it: should pass configured pull-request options to the runtime
     set:
@@ -319,3 +810,332 @@ tests:
       - equal:
           path: data.RECOMMENDATION_MAX_METRIC_ROWS
           value: "1234"
+
+  # --------------------------------------------------------------------------
+  # Impact Model
+  # --------------------------------------------------------------------------
+  - it: should use OpenCost default rates unless impact pricing is set
+    asserts:
+      - notExists:
+          path: data.IMPACT_PRICING_CPU_CORE_HOUR
+      - notExists:
+          path: data.IMPACT_PRICING_RAM_GIB_HOUR
+      - equal:
+          path: data.IMPACT_PRICING_CURRENCY
+          value: USD
+      - notExists:
+          path: data.IMPACT_REALIZATION_FACTOR
+      - equal:
+          path: data.CARBON_PRICE_PER_TONNE
+          value: "100"
+      - equal:
+          path: data.POWER_MEMORY_W_PER_GIB
+          value: "0.392"
+
+  - it: should render custom impact rates and carbon price
+    set:
+      impact.pricing.cpuCoreHour: 0.05
+      impact.pricing.ramGiBHour: 0.006
+      impact.pricing.currency: EUR
+      impact.realizationFactor: 0.6
+      impact.carbonPricePerTonne: 85
+      impact.memoryWattsPerGiB: 0.5
+    asserts:
+      - equal:
+          path: data.POWER_MEMORY_W_PER_GIB
+          value: "0.5"
+      - equal:
+          path: data.IMPACT_PRICING_CPU_CORE_HOUR
+          value: "0.05"
+      - equal:
+          path: data.IMPACT_PRICING_RAM_GIB_HOUR
+          value: "0.006"
+      - equal:
+          path: data.IMPACT_PRICING_CURRENCY
+          value: EUR
+      - equal:
+          path: data.IMPACT_REALIZATION_FACTOR
+          value: "0.6"
+      - equal:
+          path: data.CARBON_PRICE_PER_TONNE
+          value: "85"
+
+  - it: should render an empty autoscaler hint by default and a declared one (IMP-12)
+    asserts:
+      - equal:
+          path: data.IMPACT_AUTOSCALER_HINT
+          value: ""
+
+  - it: should render a declared autoscaler hint
+    set:
+      impact.autoscalerHint: cluster_autoscaler
+    asserts:
+      - equal:
+          path: data.IMPACT_AUTOSCALER_HINT
+          value: cluster_autoscaler
+
+  - it: should omit unset impact settings so the application defaults apply
+    set:
+      impact.realizationFactor: null
+      impact.carbonPricePerTonne: null
+    asserts:
+      - notExists:
+          path: data.IMPACT_REALIZATION_FACTOR
+      - notExists:
+          path: data.CARBON_PRICE_PER_TONNE
+
+  - it: should keep a zero realization factor and carbon price
+    set:
+      impact.realizationFactor: 0
+      impact.carbonPricePerTonne: 0
+    asserts:
+      - equal:
+          path: data.IMPACT_REALIZATION_FACTOR
+          value: "0"
+      - equal:
+          path: data.CARBON_PRICE_PER_TONNE
+          value: "0"
+
+  - it: should render the expected-value ranking costs
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_INCIDENT_COST
+          value: "100"
+      - equal:
+          path: data.RECOMMENDATION_ENGINEER_HOUR_COST
+          value: "0"
+
+  - it: should render custom expected-value ranking costs, zero included
+    set:
+      config.recommendations.incidentCost: 0
+      config.recommendations.engineerHourCost: 85.5
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_INCIDENT_COST
+          value: "0"
+      - equal:
+          path: data.RECOMMENDATION_ENGINEER_HOUR_COST
+          value: "85.5"
+
+  - it: should render the released-capacity value weight (IMP-03), zero included
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_CAPACITY_VALUE_WEIGHT
+          value: "1"
+
+  - it: should render a custom released-capacity value weight
+    set:
+      config.recommendations.capacityValueWeight: 0
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_CAPACITY_VALUE_WEIGHT
+          value: "0"
+
+  # --------------------------------------------------------------------------
+  # Pull-request experience (roadmap J1-J5)
+  # --------------------------------------------------------------------------
+  - it: enables the pull-request experience by default without deep links
+    asserts:
+      - equal:
+          path: data.GITOPS_PR_TITLE_PREFIX
+          value: "greenkube"
+      - equal:
+          path: data.GITOPS_PR_TEMPLATE
+          value: ""
+      - equal:
+          path: data.GITOPS_PR_DEFAULT_LABELS
+          value: "true"
+      - equal:
+          path: data.GITOPS_PR_DRAFT_HIGH_RISK
+          value: "true"
+      - equal:
+          path: data.GITOPS_PR_CODEOWNERS
+          value: "true"
+      - equal:
+          path: data.GITOPS_PR_COMMIT_STATUS
+          value: "true"
+      - equal:
+          path: data.GITOPS_PR_LIFECYCLE_COMMENTS
+          value: "true"
+      - equal:
+          path: data.GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS
+          value: "30"
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: ""
+
+  - it: passes the PR template, switches and external URL from values
+    set:
+      config.externalUrl: https://greenkube.example.com/
+      automation.pr:
+        titlePrefix: ""
+        template: "{{ summary }}\n\n{{ diffs }}\n"
+        defaultLabels: false
+        draftHighRisk: false
+        codeowners: false
+        commitStatus: false
+        lifecycleComments: false
+        lifecycleLookbackDays: 7
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: "https://greenkube.example.com"
+      - equal:
+          path: data.GITOPS_PR_TITLE_PREFIX
+          value: ""
+      - equal:
+          path: data.GITOPS_PR_TEMPLATE
+          value: "{{ summary }}\n\n{{ diffs }}\n"
+      - equal:
+          path: data.GITOPS_PR_DEFAULT_LABELS
+          value: "false"
+      - equal:
+          path: data.GITOPS_PR_DRAFT_HIGH_RISK
+          value: "false"
+      - equal:
+          path: data.GITOPS_PR_CODEOWNERS
+          value: "false"
+      - equal:
+          path: data.GITOPS_PR_COMMIT_STATUS
+          value: "false"
+      - equal:
+          path: data.GITOPS_PR_LIFECYCLE_COMMENTS
+          value: "false"
+      - equal:
+          path: data.GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS
+          value: "7"
+
+  # --------------------------------------------------------------------------
+  # Delivery modes (F4) and auto-approval (F5)
+  # --------------------------------------------------------------------------
+  - it: delivers directly and never auto-approves by default
+    asserts:
+      - equal:
+          path: data.AUTOMATION_DELIVERY_MODE
+          value: "direct"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_ENABLED
+          value: "false"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_MAX_RISK
+          value: "low"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE
+          value: "0.8"
+
+  - it: passes the delivery mode and the auto-approval policy
+    set:
+      automation.delivery.mode: ci
+      automation.autoApprove.enabled: true
+      automation.autoApprove.maxRisk: medium
+      automation.autoApprove.minConfidence: 0.9
+    asserts:
+      - equal:
+          path: data.AUTOMATION_DELIVERY_MODE
+          value: "ci"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_ENABLED
+          value: "true"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_MAX_RISK
+          value: "medium"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE
+          value: "0.9"
+
+  - it: never auto-approves request increases by default (H1)
+    asserts:
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_INCREASES
+          value: "false"
+
+  - it: passes the opt-in to auto-approve request increases (H1)
+    set:
+      automation.autoApprove.increases: true
+    asserts:
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_INCREASES
+          value: "true"
+
+  - it: rejects a non-boolean increases opt-in (H1)
+    set:
+      automation.autoApprove.increases: sometimes
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects an unknown delivery mode
+    set:
+      automation.delivery.mode: push
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects auto-approval of contested consensus
+    set:
+      automation.autoApprove.contested: true
+    asserts:
+      - failedTemplate: {}
+
+  - it: leaves OPENCOST_CLUSTER_ID unset by default (COST-10)
+    asserts:
+      - notExists:
+          path: data.OPENCOST_CLUSTER_ID
+
+  - it: sets OPENCOST_CLUSTER_ID from config.opencost.clusterId (COST-10)
+    set:
+      config.opencost.clusterId: cluster-a
+    asserts:
+      - equal:
+          path: data.OPENCOST_CLUSTER_ID
+          value: cluster-a
+
+  - it: sets the per-vCPU and per-GiB embodied fallback with defaults 12 and 0 (NRG-01)
+    asserts:
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_VCPU
+          value: "12"
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_GIB
+          value: "0"
+
+  - it: renders the embodied kg by instance type map as JSON, empty by default (NRG-01)
+    set:
+      config.boavizta.embodiedKgByInstanceType:
+        r740: 1300
+    asserts:
+      - equal:
+          path: data.EMBODIED_KG_BY_INSTANCE_TYPE
+          value: '{"r740":1300}'
+
+  - it: enables shared host detection by default and lets config.power disable it (NRG-15)
+    set:
+      config.power.sharedHostDetection: false
+    asserts:
+      - equal:
+          path: data.SHARED_HOST_DETECTION
+          value: "false"
+
+  - it: sets the GPU utilisation assumed for requested GPUs without DCGM (NRG-13)
+    asserts:
+      - equal:
+          path: data.GPU_ASSUMED_UTILIZATION_PCT
+          value: "50"
+
+  - it: lets config.power override the assumed GPU utilisation (NRG-13)
+    set:
+      config.power.gpuAssumedUtilizationPct: 80
+    asserts:
+      - equal:
+          path: data.GPU_ASSUMED_UTILIZATION_PCT
+          value: "80"
+
+  - it: sets the embodied fallback coefficients from config.boavizta (NRG-01)
+    set:
+      config.boavizta.embodiedKgPerVcpu: 9.5
+      config.boavizta.embodiedKgPerGib: 1.2
+    asserts:
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_VCPU
+          value: "9.5"
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_GIB
+          value: "1.2"

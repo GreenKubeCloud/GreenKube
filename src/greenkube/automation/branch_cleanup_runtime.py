@@ -21,6 +21,7 @@ from greenkube.automation.git.base import (
     validate_greenkube_plan_branch,
 )
 from greenkube.automation.plan_worker import GitProviderTarget, plan_branch_name
+from greenkube.automation.provider_backoff import ProviderRetryBackoff
 from greenkube.gitops.contracts import OperationStatus, Plan, PlanStatus
 from greenkube.models.metrics import PullRequestRecord
 from greenkube.storage.base_pull_request_repository import (
@@ -43,6 +44,7 @@ _TERMINAL_PLAN_STATUSES = frozenset(
         PlanStatus.AMBIGUOUS,
         PlanStatus.REJECTED,
         PlanStatus.SUPERSEDED,
+        PlanStatus.CANCELLED,
     }
 )
 _ACTIVE_OPERATION_STATUSES = frozenset(
@@ -203,6 +205,7 @@ class BranchCleanupRuntime:
         provider_resolver: _PlanProviderResolver,
         batch_size: int = MAX_BRANCH_CLEANUP_BATCH_SIZE,
         provider_timeout_seconds: float = DEFAULT_BRANCH_CLEANUP_PROVIDER_TIMEOUT_SECONDS,
+        backoff: ProviderRetryBackoff | None = None,
     ) -> None:
         if type(batch_size) is not int or not 1 <= batch_size <= MAX_BRANCH_CLEANUP_BATCH_SIZE:
             raise ValueError(f"batch_size must be between 1 and {MAX_BRANCH_CLEANUP_BATCH_SIZE}.")
@@ -219,8 +222,10 @@ class BranchCleanupRuntime:
         self.provider_resolver = provider_resolver
         self.batch_size = batch_size
         self.provider_timeout_seconds = float(provider_timeout_seconds)
+        self.backoff = backoff if backoff is not None else ProviderRetryBackoff(pull_request_repository)
         self._after_id: int | None = None
         self._cleanup_lock = asyncio.Lock()
+        self._provider_resolved = False
 
     async def cleanup_once(
         self,
@@ -244,8 +249,13 @@ class BranchCleanupRuntime:
                 if isinstance(record.plan_id, str) and record.plan_id:
                     groups.setdefault(record.plan_id, []).append(record)
 
-            deleted = skipped = errors = 0
+            deleted = skipped = errors = deferred = 0
             for plan_id, page_records in groups.items():
+                if self.backoff.deferred(page_records):
+                    # Backing off (repository detached, credentials refused, rate limited).
+                    deferred += 1
+                    continue
+                self._provider_resolved = False
                 try:
                     if await self._cleanup_plan(plan_id, page_records, heartbeat):
                         deleted += 1
@@ -253,19 +263,25 @@ class BranchCleanupRuntime:
                         skipped += 1
                 except _BranchCleanupFailure as failure:
                     errors += 1
-                    logger.warning(
-                        "GitOps plan branch cleanup failed; the candidate will be retried.",
-                        **safe_gitops_error_fields(failure.cause, stage=failure.stage),
-                    )
+                    if not await self.backoff.failed(page_records, failure.cause, loop="branch cleanup"):
+                        logger.warning(
+                            "GitOps plan branch cleanup failed; the candidate will be retried.",
+                            **safe_gitops_error_fields(failure.cause, stage=failure.stage),
+                        )
+                    continue
                 except Exception as exc:
                     errors += 1
                     logger.warning(
                         "GitOps plan branch cleanup failed; the candidate will be retried.",
                         **safe_gitops_error_fields(exc, stage="candidate_processing"),
                     )
+                    continue
+                if self._provider_resolved:
+                    await self.backoff.succeeded(page_records)
+            skipped += deferred
             skipped += len(candidates) - sum(len(records) for records in groups.values())
             summary = BranchCleanupSummary(
-                selected=len(groups),
+                selected=len(groups) - deferred,
                 deleted=deleted,
                 skipped=skipped,
                 errors=errors,
@@ -304,6 +320,22 @@ class BranchCleanupRuntime:
         plan = await _at_stage("plan_lookup", self.plan_repository.get_plan(plan_id))
         if plan is None or plan.plan_id != plan_id:
             return False
+        if getattr(plan, "delivery_mode", None) in ("patch", "ci"):
+            # A person or a CI job pushed this branch (F4): GreenKube never deletes it, and
+            # holds no write credentials for it. Mark it done so it is not selected again.
+            for record in page_records:
+                if record.repo and record.head_branch and record.provider_id == plan.source.provider_id:
+                    await _at_stage(
+                        "completion_persistence",
+                        self.pull_request_repository.mark_plan_branch_cleanup_complete(
+                            plan_id,
+                            provider_id=plan.source.provider_id,
+                            repo=record.repo,
+                            branch_name=record.head_branch,
+                        ),
+                    )
+                    break
+            return False
         try:
             expected_branch = plan_branch_name(plan)
             validate_greenkube_plan_branch(expected_branch)
@@ -339,6 +371,7 @@ class BranchCleanupRuntime:
             return False
 
         target = await _at_stage("provider_resolution", self.provider_resolver.resolve(plan.source))
+        self._provider_resolved = True
         provider = cast(_CleanupGitProvider, target.provider)
         try:
             if not _target_matches_records(target, records, plan):

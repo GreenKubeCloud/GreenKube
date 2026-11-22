@@ -38,6 +38,7 @@ def multi_container_metrics() -> list[CombinedMetric]:
         for index, (cpu_usage, memory_usage_mib) in enumerate(zip(cpu_usages, memory_usages_mib, strict=True)):
             metrics.append(
                 CombinedMetric(
+                    restart_count=0,
                     pod_name="api-7d9f8b6c5-x2k4p",
                     namespace="prod",
                     owner_kind="Deployment",
@@ -143,7 +144,13 @@ def test_rightsizing_savings_never_project_negative_cost(multi_container_metrics
     ]
 
     assert recommendations
-    assert all(recommendation.potential_savings_cost == 0.0 for recommendation in recommendations)
+    # Negative observed totals are ignored: request cuts are priced per resource
+    # (here at the OpenCost default rates), so savings stay positive.
+    for recommendation in recommendations:
+        assert recommendation.potential_savings_cost is not None
+        assert recommendation.potential_savings_cost > 0
+        assert recommendation.impact is not None
+        assert recommendation.impact["assumptions"]["unit_prices"][0]["source"] == "custom_rate"
 
 
 def test_evidence_is_scoped_to_the_recommendation_container(multi_container_metrics):
@@ -270,3 +277,10 @@ async def test_engine_persists_action_plans_with_database_recommendation_ids():
     assert recommendations[0].patch.action == recommendations[0].action
     assert repository.upsert_recommendations.await_count == 2
     repository.reconcile_active_recommendations.assert_awaited_once()
+
+
+@pytest.fixture(autouse=True)
+def _no_decrease_coverage_gate(monkeypatch):
+    """These fixtures span hours, not weeks: disable the one-week coverage gate for
+    request decreases (E9), which tests/core/optimization/test_two_way_rightsizing.py covers."""
+    monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")

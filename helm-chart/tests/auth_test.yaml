@@ -1,0 +1,162 @@
+suite: authentication (F14, F15, A13, N11)
+templates:
+  - templates/configmap.yaml
+  - templates/role.yaml
+  - templates/rolebinding.yaml
+  - templates/components.yaml
+  - templates/servicemonitor.yaml
+  - templates/NOTES.txt
+release:
+  name: gk
+  namespace: greenkube
+
+tests:
+  - it: defaults to browser sessions with the documented session settings
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.API_AUTH_MODE
+          value: session
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: auto
+      - equal:
+          path: data.AUTH_SESSION_IDLE_TIMEOUT
+          value: 12h
+      - equal:
+          path: data.AUTH_SESSION_ABSOLUTE_LIFETIME
+          value: 7d
+      - equal:
+          path: data.AUTH_SESSION_REMEMBER_LIFETIME
+          value: 30d
+      - equal:
+          path: data.AUTH_LOGIN_RATE_LIMIT
+          value: 5/minute
+      - equal:
+          path: data.AUTH_ADMIN_USERNAME
+          value: admin
+      - equal:
+          path: data.AUTH_INITIAL_ADMIN_SECRET
+          value: gk-greenkube-initial-admin
+      - equal:
+          path: data.TRUSTED_PROXY_IPS
+          value: ""
+
+  - it: no longer tells the API which Secret to write runtime overrides into (A13, BUG-60)
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - notExists:
+          path: data.GREENKUBE_SECRET_NAME
+
+  - it: grants the API only get and patch on the initial-admin Secret
+    templates:
+      - templates/role.yaml
+    asserts:
+      - isKind:
+          of: Role
+      - equal:
+          path: metadata.name
+          value: gk-greenkube-initial-admin
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["secrets"]
+              resourceNames: ["gk-greenkube-initial-admin"]
+              verbs: ["get", "patch"]
+
+  - it: never grants access to the release Secret any more (BUG-60)
+    templates:
+      - templates/role.yaml
+    asserts:
+      - notContains:
+          path: rules[0].resourceNames
+          content: gk-greenkube
+
+  - it: binds the initial-admin Role to the API service account
+    templates:
+      - templates/rolebinding.yaml
+    asserts:
+      - equal:
+          path: subjects[0].name
+          value: gk-greenkube-api
+
+  - it: renders no Role when the admin password comes from an existing Secret
+    set:
+      auth.admin.existingSecret: gk-admin
+    templates:
+      - templates/role.yaml
+      - templates/rolebinding.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders no Role in API-key mode
+    set:
+      config.apiAuthMode: api_key
+    templates:
+      - templates/role.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: projects the admin password from auth.admin.existingSecret into the API only
+    set:
+      auth.admin.existingSecret: gk-admin
+      auth.admin.existingSecretKey: pw
+    templates:
+      - templates/components.yaml
+    asserts:
+      - documentIndex: 0
+        contains:
+          path: spec.template.spec.volumes[0].projected.sources
+          content:
+            secret:
+              name: gk-admin
+              items:
+                - key: pw
+                  path: AUTH_ADMIN_PASSWORD
+      - documentIndex: 1
+        notContains:
+          path: spec.template.spec.volumes[0].projected.sources
+          content:
+            secret:
+              name: gk-admin
+              items:
+                - key: pw
+                  path: AUTH_ADMIN_PASSWORD
+
+  - it: lets Prometheus scrape with a scoped metrics:read key
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.bearerTokenSecret.name: gk-metrics-key
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: gk-metrics-key
+            key: token
+
+  - it: prints the command that reads the initial admin password (N11)
+    templates:
+      - templates/NOTES.txt
+    asserts:
+      - matchRegexRaw:
+          pattern: Sign in as "admin"
+      - matchRegexRaw:
+          pattern: "kubectl -n greenkube get secret gk-greenkube-initial-admin -o jsonpath='\\{\\.data\\.password\\}' \\| base64 -d; echo"
+
+  - it: points to auth.admin.existingSecret instead of a generated password
+    set:
+      auth.admin.existingSecret: gk-admin
+    templates:
+      - templates/NOTES.txt
+    asserts:
+      - matchRegexRaw:
+          pattern: '"password" key of your Secret gk-admin'
+      - notMatchRegexRaw:
+          pattern: initial-admin

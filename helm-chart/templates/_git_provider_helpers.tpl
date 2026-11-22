@@ -1,42 +1,23 @@
 {{/*
-Normalize the flat and documented nested provider Secret shapes.
+Return the configured providers, rejecting the removed alias keys with a migration hint.
 */}}
 {{- define "greenkube.normalizedAutomationProviders" -}}
 {{- $providers := .Values.automation.providers | default (list) -}}
 {{- if not (kindIs "slice" $providers) -}}
 {{- fail "automation.providers must be a list" -}}
 {{- end -}}
-{{- $normalizedProviders := list -}}
 {{- range $index, $provider := $providers -}}
   {{- if not (kindIs "map" $provider) -}}
     {{- fail (printf "automation.providers[%d] must be a map" $index) -}}
   {{- end -}}
-  {{- $normalized := deepCopy $provider -}}
   {{- if hasKey $provider "tokenSecret" -}}
-    {{- $tokenSecret := get $provider "tokenSecret" -}}
-    {{- if not (kindIs "map" $tokenSecret) -}}
-      {{- fail (printf "automation.providers[%d].tokenSecret must be a map" $index) -}}
-    {{- end -}}
-    {{- range $pair := (list (list "name" "secretName") (list "key" "secretKey") (list "namespace" "secretNamespace")) -}}
-      {{- $nestedKey := index $pair 0 -}}
-      {{- $flatKey := index $pair 1 -}}
-      {{- if hasKey $tokenSecret $nestedKey -}}
-        {{- if and (hasKey $normalized $flatKey) (ne (get $normalized $flatKey) (get $tokenSecret $nestedKey)) -}}
-          {{- fail (printf "automation.providers[%d] has conflicting %s and tokenSecret.%s values" $index $flatKey $nestedKey) -}}
-        {{- end -}}
-        {{- $_ := set $normalized $flatKey (get $tokenSecret $nestedKey) -}}
-      {{- end -}}
-    {{- end -}}
+    {{- fail (printf "automation.providers[%d].tokenSecret was removed; use secretName, secretKey and secretNamespace" $index) -}}
   {{- end -}}
   {{- if hasKey $provider "repositories" -}}
-    {{- if and (hasKey $normalized "repositoryAllowlist") (ne (toJson (get $normalized "repositoryAllowlist")) (toJson (get $provider "repositories"))) -}}
-      {{- fail (printf "automation.providers[%d] has conflicting repositories and repositoryAllowlist values" $index) -}}
-    {{- end -}}
-    {{- $_ := set $normalized "repositoryAllowlist" (get $provider "repositories") -}}
+    {{- fail (printf "automation.providers[%d].repositories was removed; use repositoryAllowlist" $index) -}}
   {{- end -}}
-  {{- $normalizedProviders = append $normalizedProviders $normalized -}}
 {{- end -}}
-{{- toYaml $normalizedProviders -}}
+{{- toYaml $providers -}}
 {{- end -}}
 
 {{/*
@@ -72,6 +53,13 @@ Validate configured Git providers and keep Secret references within the release 
 
   {{- if and (hasKey $provider "apiBaseUrl") (not (kindIs "string" (get $provider "apiBaseUrl"))) -}}
     {{- fail (printf "automation.providers[%d].apiBaseUrl must be a string" $index) -}}
+  {{- end -}}
+  {{- if and (hasKey $provider "webBaseUrl") (not (kindIs "string" (get $provider "webBaseUrl"))) -}}
+    {{- fail (printf "automation.providers[%d].webBaseUrl must be a string" $index) -}}
+  {{- end -}}
+  {{- $webBaseUrl := get $provider "webBaseUrl" | default "" -}}
+  {{- if and $webBaseUrl (not (regexMatch "^https?://[^/?#@]+/?$" $webBaseUrl)) -}}
+    {{- fail (printf "automation.providers[%d].webBaseUrl must be an HTTP(S) origin URL without a path" $index) -}}
   {{- end -}}
 
   {{- $secretName := get $provider "secretName" -}}
@@ -121,7 +109,7 @@ Validate configured Git providers and keep Secret references within the release 
     {{- end -}}
   {{- end -}}
 
-  {{- $allowlist := get $provider "repositoryAllowlist" -}}
+  {{- $allowlist := get $provider "repositoryAllowlist" | default $.Values.automation.repositoryAllowlist -}}
   {{- if or (not (kindIs "slice" $allowlist)) (eq (len $allowlist) 0) -}}
     {{- fail (printf "automation.providers[%d].repositoryAllowlist must contain at least one pattern" $index) -}}
   {{- end -}}
@@ -145,17 +133,22 @@ Serialize the runtime parser's provider schema with Secret references only.
   {{- $secretKey := get $provider "secretKey" -}}
   {{- $secretNamespace := get $provider "secretNamespace" | default "" -}}
   {{- $apiBaseUrl := get $provider "apiBaseUrl" | default "" -}}
+  {{- $webBaseUrl := get $provider "webBaseUrl" | default "" -}}
   {{- $tokenSecret := dict "name" $secretName "key" $secretKey -}}
   {{- if $secretNamespace -}}
     {{- $_ := set $tokenSecret "namespace" $secretNamespace -}}
   {{- end -}}
-  {{- $result = append $result (dict
+  {{- $config := dict
       "id" (get $provider "id")
       "type" (get $provider "type")
       "apiBaseUrl" $apiBaseUrl
       "tokenSecret" $tokenSecret
-      "repositories" (get $provider "repositoryAllowlist")
-    ) -}}
+      "repositories" (get $provider "repositoryAllowlist" | default $.Values.automation.repositoryAllowlist)
+  -}}
+  {{- if $webBaseUrl -}}
+    {{- $_ := set $config "webBaseUrl" $webBaseUrl -}}
+  {{- end -}}
+  {{- $result = append $result $config -}}
 {{- end -}}
 {{- toJson (dict "providers" $result) -}}
 {{- end -}}
@@ -177,9 +170,26 @@ Group Secret keys by Secret name so each referenced Secret is projected once.
   {{- if not (has $secretKey $keys) -}}
     {{- $keys = append $keys $secretKey -}}
   {{- end -}}
+  {{- /* A GitHub App (secretKey privateKey) also needs its appId from the same Secret (F3). */ -}}
+  {{- if and (eq (lower (get $provider "type" | toString)) "github") (eq $secretKey "privateKey") (not (has "appId" $keys)) -}}
+    {{- $keys = append $keys "appId" -}}
+  {{- end -}}
   {{- $_ := set $secretKeys $identity (dict "name" $secretName "namespace" $secretNamespace "keys" $keys) -}}
 {{- end -}}
 {{- $sources := list -}}
+{{- /* The default credentials Secret (F12) is optional: creating it later
+activates delivery without a restart, because the kubelet refreshes projected
+Secret volumes. */ -}}
+{{- $defaultSecret := include "greenkube.gitCredentialsSecretName" . -}}
+{{- $defaultIdentity := printf "/%s" $defaultSecret -}}
+{{- $defaultKeys := get $secretKeys $defaultIdentity | default (dict "keys" (list)) -}}
+{{- $keys := get $defaultKeys "keys" | default (list) -}}
+{{- range $key := list "token" "host" "apiBaseUrl" "appId" "privateKey" -}}
+  {{- if not (has $key $keys) -}}
+    {{- $keys = append $keys $key -}}
+  {{- end -}}
+{{- end -}}
+{{- $_ := set $secretKeys $defaultIdentity (dict "name" $defaultSecret "namespace" "" "keys" $keys "optional" true) -}}
 {{- range $identity := keys $secretKeys | sortAlpha -}}
   {{- $secret := get $secretKeys $identity -}}
   {{- $items := list -}}
@@ -193,21 +203,31 @@ Group Secret keys by Secret name so each referenced Secret is projected once.
         "path" $path
       ) -}}
   {{- end -}}
-  {{- $sources = append $sources (dict "secret" (dict "name" (get $secret "name") "items" $items)) -}}
+  {{- $source := dict "name" (get $secret "name") "items" $items -}}
+  {{- if get $secret "optional" -}}
+    {{- $_ := set $source "optional" true -}}
+  {{- end -}}
+  {{- $sources = append $sources (dict "secret" $source) -}}
 {{- end -}}
 {{- toYaml $sources -}}
 {{- end -}}
 
 {{/*
-Read-only mount for the API and automation-capable containers.
+Name of the Secret read for inferred providers (F12).
+*/}}
+{{- define "greenkube.gitCredentialsSecretName" -}}
+{{- .Values.automation.credentialsSecret | default "greenkube-git-credentials" -}}
+{{- end -}}
+
+{{/*
+Read-only mount for the API, controller and worker containers. Always present:
+the default credentials Secret may appear at any time (F12).
 */}}
 {{- define "greenkube.gitProviderVolumeMount" -}}
 {{- include "greenkube.validateAutomationProviders" . -}}
-{{- if .Values.automation.providers }}
 - name: git-provider-secrets
   mountPath: /etc/greenkube/git-providers
   readOnly: true
-{{- end -}}
 {{- end -}}
 
 {{/*
@@ -215,10 +235,8 @@ Projected volume with only the configured Secret keys.
 */}}
 {{- define "greenkube.gitProviderVolume" -}}
 {{- include "greenkube.validateAutomationProviders" . -}}
-{{- if .Values.automation.providers }}
 - name: git-provider-secrets
   projected:
     sources:
       {{- include "greenkube.gitProviderSecretSources" . | nindent 6 }}
-{{- end -}}
 {{- end -}}

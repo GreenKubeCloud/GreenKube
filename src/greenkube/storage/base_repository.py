@@ -1,7 +1,8 @@
 # src/greenkube/storage/base_repository.py
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, Awaitable, Callable, Collection, Dict, List, Mapping, Optional, Sequence
 
 from ..models.metrics import (
     ApplyRecommendationRequest,
@@ -15,6 +16,35 @@ from ..models.metrics import (
 )
 from ..models.node import NodeInfo
 from ..utils.date_utils import to_iso_z
+from ..utils.time import ensure_utc
+
+#: Upsert outcomes whose record has an active row after the call (inserted, or
+#: matched an active row that was revised, refreshed, kept or given a queued revision).
+WRITTEN_UPSERT_ACTIONS: frozenset[str] = frozenset({"inserted", "revised", "refreshed", "queued", "kept", "conflict"})
+
+
+@dataclass(frozen=True)
+class UpsertOutcome:
+    """What ``upsert_recommendations`` did with one incoming record (REC-01).
+
+    ``action`` is one of ``inserted``, ``revised``, ``refreshed``, ``queued``
+    and ``kept`` (the record has an active row), ``conflict`` (a concurrent
+    upsert inserted the active row first), ``pr_open`` (held behind the open
+    pull request of the same target), ``absorbed`` (a restatement of a change
+    already applied or being measured), ``applied`` (refreshed an applied
+    non-rightsizing row) or ``ignored`` (the user ignored this advice).
+    ``recommendation_id`` is the row the record landed on, when known.
+    """
+
+    fingerprint: Optional[str]
+    action: str
+    recommendation_id: Optional[int] = None
+    reason: Optional[str] = None
+
+    @property
+    def written(self) -> bool:
+        """True when the record has an active recommendation row after the upsert."""
+        return self.action in WRITTEN_UPSERT_ACTIONS
 
 
 class NodeRepository(ABC):
@@ -72,6 +102,55 @@ class NodeRepository(ABC):
         pass
 
 
+@dataclass(frozen=True)
+class IntensityPoint:
+    """One stored carbon-intensity value and how much it can be trusted."""
+
+    value: float
+    observed_at: Optional[datetime] = None
+    is_estimated: Optional[bool] = None
+    estimation_method: Optional[str] = None
+
+    def age(self, at: datetime) -> Optional[timedelta]:
+        """Return how old the point is at ``at`` (``None`` when its time is unknown)."""
+        if self.observed_at is None:
+            return None
+        point_time = self.observed_at if self.observed_at.tzinfo else self.observed_at.replace(tzinfo=timezone.utc)
+        at_time = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+        return at_time - point_time
+
+
+#: ``estimationMethod`` used by providers for static zone defaults. Such
+#: records are computed at read time and never persisted (A8, BUG-07).
+DEFAULT_FALLBACK_ESTIMATION_METHOD = "default_fallback"
+
+
+def is_persistable_intensity_record(record: object) -> bool:
+    """Return whether a provider record is a real measurement worth storing."""
+    if not isinstance(record, dict):
+        return False
+    if record.get("estimationMethod") == DEFAULT_FALLBACK_ESTIMATION_METHOD:
+        return False
+    return record.get("carbonIntensity") is not None
+
+
+def is_default_fallback_point(point: object) -> bool:
+    """Return whether a stored intensity point is a persisted zone default, not a measurement."""
+    return getattr(point, "estimation_method", None) == DEFAULT_FALLBACK_ESTIMATION_METHOD
+
+
+def measured_intensity_sql(alias: str = "") -> str:
+    """SQL predicate (SQLite and PostgreSQL) that skips zone defaults persisted before A8.
+
+    Older collectors stored zone defaults in ``carbon_intensity_history`` with
+    ``estimation_method = 'default_fallback'``. Migration 0039 purges them; every
+    intensity lookup also ignores them so such a row can never pass for a
+    measurement (BUG-07).
+    """
+    column = f"{alias}.estimation_method" if alias else "estimation_method"
+    return f"COALESCE({column}, '') <> '{DEFAULT_FALLBACK_ESTIMATION_METHOD}'"
+
+
 class CarbonIntensityRepository(ABC):
     """
     Abstract base class for carbon intensity data repositories.
@@ -83,6 +162,10 @@ class CarbonIntensityRepository(ABC):
         """
         Retrieves the latest carbon intensity for a given zone at or before a specific timestamp.
 
+        SQL implementations ignore values older than ``INTENSITY_MAX_AGE`` so a
+        stale value is never used silently; callers then fall back to the zone
+        default computed at read time.
+
         Args:
             zone: The geographical zone (e.g., 'FR').
             timestamp: The ISO 8601 timestamp to query against.
@@ -91,6 +174,18 @@ class CarbonIntensityRepository(ABC):
             The carbon intensity value, or None if not found.
         """
         pass
+
+    async def get_intensity_point(self, zone: str, timestamp: str) -> Optional[IntensityPoint]:
+        """Return the latest stored point at or before ``timestamp``, whatever its age.
+
+        Unlike :meth:`get_for_zone_at_time` the point carries its time and
+        estimation flag so callers can classify it (realtime, consolidated or
+        stale). The default implementation wraps :meth:`get_for_zone_at_time`.
+        """
+        value = await self.get_for_zone_at_time(zone, timestamp)
+        if value is None:
+            return None
+        return IntensityPoint(value=float(value))
 
     @abstractmethod
     async def save_history(self, history_data: list, zone: str) -> int:
@@ -107,7 +202,29 @@ class CarbonIntensityRepository(ABC):
         pass
 
 
-class ContainerMetricsRepository(ABC):
+class RawHourlySplitMixin:
+    """Raw/hourly read boundary shared by the metric repositories (ROL-01)."""
+
+    async def compression_boundary(self, raw_table: str) -> datetime:
+        """Return the hour-aligned boundary between ``raw_table`` and its hourly table.
+
+        SQL repositories return the compression watermark. This default, used
+        by in-memory doubles that keep no watermark, is the start of the hour
+        ``METRICS_COMPRESSION_AGE_HOURS`` ago.
+        """
+        from ..core.config import get_config
+        from .raw_hourly_split import floor_hour
+
+        return floor_hour(datetime.now(timezone.utc) - get_config().metrics_compression_age)
+
+    async def _raw_hourly_split(self, start_time: datetime, end_time: datetime, raw_table: str):
+        """Split ``[start_time, end_time)`` between raw and hourly rows at :meth:`compression_boundary`."""
+        from .raw_hourly_split import split_window
+
+        return split_window(start_time, end_time, await self.compression_boundary(raw_table))
+
+
+class ContainerMetricsRepository(RawHourlySplitMixin, ABC):
     """Persistence contract for the container-scoped resource series used by actions."""
 
     @abstractmethod
@@ -150,58 +267,203 @@ class ContainerMetricsRepository(ABC):
         end_time: datetime,
         namespace: Optional[str] = None,
     ) -> List[CombinedMetric]:
-        """Merge raw and hourly container samples at the configured compression boundary."""
-        from datetime import timedelta
-        from datetime import timezone as tz
-
-        from ..core.config import get_config
-
-        compression_cutoff = datetime.now(tz.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
-        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
-        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
-
-        if start_aware >= compression_cutoff - timedelta(minutes=1):
-            return await self.read_container_metrics(start_time, end_time, namespace)
-        if end_aware <= compression_cutoff:
-            return await self.read_hourly_container_metrics(start_time, end_time, namespace)
-
-        hourly = await self.read_hourly_container_metrics(start_time, compression_cutoff, namespace)
-        raw = await self.read_container_metrics(compression_cutoff, end_time, namespace)
+        """Merge raw and hourly container samples at the compression watermark (ROL-01)."""
+        split = await self._raw_hourly_split(start_time, end_time, "container_metrics")
+        hourly: List[CombinedMetric] = []
+        if split.has_hourly:
+            hourly = await self.read_hourly_container_metrics(split.hourly_start, split.hourly_end, namespace)
+        raw: List[CombinedMetric] = []
+        for raw_start, raw_end in split.raw_ranges:
+            raw += await self.read_container_metrics(raw_start, raw_end, namespace)
         return hourly + raw
 
 
-class CombinedMetricsRepository(ABC):
+@dataclass(frozen=True)
+class WindowStepProfile:
+    """Stored pod rows of one step: their ``(namespace, pod_name)`` and the count with an allocated cost."""
+
+    pods: frozenset[tuple[str, str]]
+    allocated_cost_rows: int
+    #: Rows whose cost waits for OpenCost (``cost_source = opencost_pending``, COST-01).
+    pending_cost_rows: int = 0
+
+
+def merge_collected_seconds(raw_stamps: Any, hourly: Any, step_seconds: int) -> dict[datetime, float]:
+    """Collected seconds per hour from distinct raw timestamps and ``(hour, max duration)`` rows (MEA-13).
+
+    An hour compressed while its raw rows are kept (the default overlap of both
+    tables) is in both: the raw rows win, as in ``read_combined_metrics_smart``,
+    and the hourly table only fills the hours without raw rows, so no hour is
+    counted twice.
+    """
+    seconds: dict[datetime, float] = {}
+    for stamp in raw_stamps:
+        moment = ensure_utc(stamp)
+        hour = moment.replace(minute=0, second=0, microsecond=0)
+        seconds[hour] = seconds.get(hour, 0.0) + float(step_seconds)
+    for hour_value, duration in hourly:
+        hour = ensure_utc(hour_value).replace(minute=0, second=0, microsecond=0)
+        if hour not in seconds:
+            seconds[hour] = float(duration or 0.0)
+    return {hour: min(value, 3600.0) for hour, value in sorted(seconds.items())}
+
+
+def window_step_profiles(rows: Any) -> dict[datetime, WindowStepProfile]:
+    """Build :class:`WindowStepProfile` per step from ``(namespace, pod_name, timestamp, cost_source)`` rows."""
+    from ..models.provenance import ALLOCATED_COST_SOURCES, CostSource
+
+    pods: dict[datetime, set[tuple[str, str]]] = {}
+    allocated: dict[datetime, int] = {}
+    pending: dict[datetime, int] = {}
+    for namespace, pod_name, timestamp, cost_source in rows:
+        step = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+        pods.setdefault(step, set()).add((namespace, pod_name))
+        allocated[step] = allocated.get(step, 0) + (1 if cost_source in ALLOCATED_COST_SOURCES else 0)
+        pending[step] = pending.get(step, 0) + (1 if cost_source == CostSource.OPENCOST_PENDING.value else 0)
+    return {step: WindowStepProfile(frozenset(names), allocated[step], pending[step]) for step, names in pods.items()}
+
+
+class CombinedMetricsRepository(RawHourlySplitMixin, ABC):
     """
     Abstract base class for combined metrics data repositories.
     Defines the contract for writing and reading CombinedMetric records.
     """
 
     @abstractmethod
-    async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
+    async def write_combined_metrics(
+        self,
+        metrics: List[CombinedMetric],
+        *,
+        replace_containers: bool = False,
+        window: Optional[tuple[datetime, datetime]] = None,
+        run_id: Optional[str] = None,
+    ) -> int:
         """
         Writes a list of CombinedMetric objects to the repository.
 
+        A stored row's cost is never replaced by a cost of a strictly worse
+        ``cost_source`` (STO-01), and a row without pod metadata never replaces
+        a stored row that had metadata (COL-01).
+
         Args:
             metrics: A list of CombinedMetric objects to persist.
+            replace_containers: The batch holds every container row of its pod
+                rows (a collected window): stored container rows of those pods
+                and steps that the batch no longer has are deleted in the same
+                transaction, so pod and container rows agree.
+            window: ``[start, end)`` of the collection pass that produced the
+                batch: stored pod rows (and their container rows) of the steps
+                the batch covers that the batch does not hold are deleted in the
+                same transaction (STO-01).
+            run_id: Identifier of the collection pass, stored with
+                ``collected_at`` on every written row.
 
         Returns:
             The number of records saved.
         """
         pass
 
+    async def write_window(
+        self,
+        rows: List[CombinedMetric],
+        idle_rows: List[Any],
+        *,
+        window: tuple[datetime, datetime],
+        run_id: str,
+        on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+        force: bool = False,
+    ) -> int:
+        """Write one collected window atomically (STO-03).
+
+        ``force`` (an operator's ``--last ... --force`` re-collection) replaces
+        stored costs whatever their source rank.
+
+        Pod and container ``rows`` (as :meth:`write_combined_metrics` with
+        ``replace_containers``, ``window`` and ``run_id``) and ``idle_rows`` are
+        written in one transaction; ``on_commit(connection)`` runs last inside
+        it (the collection job records the window and advances the watermark
+        there). Any failure rolls everything back. Returns the pod and container
+        rows written.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot write a collection window atomically")
+
+    async def collected_seconds_by_hour(
+        self, start: datetime, end: datetime, step_seconds: int
+    ) -> dict[datetime, float]:
+        """Seconds of each UTC hour of ``[start, end)`` in which the cluster was collected (MEA-13).
+
+        Cluster-wide, whatever namespace a caller measures: each distinct raw
+        row timestamp covers one step, and an hour with no raw row (compressed,
+        raw rows pruned) covers its longest pod-hour of the hourly table
+        (``MAX(duration_seconds)``). Capped at the hour. Backends without stored rows return an empty mapping.
+        """
+        return {}
+
+    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, "WindowStepProfile"]:
+        """Per step of ``[start, end)``: the stored pods and how many rows carry an allocated cost (STO-01).
+
+        The collection job compares a re-collection with it before replacing a
+        window. Backends without stored rows return an empty mapping.
+        """
+        return {}
+
     @abstractmethod
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         """
-        Reads CombinedMetric objects from the repository within a given time range.
+        Reads CombinedMetric objects whose timestamp is in the half-open range ``[start_time, end_time)``.
 
         Args:
             start_time: Start datetime (inclusive).
-            end_time: End datetime (inclusive).
+            end_time: End datetime (exclusive).
 
         Returns:
             A list of CombinedMetric objects.
         """
         pass
+
+    async def write_idle_metrics(
+        self,
+        metrics: List[Any],
+        *,
+        window: Optional[tuple[datetime, datetime]] = None,
+        run_id: Optional[str] = None,
+        conn: Any = None,
+    ) -> int:
+        """Upserts ``__idle__`` rows (``greenkube.impact.rows.NodeIdleMetric``) keyed by node and timestamp.
+
+        ``window`` and ``run_id`` have the meaning of :meth:`write_combined_metrics`;
+        ``conn`` runs the write inside the caller's transaction. Backends
+        without a ``node_idle_metrics`` table store nothing.
+        """
+        return 0
+
+    async def read_idle_metrics(self, start_time: datetime, end_time: datetime) -> List[Any]:
+        """Reads ``__idle__`` rows whose timestamp is in ``[start_time, end_time)``."""
+        return []
+
+    async def read_latest_idle_gpu_sources(self, start_time: datetime, end_time: datetime) -> Dict[str, Optional[str]]:
+        """``{node: gpu_source}`` of each node's latest idle row in ``[start_time, end_time)`` (NRG-13)."""
+        latest: Dict[str, Any] = {}
+        for row in await self.read_idle_metrics(start_time, end_time) or []:
+            node = getattr(row, "node", None)
+            if node and (node not in latest or row.timestamp >= latest[node].timestamp):
+                latest[node] = row
+        return {node: getattr(row, "gpu_source", None) for node, row in latest.items()}
+
+    async def aggregate_idle_summary(self, start_time: datetime, end_time: datetime) -> Optional[dict]:
+        """Totals of the node idle share (``idle_co2e_grams``, ``idle_embodied_co2e_grams``,
+        ``idle_cost``, ``idle_energy_joules``) in ``[start, end)``; ``None`` when unknown (NRG-02)."""
+        return None
+
+    async def idle_data_since(self) -> Optional[datetime]:
+        """First instant covered by a node idle row, raw or hourly; ``None`` when none is stored (NRG-02)."""
+        return None
+
+    async def aggregate_idle_timeseries(
+        self, start_time: datetime, end_time: datetime, granularity: str = "hour"
+    ) -> List[dict]:
+        """Idle share per time bucket, labelled like :meth:`aggregate_timeseries` (NRG-02)."""
+        return []
 
     async def read_hourly_metrics(
         self,
@@ -225,41 +487,19 @@ class CombinedMetricsRepository(ABC):
         end_time: datetime,
         namespace: Optional[str] = None,
     ) -> List[CombinedMetric]:
-        """Intelligently read from raw or hourly table based on time range.
+        """Read the window from the hourly table below the compression watermark and from raw rows elsewhere.
 
-        For recent data (within METRICS_COMPRESSION_AGE_HOURS), reads raw data.
-        For older data, reads from the hourly table.
-        For mixed ranges, merges both sources.
+        Full hours below the watermark come from the hourly table; the rest of
+        the window (rows at or after the watermark and the partial edge hours)
+        from raw rows (ROL-01, see :mod:`greenkube.storage.raw_hourly_split`).
         """
-        from datetime import timedelta
-        from datetime import timezone as tz
-
-        from ..core.config import get_config
-
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        compression_cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
-
-        # Ensure timezone-aware comparison
-        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
-        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
-
-        # Use a 1-minute tolerance to avoid split-brain when the requested
-        # start is effectively at the compression boundary (e.g. "last 24h").
-        if start_aware >= compression_cutoff - timedelta(minutes=1):
-            # All data is recent — use raw table
-            metrics = await self.read_combined_metrics(start_time, end_time)
-            if namespace:
-                metrics = [m for m in metrics if m.namespace == namespace]
-            return metrics
-
-        if end_aware <= compression_cutoff:
-            # All data is old — use hourly table
-            return await self.read_hourly_metrics(start_time, end_time, namespace)
-
-        # Mixed range: hourly for old part, raw for recent part
-        hourly_metrics = await self.read_hourly_metrics(start_time, compression_cutoff, namespace)
-        raw_metrics = await self.read_combined_metrics(compression_cutoff, end_time)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
+        hourly_metrics: List[CombinedMetric] = []
+        if split.has_hourly:
+            hourly_metrics = await self.read_hourly_metrics(split.hourly_start, split.hourly_end, namespace)
+        raw_metrics: List[CombinedMetric] = []
+        for raw_start, raw_end in split.raw_ranges:
+            raw_metrics += await self.read_combined_metrics(raw_start, raw_end)
         if namespace:
             raw_metrics = [m for m in raw_metrics if m.namespace == namespace]
         return hourly_metrics + raw_metrics
@@ -536,61 +776,107 @@ class CombinedMetricsRepository(ABC):
         end_time: datetime,
         namespace: Optional[str] = None,
     ) -> int:
-        """Recompute ``grid_intensity`` and ``co2e_grams`` for combined metrics
-        in the given window using the latest stored carbon intensities.
+        """Recompute ``grid_intensity``, ``co2e_grams`` and ``intensity_source``
+        for pod **and container** rows in ``[start_time, end_time)`` from the
+        latest stored carbon intensities.
 
         Providers such as Wattnet publish provisional values that are
         consolidated a few hours later (``valid=false`` → ``valid=true``).
-        This method refreshes **every** metric in the window — not only those
+        This method refreshes **every** row in the window — not only those
         without an intensity — so rows calculated from provisional data are
-        corrected in place once the final values are available.
+        corrected in place once the final values are available. Container
+        rows are refreshed with the same rule so they never drift from their
+        pod aggregate (A9, BUG-06).
 
-        The recomputation reuses :class:`CarbonCalculator` so the result is
-        identical to the original calculation (same formula, same timestamp
-        normalization). Rows whose intensity is unchanged are left untouched.
+        Only measured points younger than ``INTENSITY_MAX_AGE`` at the row's
+        normalized lookup time are applied (persisted ``default_fallback``
+        records are ignored); rows without such a point keep their current
+        figures and provenance. Rows whose intensity and provenance are
+        unchanged are left untouched. An updated row also loses the
+        "Carbon intensity uses the ..." entry of the deprecated
+        ``estimation_reasons``, and ``is_estimated`` is cleared when that was
+        its only reason.
 
         Default implementation loads rows and recomputes in Python. SQL
-        backends override this with a single bulk UPDATE for efficiency.
+        backends override this with set-based UPDATE statements.
 
         Args:
             carbon_intensity_repo: The carbon intensity data source.
             start_time: Start of the window (inclusive).
-            end_time: End of the window (inclusive).
+            end_time: End of the window (exclusive).
             namespace: Optional namespace filter.
 
         Returns:
-            The number of rows whose carbon figures were updated.
+            The number of pod and container rows whose carbon figures were updated.
         """
-        from ..core.calculator import CarbonCalculator
+        from ..core.config import get_config
+        from ..models.provenance import IntensitySource, drop_intensity_fallback_reasons
 
-        calculator = CarbonCalculator(carbon_intensity_repo)
+        cfg = get_config()
+        max_age = cfg.intensity_max_age
+        granularity = getattr(cfg, "NORMALIZATION_GRANULARITY", "hour")
 
-        metrics = await self.read_combined_metrics(start_time, end_time)
-        if namespace:
-            metrics = [m for m in metrics if m.namespace == namespace]
+        async def refreshed(metrics: List[CombinedMetric]) -> List[CombinedMetric]:
+            changed: List[CombinedMetric] = []
+            for m in metrics:
+                if namespace and m.namespace != namespace:
+                    continue
+                if not m.emaps_zone or m.timestamp is None:
+                    continue
+                lookup_at = normalize_intensity_time(m.timestamp, granularity)
+                try:
+                    point = await carbon_intensity_repo.get_intensity_point(m.emaps_zone, to_iso_z(lookup_at))
+                except Exception:
+                    point = None
+                if point is None or is_default_fallback_point(point):
+                    continue
+                age = point.age(lookup_at)
+                if age is not None and age > max_age:
+                    continue
+                source = IntensitySource.REALTIME if point.is_estimated is not False else IntensitySource.CONSOLIDATED
+                if m.grid_intensity == point.value and m.intensity_source == source:
+                    continue
+                kwh = (m.joules or 0.0) / cfg.JOULES_PER_KWH
+                pue = m.pue if m.pue is not None else cfg.DEFAULT_PUE
+                m.grid_intensity = point.value
+                m.co2e_grams = kwh * pue * point.value
+                m.intensity_source = source.value
+                # The intensity is measured now: the default no longer explains the legacy flags.
+                kept = drop_intensity_fallback_reasons(m.estimation_reasons)
+                if len(kept) != len(m.estimation_reasons or []):
+                    m.estimation_reasons = kept
+                    m.is_estimated = bool(m.is_estimated) and bool(kept)
+                changed.append(m)
+            return changed
 
-        updated: List[CombinedMetric] = []
-        for m in metrics:
-            if not m.emaps_zone or m.timestamp is None:
-                continue
-            try:
-                intensity = await carbon_intensity_repo.get_for_zone_at_time(m.emaps_zone, to_iso_z(m.timestamp))
-            except Exception:
-                intensity = None
-            if intensity is None:
-                continue
-            await calculator.prefetch_intensity(m.emaps_zone, to_iso_z(m.timestamp), intensity)
-            result = await calculator.calculate_emissions(
-                joules=m.joules, zone=m.emaps_zone, timestamp=m.timestamp, pue=m.pue
-            )
-            if result is not None and result.grid_intensity != m.grid_intensity:
-                m.co2e_grams = result.co2e_grams
-                m.grid_intensity = result.grid_intensity
-                updated.append(m)
+        pod_rows = [
+            m
+            for m in await self.read_combined_metrics(start_time, end_time)
+            if m.timestamp is None or m.timestamp < end_time
+        ]
+        updated = await refreshed(pod_rows)
+        count = await self.write_combined_metrics(updated) if updated else 0
+        if isinstance(self, ContainerMetricsRepository):
+            container_rows = [
+                m
+                for m in await self.read_container_metrics(start_time, end_time, namespace)
+                if m.timestamp is None or m.timestamp < end_time
+            ]
+            updated_containers = await refreshed(container_rows)
+            if updated_containers:
+                count += await self.write_container_metrics(updated_containers)
+        return count
 
-        if not updated:
-            return 0
-        return await self.write_combined_metrics(updated)
+
+def normalize_intensity_time(timestamp: datetime, granularity: str = "hour") -> datetime:
+    """Normalize a metric time the way the calculator does before an intensity lookup."""
+    value = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+    value = value.astimezone(timezone.utc)
+    if granularity == "hour":
+        return value.replace(minute=0, second=0, microsecond=0)
+    if granularity == "day":
+        return value.replace(hour=0, minute=0, second=0, microsecond=0)
+    return value
 
 
 class RecommendationRepository(ABC):
@@ -635,16 +921,22 @@ class RecommendationRepository(ABC):
         pass
 
     @abstractmethod
-    async def upsert_recommendations(self, records: List[RecommendationRecord]) -> int:
+    async def upsert_recommendations(
+        self, records: List[RecommendationRecord], outcomes: Optional[List[UpsertOutcome]] = None
+    ) -> int:
         """Inserts or updates active recommendations using their target identity.
 
         Active recommendations are refreshed in place; ignored recommendations are left untouched.
 
         Args:
             records: A list of RecommendationRecord objects to upsert.
+            outcomes: When given, one :class:`UpsertOutcome` per record is
+                appended to it, in the order of ``records``.
 
         Returns:
-            The number of records inserted or updated.
+            The number of records that have an active row after the call
+            (records absorbed by an applied, pull-request or ignored row are
+            not counted).
         """
         pass
 
@@ -653,12 +945,16 @@ class RecommendationRepository(ABC):
         self,
         records: List[RecommendationRecord],
         namespace: Optional[str] = None,
+        incomplete_sources: Optional[Collection[str]] = None,
     ) -> int:
         """Marks active recommendations absent from the latest generation as stale.
 
         Args:
             records: The current recommendation records generated by the engine.
             namespace: Optional namespace filter limiting reconciliation scope.
+            incomplete_sources: Sources that failed, timed out, were unavailable or
+                returned a partial result in this run. A missing recommendation
+                supported by any of them is kept active (E8).
 
         Returns:
             The number of active recommendations marked stale.
@@ -669,11 +965,15 @@ class RecommendationRepository(ABC):
     async def get_active_recommendations(
         self,
         namespace: Optional[str] = None,
+        *,
+        include_pr_open: bool = False,
     ) -> List[RecommendationRecord]:
         """Returns all currently active recommendations from the database.
 
         Args:
             namespace: Optional namespace filter.
+            include_pr_open: Also return recommendations whose pull request is
+                open (``pr_open``), for listings that show them with their PR.
 
         Returns:
             A list of active RecommendationRecord objects.
@@ -748,6 +1048,18 @@ class RecommendationRepository(ABC):
             A list of matching RecommendationRecord objects.
         """
         pass
+
+    async def get_recommendations_by_ids(self, rec_ids: Sequence[int]) -> List[RecommendationRecord]:
+        """Returns the recommendations with these database IDs (unknown IDs are skipped).
+
+        The SQL repositories read them in one query; this default reads them one by one.
+        """
+        records: List[RecommendationRecord] = []
+        for rec_id in dict.fromkeys(rec_ids):
+            record = await self.get_recommendation_by_id(rec_id)
+            if record is not None:
+                records.append(record)
+        return records
 
     @abstractmethod
     async def get_recommendation_by_id(self, rec_id: int) -> Optional[RecommendationRecord]:
@@ -883,6 +1195,29 @@ class RecommendationRepository(ABC):
             A RecommendationSavingsSummary with totals and per-namespace breakdown.
         """
         pass
+
+    # Recommendation revisions (roadmap E4, E7). SQL repositories implement
+    # these; the defaults keep other implementations (test fakes) working.
+
+    async def get_revisions(self, rec_id: int) -> List[Any]:
+        """``RecommendationRevision`` rows the record no longer carries, newest first."""
+        return []
+
+    async def get_queued_revisions(self, rec_ids: Collection[int]) -> Dict[int, Any]:
+        """The queued ``RecommendationRevision`` of each record waiting behind an open plan."""
+        return {}
+
+    async def pin_plan_revisions(self, plan_id: str, pins: Mapping[int, int]) -> Dict[int, int]:
+        """Record ``{recommendation_id: revision}`` implemented by a plan; the first pin wins."""
+        return dict(pins)
+
+    async def get_plan_pins(self, plan_id: str) -> Dict[int, int]:
+        """``{recommendation_id: revision}`` pinned by a plan."""
+        return {}
+
+    async def backfill_v2_fields(self, cluster_uid: str, batch_size: int = 500) -> int:
+        """Fill the v2 columns of rows written before them; returns the number of rows filled."""
+        return 0
 
     async def get_applied_recommendations_stats(self) -> List[dict]:
         """Return aggregated applied-recommendation stats for Prometheus gauge updates.

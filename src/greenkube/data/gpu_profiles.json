@@ -1,0 +1,27 @@
+{
+  "description": "Board power (TDP, W) of common data-center GPUs, from NVIDIA product specifications. Used by greenkube.impact.power.GpuPowerModel when DCGM reports a GPU without its power draw. Entries are matched in order: the first whose model token and variant prefixes all appear in the GPU name wins, so specific variants come first.",
+  "idle_fraction": 0.15,
+  "profiles": [
+    {"name": "B200", "model": "B200", "variants": [], "tdp_watts": 1000},
+    {"name": "H200", "model": "H200", "variants": [], "tdp_watts": 700},
+    {"name": "H100 PCIe", "model": "H100", "variants": ["PCIE"], "tdp_watts": 350},
+    {"name": "H100 NVL", "model": "H100", "variants": ["NVL"], "tdp_watts": 400},
+    {"name": "H100 SXM", "model": "H100", "variants": [], "tdp_watts": 700},
+    {"name": "A100 PCIe 80GB", "model": "A100", "variants": ["PCIE", "80GB"], "tdp_watts": 300},
+    {"name": "A100 PCIe 40GB", "model": "A100", "variants": ["PCIE"], "tdp_watts": 250},
+    {"name": "A100 SXM", "model": "A100", "variants": [], "tdp_watts": 400},
+    {"name": "L40S", "model": "L40S", "variants": [], "tdp_watts": 350},
+    {"name": "L40", "model": "L40", "variants": [], "tdp_watts": 300},
+    {"name": "L4", "model": "L4", "variants": [], "tdp_watts": 72},
+    {"name": "A40", "model": "A40", "variants": [], "tdp_watts": 300},
+    {"name": "A30", "model": "A30", "variants": [], "tdp_watts": 165},
+    {"name": "A10G", "model": "A10G", "variants": [], "tdp_watts": 300},
+    {"name": "A10", "model": "A10", "variants": [], "tdp_watts": 150},
+    {"name": "A2", "model": "A2", "variants": [], "tdp_watts": 60},
+    {"name": "T4", "model": "T4", "variants": [], "tdp_watts": 70},
+    {"name": "V100 PCIe", "model": "V100", "variants": ["PCIE"], "tdp_watts": 250},
+    {"name": "V100 SXM2", "model": "V100", "variants": [], "tdp_watts": 300},
+    {"name": "P100", "model": "P100", "variants": [], "tdp_watts": 250},
+    {"name": "P4", "model": "P4", "variants": [], "tdp_watts": 75}
+  ]
+}

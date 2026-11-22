@@ -11,6 +11,8 @@ from greenkube.storage.postgres.node_repository import PostgresNodeRepository
 @pytest.fixture
 def connection_mock():
     conn = AsyncMock()
+    # save_nodes runs in one transaction (STO-03 step 5).
+    conn.transaction = MagicMock(return_value=AsyncMock())
     conn.fetch.return_value = []
     conn.executemany.return_value = None
     return conn

@@ -8,7 +8,8 @@ append them to its scrape without importing the composition root.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+import re
+from collections.abc import Iterable, Mapping
 from math import isfinite
 from time import monotonic, time
 from typing import Optional
@@ -234,6 +235,92 @@ GITOPS_SYNC_LAG = Histogram(
     registry=REGISTRY,
 )
 
+COLLECTION_SOURCE_REQUESTS = Counter(
+    "greenkube_collection_source_requests_total",
+    "Requests to measurement sources by bounded source and outcome.",
+    ["source", "outcome"],
+    registry=REGISTRY,
+)
+OPENCOST_AUTH_FAILED = Gauge(
+    "greenkube_opencost_auth_failed",
+    "1 when OpenCost rejected the last allocation request with HTTP 401 or 403 (credentials), COST-06.",
+    registry=REGISTRY,
+)
+METRICS_COMPRESSION_LAG = Gauge(
+    "greenkube_metrics_compression_lag_seconds",
+    "Seconds between the hour the compressor may reach (now - the effective compression age, the longer of "
+    "METRICS_COMPRESSION_AGE_HOURS and COLLECTION_MAX_BACKFILL) and the "
+    "compression watermark of each metric table (ROL-01).",
+    ["table"],
+    registry=REGISTRY,
+)
+OPENCOST_AMBIGUOUS_CLUSTER = Gauge(
+    "greenkube_opencost_ambiguous_cluster",
+    "1 when the last OpenCost answer covered several clusters and OPENCOST_CLUSTER_ID is not set: no OpenCost "
+    "cost is stored for the window (COST-10).",
+    registry=REGISTRY,
+)
+OPENCOST_UNREBUILT_ALLOCATIONS = Counter(
+    "greenkube_opencost_unrebuilt_allocations_total",
+    "OpenCost allocations below its 5-decimal precision whose cost could not be rebuilt from node unit "
+    "prices, or with no running time: stored with cost_source none (untrusted), COST-05.",
+    registry=REGISTRY,
+)
+COLLECTION_SOURCE_DURATION = Histogram(
+    "greenkube_collection_source_duration_seconds",
+    "Duration of requests to measurement sources.",
+    ["source"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
+    registry=REGISTRY,
+)
+# Per-source chunk durations are ``greenkube_collection_window_duration_seconds{source}``
+# (:mod:`greenkube.core.collection_telemetry`); this histogram times the whole run.
+COLLECTION_RUN_DURATION = Histogram(
+    "greenkube_collection_run_duration_seconds",
+    "Wall-clock duration of one metrics collection run (every due window: collect, assemble and write).",
+    buckets=(0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600),
+    registry=REGISTRY,
+)
+METRIC_ROWS_BY_PROVENANCE = Counter(
+    "greenkube_metric_rows_written_total",
+    "Metric rows written, by scope and per-dimension provenance (the provenance mix).",
+    ["scope", "dimension", "source"],
+    registry=REGISTRY,
+)
+
+# Controller loop registry (roadmap M8): one series per registered loop. Loop names
+# are fixed in code and validated by ``greenkube.core.loops``, so cardinality is bounded.
+LOOP_RUNS = Counter(
+    "greenkube_loop_runs_total",
+    "Controller loop ticks by outcome (success, failure, timeout, skipped while not the leader).",
+    ["loop", "outcome"],
+    registry=REGISTRY,
+)
+LOOP_DURATION = Histogram(
+    "greenkube_loop_duration_seconds",
+    "Duration of executed controller loop ticks.",
+    ["loop"],
+    buckets=(0.05, 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600, 1800),
+    registry=REGISTRY,
+)
+LOOP_LAST_SUCCESS = Gauge(
+    "greenkube_loop_last_success_timestamp_seconds",
+    "Unix timestamp of the last successful tick of each controller loop.",
+    ["loop"],
+    registry=REGISTRY,
+)
+LOOP_CONSECUTIVE_FAILURES = Gauge(
+    "greenkube_loop_consecutive_failures",
+    "Consecutive failed or timed-out ticks of each controller loop (0 after a success).",
+    ["loop"],
+    registry=REGISTRY,
+)
+CONTROLLER_LEADER = Gauge(
+    "greenkube_controller_leader",
+    "1 when this controller process runs leader-only loops (Lease holder or no leader election).",
+    registry=REGISTRY,
+)
+
 _PLAN_STATUSES = frozenset(
     {
         "draft",
@@ -261,12 +348,50 @@ _OPERATION_TYPES = frozenset({"apply", "rollback", "unknown"})
 _PR_STATES = frozenset({"open", "merged", "closed", "unchanged", "unknown"})
 _PR_PROVIDERS = frozenset({"github", "gitlab", "gitea", "other"})
 _WEBHOOK_STATUSES = frozenset(
-    {"received", "processed", "duplicate", "retryable", "reconcile_unavailable", "rejected", "unavailable", "error"}
+    {
+        "received",
+        "processed",
+        "duplicate",
+        "ignored",
+        "retryable",
+        "reconcile_unavailable",
+        "rejected",
+        "unavailable",
+        "error",
+    }
 )
 _BINDING_STATUSES = frozenset({"resolved", "ambiguous", "unresolved", "blocked", "stale"})
 _DISCOVERY_REFRESH_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 _SYNC_OUTCOMES = frozenset({"synced", "pending", "failed", "timeout", "skipped", "error"})
 _FAILURE_REASONS = frozenset({"plan", "worker", "polling", "webhook", "discovery", "sync", "other"})
+_COLLECTION_SOURCES = frozenset({"prometheus", "opencost", "electricity_maps", "wattnet", "kubernetes", "other"})
+_COLLECTION_OUTCOMES = frozenset({"success", "empty", "error", "skipped"})
+_PROVENANCE_DIMENSIONS = ("cost_source", "usage_source", "power_source", "intensity_source")
+_PROVENANCE_VALUES = frozenset(
+    {
+        "opencost",
+        "opencost_derived",
+        "kubecost",
+        "pricing_catalog",
+        "custom_rate",
+        "opencost_pending",
+        "none",
+        "prometheus",
+        "metrics_server",
+        "instance_profile",
+        "node_capacity_derived",
+        "default_profile",
+        "kepler",
+        "realtime",
+        "consolidated",
+        "stale",
+        "zone_default",
+        "country_default",
+        "global_default",
+        "unknown",
+        "mixed",
+    }
+)
 
 AUTOMATION_WORKER_UP.set(0)
 AUTOMATION_WORKER_HEARTBEAT_TIMESTAMP.set(0)
@@ -278,6 +403,7 @@ for _binding_status in _BINDING_STATUSES:
 
 
 _AUDIT_LOG = logging.getLogger("greenkube.audit")
+_LOOP_NAME = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 
 
 def record_analyzer_failure(source: str) -> None:
@@ -330,6 +456,36 @@ def record_verification(outcome: str, failed_gates: Optional[list[str]] = None) 
             "failed_gates": list(failed_gates or []),
         },
     )
+
+
+def record_collection_request(source: str, outcome: str, duration_seconds: float | None = None) -> None:
+    """Count one request to a measurement source (Prometheus, OpenCost, intensity providers)."""
+    safe_source = _bounded_label(source, _COLLECTION_SOURCES, "other")
+    COLLECTION_SOURCE_REQUESTS.labels(
+        source=safe_source,
+        outcome=_bounded_label(outcome, _COLLECTION_OUTCOMES, "error"),
+    ).inc()
+    if duration_seconds is not None:
+        COLLECTION_SOURCE_DURATION.labels(source=safe_source).observe(_nonnegative_seconds(duration_seconds))
+
+
+def record_collection_run(duration_seconds: float) -> None:
+    """Observe the wall-clock duration of one metrics collection run."""
+    COLLECTION_RUN_DURATION.observe(_nonnegative_seconds(duration_seconds))
+
+
+def record_metric_provenance(rows: Iterable[object]) -> None:
+    """Count written metric rows by scope and provenance value of each dimension (A12)."""
+    counts: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        scope = "container" if getattr(row, "container_name", None) else "pod"
+        for dimension in _PROVENANCE_DIMENSIONS:
+            value = getattr(row, dimension, None)
+            source = _bounded_label(value, _PROVENANCE_VALUES, "unset") if value is not None else "unset"
+            key = (scope, dimension.removesuffix("_source"), source)
+            counts[key] = counts.get(key, 0) + 1
+    for (scope, dimension, source), count in counts.items():
+        METRIC_ROWS_BY_PROVENANCE.labels(scope=scope, dimension=dimension, source=source).inc(count)
 
 
 def generate_latest_observability() -> bytes:
@@ -427,6 +583,28 @@ def record_automation_failure(reason: str) -> None:
     AUTOMATION_FAILURES.labels(reason=_bounded_label(reason, _FAILURE_REASONS, "other")).inc()
 
 
+def audit_pull_request_detachment(
+    event: str,
+    *,
+    provider_id: str | None,
+    repo: str | None,
+    record_ids: list[int],
+    reason: str | None,
+) -> None:
+    """Emit the audit event of plan pull-request records detached from (or reattached to) polling."""
+    safe_event = event if event in {"pull_request_records_detached", "pull_request_records_reattached"} else "other"
+    _AUDIT_LOG.info(
+        safe_event,
+        extra={
+            "audit_event": safe_event,
+            "provider_id": provider_id,
+            "repo": repo,
+            "record_ids": record_ids,
+            "reason": reason,
+        },
+    )
+
+
 def record_pull_request_state(state: str, provider: str) -> None:
     PULL_REQUESTS.labels(
         state=_bounded_label(state, _PR_STATES, "unknown"),
@@ -491,6 +669,31 @@ def record_sync_timeout() -> None:
 
 def record_sync_lag(lag_seconds: float) -> None:
     GITOPS_SYNC_LAG.observe(_nonnegative_seconds(lag_seconds))
+
+
+_LOOP_OUTCOMES = frozenset({"success", "failure", "timeout", "skipped"})
+
+
+def record_loop_run(
+    loop: str,
+    outcome: str,
+    *,
+    duration_seconds: float | None = None,
+    consecutive_failures: int = 0,
+    success_timestamp: float | None = None,
+) -> None:
+    """Record one controller loop tick (M8). ``duration_seconds`` is None for skipped ticks."""
+    name = loop if isinstance(loop, str) and _LOOP_NAME.fullmatch(loop) else "other"
+    LOOP_RUNS.labels(loop=name, outcome=_bounded_label(outcome, _LOOP_OUTCOMES, "failure")).inc()
+    if duration_seconds is not None:
+        LOOP_DURATION.labels(loop=name).observe(_nonnegative_seconds(duration_seconds))
+    LOOP_CONSECUTIVE_FAILURES.labels(loop=name).set(_nonnegative_count(consecutive_failures))
+    if success_timestamp is not None:
+        LOOP_LAST_SUCCESS.labels(loop=name).set(_nonnegative_seconds(success_timestamp))
+
+
+def set_controller_leader(leader: bool) -> None:
+    CONTROLLER_LEADER.set(1 if leader else 0)
 
 
 def _bounded_label(value: object, allowed: frozenset[str], fallback: str) -> str:

@@ -242,6 +242,7 @@ def _application() -> dict[str, Any]:
         },
         "status": {
             "sync": {"revision": "a" * 40},
+            "sourceType": "Directory",
             "resources": [
                 {
                     "group": "apps",
@@ -646,3 +647,61 @@ async def test_periodic_refresh_rejects_intervals_outside_the_supported_bounds(i
         await service.run_periodic(stop_event=asyncio.Event(), interval_seconds=interval_seconds)
 
     assert discovery.calls == []
+
+
+class _MemoryResourceBindings:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[Any, ...], datetime]] = []
+
+    async def replace_cluster(self, cluster: str, bindings: Iterable[Any], *, observed_at: datetime) -> int:
+        items = tuple(bindings)
+        self.calls.append((cluster, items, observed_at))
+        return len(items)
+
+
+@pytest.mark.asyncio
+async def test_refresh_binds_and_persists_the_inventoried_resources_action_kinds_target():
+    application = _application()
+    application["spec"]["syncPolicy"] = {"automated": {"prune": True}}
+    application["status"]["resources"] += [
+        {"version": "v1", "kind": "Service", "namespace": "payments", "name": "old-lb"},
+        {"version": "v1", "kind": "PersistentVolume", "name": "pv-orphan"},
+        {"version": "v1", "kind": "ConfigMap", "namespace": "payments", "name": "settings"},
+    ]
+    discovery = KubernetesDiscoverySource(_CustomObjectsApi({"applications": {"items": [application]}}))
+    store = _MemoryResourceBindings()
+    service = GitOpsDiscoveryService(
+        discovery, _MemoryBindingRepository(), cluster="prod", provider_id="github-main", resource_repository=store
+    )
+
+    result = await service.refresh()
+
+    refs = sorted((binding.ref.kind, binding.ref.namespace, binding.ref.name) for binding in result.resource_bindings)
+    # Only the kinds a registered action kind targets (delete_resource) are kept; ConfigMaps are not.
+    assert refs == [("PersistentVolume", "", "pv-orphan"), ("Service", "payments", "old-lb")]
+    assert all(binding.resolved and binding.prune is True for binding in result.resource_bindings)
+    workload_source = result.bindings[0].source
+    assert workload_source is not None
+    assert all(
+        binding.location is not None and binding.location.repo_url == workload_source.repo_url
+        for binding in result.resource_bindings
+    )
+    ((cluster, persisted, observed_at),) = store.calls
+    assert cluster == "prod" and persisted == result.resource_bindings and observed_at == result.refreshed_at
+
+
+@pytest.mark.asyncio
+async def test_refresh_without_inventories_persists_nothing():
+    store = _MemoryResourceBindings()
+    service = GitOpsDiscoveryService(
+        _DiscoveryStub(_result()),
+        _MemoryBindingRepository(),
+        cluster="prod",
+        provider_id="github-main",
+        resource_repository=store,
+    )
+
+    result = await service.refresh()
+
+    assert result.resource_bindings == ()
+    assert store.calls == []

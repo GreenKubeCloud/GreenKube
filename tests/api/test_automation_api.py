@@ -1,6 +1,7 @@
 # tests/api/test_automation_api.py
-"""API tests for lifecycle events and the apply-pr automation endpoints."""
+"""API tests for lifecycle events and the automation read endpoints."""
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -9,21 +10,19 @@ from fastapi.testclient import TestClient
 from greenkube.api.app import create_app
 from greenkube.api.dependencies import (
     get_automation_plan_service,
+    get_gitops_binding_repository,
     get_pull_request_repository,
     get_recommendation_repository,
 )
-from greenkube.automation.plans import AutomationPlanError
 from greenkube.core.db import db_manager
 from greenkube.gitops.contracts import (
     ActionPlanV3,
-    AutomationErrorCode,
     BindingStatus,
     ContainerResources,
     ControllerKind,
     FileEdit,
     FilePlan,
     Operation,
-    OperationStatus,
     Plan,
     PlanStatus,
     RendererKind,
@@ -38,6 +37,7 @@ from greenkube.models.metrics import (
     RecommendationRecord,
     RecommendationType,
 )
+from greenkube.storage.base_gitops_repository import GitOpsProviderConfig
 from greenkube.storage.sqlite.pull_request_repository import SQLitePullRequestRepository
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 
@@ -241,199 +241,50 @@ class TestEventsEndpoint:
         assert [e["event_type"] for e in events.json()] == ["applied"]
 
 
-class TestApplyPrEndpoint:
-    async def test_dry_run_uses_resolved_plan_without_workload_annotations(self, automation_client):
-        client, reco_repo, _, app = automation_client
-
-        await reco_repo.save_recommendations([_record()])
-        rec_id = (await reco_repo.get_active_recommendations())[0].id
-        service = _FakePlanApiService(_plan(rec_id))
-        app.dependency_overrides[get_automation_plan_service] = lambda: service
-
-        response = client.post(f"/api/v1/recommendations/{rec_id}/apply-pr", json={"dry_run": True})
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body["status"] == "dry_run"
-        assert body["repo"] == "http://gitea-qa.example.test/qa/gitops.git"
-        assert body["path"] == "apps/api.yaml"
-        assert body["policy_result"] == {}
-        assert "cpu: 300m" in body["diff"]
-        assert service.preview_calls == [[rec_id]]
-        assert service.prepare_calls == []
-
-    async def test_dry_run_surfaces_typed_policy_rejection(self, automation_client):
-        client, reco_repo, _, app = automation_client
-        await reco_repo.save_recommendations([_record()])
-        rec_id = (await reco_repo.get_active_recommendations())[0].id
-        policy_result = {
-            "version": 1,
-            "allowed": False,
-            "checks": [{"gate": "cooldown", "state": "rejected"}],
-            "rejections": [
-                {
-                    "code": "workload_cooldown_active",
-                    "detail": "Retry at the recorded cooldown deadline.",
-                }
-            ],
-        }
-
-        class PolicyRejectedService(_FakePlanApiService):
-            async def preview_plan(self, recommendation_ids: list[int]) -> Plan:
-                raise AutomationPlanError(
-                    AutomationErrorCode.WORKLOAD_COOLDOWN_ACTIVE,
-                    "internal cooldown details",
-                    policy_result=policy_result,
-                )
-
-        service = PolicyRejectedService(_plan(rec_id))
-        app.dependency_overrides[get_automation_plan_service] = lambda: service
-
-        response = client.post(f"/api/v1/recommendations/{rec_id}/apply-pr", json={"dry_run": True})
-
-        assert response.status_code == 429
-        assert response.json()["code"] == "workload_cooldown_active"
-        assert response.json()["policy_result"] == policy_result
-        assert "internal cooldown details" not in response.text
-        assert service.approve_calls == []
-
-    async def test_eligibility_check_previews_without_persisting_plan(self, automation_client):
-        client, reco_repo, _, app = automation_client
-
-        await reco_repo.save_recommendations([_record()])
-        rec_id = (await reco_repo.get_active_recommendations())[0].id
-        service = _FakePlanApiService(_plan(rec_id))
-        app.dependency_overrides[get_automation_plan_service] = lambda: service
-
-        response = client.get(f"/api/v1/recommendations/{rec_id}/apply-pr/eligibility")
-
-        assert response.status_code == 200
-        assert response.json()["eligible"] is True
-        assert service.preview_calls == [[rec_id]]
-        assert service.prepare_calls == []
-
+class TestAutomationEndpoints:
     async def test_pull_requests_endpoint(self, automation_client):
         client, reco_repo, _, _ = automation_client
         response = client.get("/api/v1/recommendations/9999/pull-requests")
         assert response.status_code == 404
 
-    async def test_non_dry_run_approves_plan_and_returns_its_operation(self, automation_client):
-        client, reco_repo, _, app = automation_client
+    async def test_gitea_pull_request_urls_use_configured_web_base_url(self, automation_client, monkeypatch):
+        client, reco_repo, pr_repo, _ = automation_client
         await reco_repo.save_recommendations([_record()])
         rec_id = (await reco_repo.get_active_recommendations())[0].id
-        service = _FakePlanApiService(_plan(rec_id))
-        app.dependency_overrides[get_automation_plan_service] = lambda: service
-
-        response = client.post(
-            f"/api/v1/recommendations/{rec_id}/apply-pr",
-            json={},
-            headers={"Idempotency-Key": "api-request-1", "X-Audit-Actor": "release-bot"},
-        )
-
-        assert response.status_code == 202
-        body = response.json()
-        assert body["status"] == "queued"
-        assert body["operation_id"] == "op-qa-1"
-        assert body["plan_id"] == "plan-qa-1"
-        assert body["idempotency_key"] == f"plan:plan-qa-1:{_DIGEST}"
-        assert body["actor"] == "anonymous"
-        assert service.approve_calls == [("plan-qa-1", _DIGEST)]
-
-    async def test_repeated_non_dry_run_reuses_the_plan_operation(self, automation_client):
-        client, reco_repo, _, app = automation_client
-        await reco_repo.save_recommendations([_record()])
-        rec_id = (await reco_repo.get_active_recommendations())[0].id
-        service = _FakePlanApiService(_plan(rec_id))
-        app.dependency_overrides[get_automation_plan_service] = lambda: service
-
-        first = client.post(f"/api/v1/recommendations/{rec_id}/apply-pr", json={})
-        second = client.post(f"/api/v1/recommendations/{rec_id}/apply-pr", json={})
-
-        assert first.status_code == second.status_code == 202
-        assert first.json()["operation_id"] == second.json()["operation_id"] == "op-qa-1"
-        assert service.approve_calls == [("plan-qa-1", _DIGEST)]
-
-    async def test_repeated_apply_pr_reuses_an_existing_open_recommendation_pr(self, automation_client):
-        client, reco_repo, pr_repo, app = automation_client
-        await reco_repo.save_recommendations([_record()])
-        rec_id = (await reco_repo.get_active_recommendations())[0].id
-        plan = _plan(rec_id)
-        service = _FakePlanApiService(plan)
         await pr_repo.save_pull_request(
             PullRequestRecord(
                 recommendation_id=rec_id,
                 provider="gitea",
-                provider_id="gitea-review",
-                repo="greenkube-qa/k8s-greenkube-review-20261022",
-                base_branch="main",
-                head_branch="greenkube/plan-test",
-                pr_number=7,
-                pr_url="http://gitea.local/greenkube-qa/k8s-greenkube-review-20261022/pulls/7",
+                provider_id="minikube-gitea",
+                repo="greenkube/local-k8s",
+                pr_number=42,
+                pr_url="http://gitea-http.gitea.svc.cluster.local:3000/greenkube/local-k8s/pulls/42",
                 status=PullRequestStatus.OPEN,
-                plan_id=plan.plan_id,
             )
         )
-        app.dependency_overrides[get_automation_plan_service] = lambda: service
-
-        first = client.post(f"/api/v1/recommendations/{rec_id}/apply-pr", json={})
-        second = client.post(f"/api/v1/recommendations/{rec_id}/apply-pr", json={})
-
-        assert first.status_code == second.status_code == 200
-        assert first.json()["status"] == second.json()["status"] == "pr_open"
-        assert first.json()["pull_request"]["id"] == second.json()["pull_request"]["id"]
-        assert service.prepare_calls == []
-        assert len(await pr_repo.get_open_pull_requests(rec_id)) == 1
-
-    async def test_operation_status_reads_the_plan_queue(self, automation_client):
-        client, reco_repo, _, app = automation_client
-        await reco_repo.save_recommendations([_record()])
-        rec_id = (await reco_repo.get_active_recommendations())[0].id
-        service = _FakePlanApiService(_plan(rec_id, status=PlanStatus.APPROVED))
-        service.operation = Operation(
-            operation_id="op-qa-1",
-            plan_id="plan-qa-1",
-            idempotency_key=f"plan:plan-qa-1:{_DIGEST}",
-            status=OperationStatus.RUNNING,
-            attempts=2,
+        monkeypatch.setenv(
+            "GITOPS_PROVIDERS_JSON",
+            json.dumps(
+                {
+                    "providers": [
+                        {
+                            "id": "minikube-gitea",
+                            "type": "gitea",
+                            "webBaseUrl": "http://127.0.0.1:18086",
+                        }
+                    ]
+                }
+            ),
         )
-        app.dependency_overrides[get_automation_plan_service] = lambda: service
 
-        response = client.get("/api/v1/automation/operations/op-qa-1")
+        open_response = client.get("/api/v1/automation/pull-requests")
+        recommendation_response = client.get(f"/api/v1/recommendations/{rec_id}/pull-requests")
 
-        assert response.status_code == 200
-        assert response.json()["status"] == "running"
-        assert response.json()["attempts"] == 2
-        assert response.json()["plan_id"] == "plan-qa-1"
-
-    async def test_apply_pr_reports_missing_plan_service(self, automation_client):
-        client, reco_repo, _, _ = automation_client
-        await reco_repo.save_recommendations([_record()])
-        rec_id = (await reco_repo.get_active_recommendations())[0].id
-
-        response = client.post(f"/api/v1/recommendations/{rec_id}/apply-pr", json={"dry_run": True})
-
-        assert response.status_code == 503
-        assert response.json()["code"] == "plan_service_unavailable"
-
-    async def test_non_rightsizing_recommendation_returns_422(self, automation_client):
-        """Business failures must not be reported as HTTP 200."""
-        client, reco_repo, _, app = automation_client
-
-        await reco_repo.save_recommendations([_record(type=RecommendationType.ZOMBIE_POD)])
-        rec_id = (await reco_repo.get_active_recommendations())[0].id
-
-        class NonRightsizingPlanService(_FakePlanApiService):
-            async def prepare_plan(self, recommendation_ids: list[int], *, actor: str = "system") -> Plan:
-                raise AutomationPlanError(
-                    AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
-                    "Only actionable resource recommendations can be planned.",
-                )
-
-        app.dependency_overrides[get_automation_plan_service] = lambda: NonRightsizingPlanService(_plan(rec_id))
-        response = client.post(f"/api/v1/recommendations/{rec_id}/apply-pr", json={})
-
-        assert response.status_code == 422
-        assert "detail" in response.json()
+        expected_url = "http://127.0.0.1:18086/greenkube/local-k8s/pulls/42"
+        assert open_response.status_code == 200
+        assert open_response.json()[0]["pr_url"] == expected_url
+        assert recommendation_response.status_code == 200
+        assert recommendation_response.json()[0]["pr_url"] == expected_url
 
     async def test_automation_status_endpoint(self, automation_client):
         client, _, _, _ = automation_client
@@ -442,10 +293,62 @@ class TestApplyPrEndpoint:
         body = response.json()
         assert "token_configured" in body
         assert "provider" in body
-        assert body["mode"] in {"disabled", "inline", "worker"}
+        assert body["mode"] in {"paused", "controller"}
+        assert body["delivery_paused"] is False
+        # Delivery mode (F4) and auto-approval (F5) are reported for the UI's Open PR flow.
+        assert body["delivery_mode"] == "direct"
+        assert body["auto_approve"] is False
         assert "ready" in body
         assert "worker" in body
         assert "queue" in body
         assert "discovery" in body
         assert "renderer" in body
         assert isinstance(body["providers"], list)
+
+    async def test_token_configured_requires_a_resolvable_provider_secret(
+        self, automation_client, tmp_path, monkeypatch
+    ):
+        """D12 / BUG-56: token_configured used to mean "a plan service exists"."""
+        client, _, _, app = automation_client
+        monkeypatch.setenv("GITOPS_SECRET_MOUNT", str(tmp_path))
+        (tmp_path / "github-token").mkdir()
+        (tmp_path / "github-token" / "token").write_text("ghp_example\n")
+        (tmp_path / "gitea-token").mkdir()
+        (tmp_path / "gitea-token" / "token").write_text("   \n")
+
+        class Providers:
+            def __init__(self, configs):
+                self.configs = configs
+
+            async def list_provider_configs(self, *, enabled_only: bool = False):
+                return self.configs
+
+        def provider(provider_id: str, secret_name: str | None, *, enabled: bool = True) -> GitOpsProviderConfig:
+            return GitOpsProviderConfig(
+                id=provider_id,
+                provider_type="github",
+                enabled=enabled,
+                secret_name=secret_name,
+                secret_key="token" if secret_name else None,
+            )
+
+        app.dependency_overrides[get_automation_plan_service] = lambda: _FakePlanApiService(_plan(1))
+        app.dependency_overrides[get_gitops_binding_repository] = lambda: Providers(
+            [provider("blank", "gitea-token"), provider("missing", "absent-token"), provider("none", None)]
+        )
+        unresolved = client.get("/api/v1/automation/status").json()
+        app.dependency_overrides[get_gitops_binding_repository] = lambda: Providers(
+            [provider("disabled", "github-token", enabled=False)]
+        )
+        disabled = client.get("/api/v1/automation/status").json()
+        app.dependency_overrides[get_gitops_binding_repository] = lambda: Providers(
+            [provider("github-main", "github-token")]
+        )
+        resolved = client.get("/api/v1/automation/status").json()
+
+        assert unresolved["token_configured"] is False
+        assert [item["token_configured"] for item in unresolved["providers"]] == [False, False, False]
+        assert disabled["token_configured"] is False
+        assert disabled["providers"][0]["token_configured"] is True
+        assert resolved["token_configured"] is True
+        assert "ghp_example" not in json.dumps(resolved)

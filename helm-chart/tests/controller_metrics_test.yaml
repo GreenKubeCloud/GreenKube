@@ -1,0 +1,234 @@
+suite: controller metrics endpoint
+templates:
+  - templates/configmap.yaml
+  - templates/components.yaml
+  - templates/controller-metrics-service.yaml
+  - templates/controller-servicemonitor.yaml
+  - templates/networkpolicy.yaml
+
+tests:
+  - it: configures the controller metrics port and intensity staleness limit
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.CONTROLLER_METRICS_PORT
+          value: "9102"
+      - equal:
+          path: data.INTENSITY_MAX_AGE
+          value: 6h
+
+  - it: exposes the controller metrics port on the controller container
+    templates:
+      - templates/components.yaml
+    documentSelector:
+      path: metadata.name
+      value: RELEASE-NAME-greenkube-controller
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: ctrl-metrics
+            containerPort: 9102
+            protocol: TCP
+
+  - it: keeps the API key out of the controller (least privilege)
+    templates:
+      - templates/components.yaml
+    documentSelector:
+      path: metadata.name
+      value: RELEASE-NAME-greenkube-controller
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes[0].projected.sources[0].secret.items
+          content:
+            key: GREENKUBE_API_KEY
+            path: GREENKUBE_API_KEY
+
+  - it: renders a controller metrics service selecting the controller pods
+    templates:
+      - templates/controller-metrics-service.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: spec.ports[0].port
+          value: 9102
+      - equal:
+          path: spec.ports[0].targetPort
+          value: ctrl-metrics
+      - equal:
+          path: spec.selector["app.kubernetes.io/component"]
+          value: controller
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: controller-metrics
+
+  - it: renders a controller ServiceMonitor when monitoring is enabled
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: observability
+    templates:
+      - templates/controller-servicemonitor.yaml
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: metadata.namespace
+          value: observability
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: controller-metrics
+      - equal:
+          path: spec.endpoints[0].port
+          value: ctrl-metrics
+      - equal:
+          path: spec.endpoints[0].path
+          value: /prometheus/metrics
+      # The controller gets the metrics:read scrape token, never the admin API key:
+      # its copy in the ServiceMonitor namespace, where Prometheus Operator reads it.
+      - equal:
+          path: spec.endpoints[0].authorization
+          value:
+            type: Bearer
+            credentials:
+              name: RELEASE-NAME-greenkube-scrape-token
+              key: token
+
+  - it: keeps the controller ServiceMonitor without credentials when an existing Secret has no scrape token
+    set:
+      monitoring.serviceMonitor.enabled: true
+      secrets.existingSecret: my-secret
+    templates:
+      - templates/controller-servicemonitor.yaml
+    asserts:
+      - notExists:
+          path: spec.endpoints[0].authorization
+
+  - it: does not render a controller ServiceMonitor by default
+    templates:
+      - templates/controller-servicemonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: disables the listener, service and ServiceMonitor with port 0 and falls back to process probes
+    set:
+      controller.metricsPort: 0
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/configmap.yaml
+      - templates/components.yaml
+      - templates/controller-metrics-service.yaml
+      - templates/controller-servicemonitor.yaml
+    asserts:
+      - template: templates/configmap.yaml
+        equal:
+          path: data.CONTROLLER_METRICS_PORT
+          value: "0"
+      - template: templates/components.yaml
+        documentIndex: 1
+        notExists:
+          path: spec.template.spec.containers[0].ports
+      - template: templates/components.yaml
+        documentIndex: 1
+        notExists:
+          path: spec.template.spec.containers[0].startupProbe
+      - template: templates/components.yaml
+        documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command
+          value: ["/bin/sh", "-c", "kill -0 1"]
+      - template: templates/controller-metrics-service.yaml
+        hasDocuments:
+          count: 0
+      - template: templates/controller-servicemonitor.yaml
+        hasDocuments:
+          count: 0
+
+  - it: maps the deprecated collector.metricsPort onto the controller
+    set:
+      collector.metricsPort: 9200
+    templates:
+      - templates/configmap.yaml
+      - templates/components.yaml
+    asserts:
+      - template: templates/configmap.yaml
+        equal:
+          path: data.CONTROLLER_METRICS_PORT
+          value: "9200"
+      - template: templates/components.yaml
+        documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 9200
+
+  - it: allows Prometheus to reach the controller metrics port through the network policy
+    set:
+      monitoring.networkPolicy.enabled: true
+    templates:
+      - templates/networkpolicy.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
+          value: controller
+      - equal:
+          path: spec.ingress
+          value:
+            - from:
+                - namespaceSelector:
+                    matchLabels:
+                      kubernetes.io/metadata.name: monitoring
+                  podSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: prometheus
+              ports:
+                - protocol: TCP
+                  port: 9102
+
+  - it: uses a custom controller metrics port everywhere
+    set:
+      controller.metricsPort: 9200
+      monitoring.networkPolicy.enabled: true
+      monitoring.networkPolicy.prometheusNamespace: observability
+    templates:
+      - templates/configmap.yaml
+      - templates/components.yaml
+      - templates/controller-metrics-service.yaml
+      - templates/networkpolicy.yaml
+    asserts:
+      - template: templates/configmap.yaml
+        equal:
+          path: data.CONTROLLER_METRICS_PORT
+          value: "9200"
+      - template: templates/components.yaml
+        documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 9200
+      - template: templates/controller-metrics-service.yaml
+        equal:
+          path: spec.ports[0].port
+          value: 9200
+      - template: templates/networkpolicy.yaml
+        documentIndex: 1
+        equal:
+          path: spec.ingress[0].ports[0].port
+          value: 9200
+      - template: templates/networkpolicy.yaml
+        documentIndex: 1
+        equal:
+          path: spec.ingress[0].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: observability
+
+  - it: allows the API port for the controller metrics (separate pods)
+    set:
+      controller.metricsPort: 8000
+    templates:
+      - templates/components.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 8000

@@ -69,14 +69,13 @@ async def test_verified_recommendation_savings_and_rollback_are_auditable(accept
     )
     assert verified.status == RecommendationStatus.VERIFIED
 
-    attributed = await SavingsAttributor(savings_repo, "acceptance-cluster").attribute_period(
+    attribution = await SavingsAttributor(savings_repo, "acceptance-cluster").accrue(
         [verified],
-        period_start=datetime.now(timezone.utc) - timedelta(minutes=5),
-        period_end=datetime.now(timezone.utc),
+        now=(verified.verified_at or datetime.now(timezone.utc)) + timedelta(hours=2),
     )
-    assert attributed == 1
-    totals = await savings_repo.get_cumulative_totals(cluster_name="acceptance-cluster")
-    assert totals["RIGHTSIZING_CPU"]["cost_saved_dollars"] > 0
+    assert attribution.written >= 1
+    totals = await savings_repo.get_cumulative_totals(cluster_name="acceptance-cluster", group_by_method=True)
+    assert totals["measured"]["cost_saved_dollars"] > 0
 
     rollback_record = record.model_copy(update={"pod_name": "checkout-rollback"})
     await recommendation_repo.save_recommendations([rollback_record])
@@ -86,6 +85,6 @@ async def test_verified_recommendation_savings_and_rollback_are_auditable(accept
     await lifecycle.apply(rollback_saved.id, actual_cpu=500, application_method="pr_merge", actor="acceptance")
     rolled_back = await lifecycle.mark_rollback_review(rollback_saved.id, reasons=["acceptance health gate"])
     assert rolled_back.status == RecommendationStatus.ROLLBACK_REVIEW
-    assert (await savings_repo.get_cumulative_totals(cluster_name="acceptance-cluster"))["RIGHTSIZING_CPU"][
-        "cost_saved_dollars"
-    ] > 0
+    assert (await savings_repo.get_cumulative_totals(cluster_name="acceptance-cluster", group_by_method=True))[
+        "measured"
+    ]["cost_saved_dollars"] > 0

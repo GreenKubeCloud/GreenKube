@@ -1,114 +1,137 @@
-# src/greenkube/core/optimization/analyzers/rightsizing_cpu.py
-"""CPU rightsizing: targets whose CPU requests far exceed actual usage."""
+"""CPU rightsizing: requests far above usage (decrease) or too close to it (increase)."""
 
 import logging
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from greenkube.core.optimization.analyzers.base import Analyzer
-from greenkube.core.optimization.statistics import (
-    annualized_nonnegative_window_total,
-    annualized_window_total,
-    balanced_rightsizing_target,
-    latest_request_value,
-    percentile,
-    resource_savings_ratio,
-    usage_stats,
+from greenkube.core.optimization.analyzers.rightsizing import cpu_proposal, skipped_increase
+from greenkube.core.optimization.analyzers.rightsizing_memory import (
+    Skip,
+    _pod_level_note,
+    increase_sizing_text,
+    record_withheld_decrease,
+    reliability_diagnostics,
 )
-from greenkube.core.optimization.targeting import (
-    owner_fields,
-    scope_for_target_kind,
-    split_series_by_container,
-    target_label,
-)
+from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
+from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
+from greenkube.models.workload_usage import POD_LEVEL
 
 if TYPE_CHECKING:
+    from greenkube.core.config import Config
     from greenkube.core.optimization.context import OptimizationContext
+    from greenkube.models.workload_usage import UsageSnapshot
 
 LOG = logging.getLogger(__name__)
 
 
 class CpuRightsizingAnalyzer(Analyzer):
-    """Identifies targets with CPU requests much larger than actual usage."""
+    """Two-way CPU rightsizing from per-container usage summaries (roadmap E3, E9)."""
 
     capability = "cpu_rightsizing"
+
+    def __init__(self, config: "Config"):
+        super().__init__(config)
+        #: Targets whose usage calls for a change that was not proposed, with the reason.
+        self.skipped: List[Skip] = []
+        self._signal_status: Dict[str, str] = {}
+        self._snapshot: Optional["UsageSnapshot"] = None
+
+    def scan_diagnostics(self) -> List[Dict[str, Any]]:
+        """Decreases withheld for unknown reliability signals in the last scan."""
+        return reliability_diagnostics(self.skipped, self._signal_status, self._snapshot)
 
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
         cfg = self.config
+        projector = ImpactProjector.for_context(context)
+        self.skipped = []
 
-        for (ns, target_kind, target_name), target_series in context.target_series().items():
-            for container_name, series in split_series_by_container(target_series):
-                cpu_request = latest_request_value(series, "cpu_request")
-                if cpu_request == 0:
-                    continue
-
-                avg_usage, observed_max, usages = usage_stats(
-                    series,
-                    "cpu_usage_millicores",
-                    "cpu_usage_max_millicores",
+        snapshot = context.usage_snapshot()
+        self._signal_status = dict(snapshot.reliability_signal_status)
+        self._snapshot = snapshot
+        for target, container_name, summary in context.iter_container_summaries():
+            ns, target_kind, target_name = target
+            skip = skipped_increase(cfg, summary, "cpu")
+            if skip is not None:
+                self.skipped.append((target, container_name, "cpu", skip))
+                LOG.info(
+                    "CPU increase for %s/%s/%s not proposed (%s): usage is only known for the whole pod.",
+                    ns,
+                    target_kind,
+                    target_name,
+                    skip,
                 )
-                if not usages:
-                    continue
+                continue
+            pod_summary = snapshot.summaries.get(target, {}).get(POD_LEVEL)
+            proposal = cpu_proposal(cfg, summary, pod_summary)
+            if proposal is None:
+                record_withheld_decrease(self.skipped, cfg, summary, pod_summary, "cpu", context)
+            stats = proposal.stats if proposal is not None and proposal.stats is not None else summary.cpu
+            if proposal is None or stats is None:
+                continue
 
-                usage_ratio = avg_usage / cpu_request
+            # The Impact Model prices only the moved CPU reservation (BUG-15); an
+            # increase is a negative cost delta, kept as such (reliability value).
+            delta = projector.container_resources(
+                projector.workload_ref(ns, target_kind, target_name, container_name),
+                context.container_rows(target, container_name),
+                cpu_millicores=(proposal.current, proposal.proposed),
+            )
+            label = target_label(target_kind, target_name)
+            if container_name:
+                label = f"{label} container '{container_name}'"
+            usage_ratio = stats.avg / proposal.current
+            limit_text = proposal.limit_text
 
-                if usage_ratio < cfg.RIGHTSIZING_CPU_THRESHOLD:
-                    p95 = percentile(usages, 95)
-                    raw_recommended = balanced_rightsizing_target(cfg, avg_usage, observed_max, p95)
-                    recommended = max(raw_recommended, cfg.RECOMMENDATION_MIN_CPU_MILLICORES)
-                    savings_ratio = resource_savings_ratio(cpu_request, recommended)
-                    if savings_ratio is None:
-                        LOG.debug(
-                            "Skipping CPU rightsizing for %s/%s: final recommendation %sm is not below current %sm.",
-                            ns,
-                            target_name,
-                            recommended,
-                            cpu_request,
-                        )
-                        continue
-
-                    total_cost = sum(m.total_cost for m in series)
-                    total_co2 = sum(m.co2e_grams for m in series)
-                    annual_cost = annualized_nonnegative_window_total(total_cost, context.analysis_window_seconds)
-                    annual_co2 = annualized_window_total(total_co2, context.analysis_window_seconds)
-                    label = target_label(target_kind, target_name)
-                    if container_name:
-                        label = f"{label} container '{container_name}'"
-                    floor_description = ""
-                    floor_reason = ""
-                    if recommended != raw_recommended:
-                        floor_description = f" (Floored to minimum: {cfg.RECOMMENDATION_MIN_CPU_MILLICORES}m CPU.)"
-                        floor_reason = (
-                            f" Recommended value was below the minimum of "
-                            f"{cfg.RECOMMENDATION_MIN_CPU_MILLICORES}m; "
-                            "floored to avoid impractically small requests."
-                        )
-
-                    recs.append(
-                        Recommendation(
-                            pod_name=target_name,
-                            container_name=container_name,
-                            namespace=ns,
-                            type=RecommendationType.RIGHTSIZING_CPU,
-                            scope=scope_for_target_kind(target_kind),
-                            **owner_fields(target_kind, target_name),
-                            description=(
-                                f"{label} uses avg {avg_usage:.0f}m and max {observed_max:.0f}m of "
-                                f"{cpu_request}m CPU "
-                                f"requested ({usage_ratio:.0%}). Recommend reducing to {recommended}m."
-                                f"{floor_description}"
-                            ),
-                            reason=(
-                                f"Average CPU usage is {usage_ratio:.0%} of the request. "
-                                f"P95 usage is {p95:.0f}m and observed max is {observed_max:.0f}m."
-                                f"{floor_reason}"
-                            ),
-                            priority="medium",
-                            current_cpu_request_millicores=cpu_request,
-                            recommended_cpu_request_millicores=recommended,
-                            potential_savings_cost=annual_cost * savings_ratio,
-                            potential_savings_co2e_grams=annual_co2 * savings_ratio,
-                        )
+            if proposal.direction == "increase":
+                description = (
+                    f"{label} uses p99 {stats.p99:.0f}m and max {stats.max:.0f}m per replica of "
+                    f"{proposal.current}m CPU requested. Recommend increasing to {proposal.proposed}m.{limit_text}"
+                )
+                reason = (
+                    f"Reliability: p99 CPU usage ({stats.p99:.0f}m) is above "
+                    f"{cfg.RIGHTSIZING_INCREASE_THRESHOLD:.0%} of the request; the workload competes for CPU "
+                    f"under contention. Average usage is {usage_ratio:.0%} of the request. "
+                    f"{increase_sizing_text(cfg, proposal, stats, 'm')}"
+                )
+                priority = "high" if stats.p99 > proposal.current else "medium"
+            else:
+                floor_description = ""
+                floor_reason = ""
+                if proposal.floored:
+                    floor_description = f" (Floored to minimum: {cfg.RECOMMENDATION_MIN_CPU_MILLICORES}m CPU.)"
+                    floor_reason = (
+                        f" Recommended value was below the minimum of "
+                        f"{cfg.RECOMMENDATION_MIN_CPU_MILLICORES}m; "
+                        "floored to avoid impractically small requests."
                     )
+                description = (
+                    f"{label} uses avg {stats.avg:.0f}m and max {stats.max:.0f}m of {proposal.current}m CPU "
+                    f"requested ({usage_ratio:.0%}). Recommend reducing to {proposal.proposed}m."
+                    f"{floor_description}{limit_text}"
+                )
+                reason = (
+                    f"Average CPU usage is {usage_ratio:.0%} of the request. "
+                    f"P95 usage is {stats.p95:.0f}m and observed max is {stats.max:.0f}m."
+                    f"{floor_reason}{_pod_level_note(container_name)}"
+                )
+                priority = "medium"
+
+            recs.append(
+                Recommendation(
+                    pod_name=target_name,
+                    container_name=container_name,
+                    namespace=ns,
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    scope=scope_for_target_kind(target_kind),
+                    **owner_fields(target_kind, target_name),
+                    description=description,
+                    reason=reason,
+                    priority=priority,
+                    current_cpu_request_millicores=proposal.current,
+                    recommended_cpu_request_millicores=proposal.proposed,
+                    **impact_fields(delta),
+                )
+            )
         return recs

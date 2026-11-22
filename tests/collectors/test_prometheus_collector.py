@@ -14,98 +14,10 @@ import respx
 from httpx import Response
 
 from greenkube.collectors.discovery.prometheus import PrometheusDiscovery
-from greenkube.collectors.prometheus_collector import PrometheusCollector
+from greenkube.collectors.prometheus_collector import PrometheusCollector, PrometheusQueryError
 from greenkube.core.config import Config
-from greenkube.models.prometheus_metrics import (
-    PodCPUUsage,
-    PrometheusMetric,
-)
 
 # --- Mock Prometheus API Responses ---
-
-MOCK_CPU_USAGE_RESPONSE = {
-    "status": "success",
-    "data": {
-        "resultType": "vector",
-        "result": [
-            {
-                "metric": {
-                    "container": "app",
-                    "namespace": "prod",
-                    "pod": "api-deployment-12345",
-                    "node": "node-1",
-                },
-                "value": [1678886400, "0.5"],  # 0.5 cores
-            },
-            {
-                "metric": {
-                    "container": "db",
-                    "namespace": "prod",
-                    "pod": "db-deployment-67890",
-                    "node": "node-2",
-                },
-                "value": [1678886400, "1.2"],  # 1.2 cores
-            },
-            {
-                "metric": {
-                    # Missing 'pod' label, should be skipped
-                    "container": "sidecar",
-                    "namespace": "default",
-                    "node": "node-1",
-                },
-                "value": [1678886400, "0.1"],
-            },
-            {
-                "metric": {
-                    # Missing 'node' label, should be skipped
-                    "container": "missing-node-container",
-                    "namespace": "prod",
-                    "pod": "api-deployment-77777",
-                },
-                "value": [1678886400, "0.2"],
-            },
-            {
-                "metric": {
-                    "container": "nan-value-container",
-                    "namespace": "prod",
-                    "pod": "api-deployment-99999",
-                    "node": "node-2",
-                },
-                "value": [1678886400, "NaN"],  # Should be skipped
-            },
-        ],
-    },
-}
-
-MOCK_NODE_LABELS_RESPONSE = {
-    "status": "success",
-    "data": {
-        "resultType": "vector",
-        "result": [
-            {
-                "metric": {
-                    "node": "node-1",
-                    "label_node_kubernetes_io_instance_type": "m5.large",
-                },
-                "value": [1678886400, "1"],
-            },
-            {
-                "metric": {
-                    "node": "node-2",
-                    "label_node_kubernetes_io_instance_type": "t3.medium",
-                },
-                "value": [1678886400, "1"],
-            },
-            {
-                "metric": {
-                    # Missing instance type label, should be skipped
-                    "node": "node-3"
-                },
-                "value": [1678886400, "1"],
-            },
-        ],
-    },
-}
 
 MOCK_EMPTY_RESPONSE = {
     "status": "success",
@@ -147,257 +59,6 @@ def collector(mock_config):
 
 
 # --- Test Cases ---
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_collect_success(collector):
-    """
-    Test the happy path: Prometheus is reachable and returns valid data.
-    """
-    mock_url = collector.base_url
-
-    # Mock CPU query
-    query_params_cpu = {"query": collector.cpu_usage_query}
-    url_cpu_pattern = respx.get(f"{mock_url}/api/v1/query", params=query_params_cpu)
-    url_cpu_pattern.mock(return_value=Response(200, json=MOCK_CPU_USAGE_RESPONSE))
-
-    # Mock Node query
-    query_params_node = {"query": collector.node_labels_query}
-    url_node_pattern = respx.get(f"{mock_url}/api/v1/query", params=query_params_node)
-    url_node_pattern.mock(return_value=Response(200, json=MOCK_NODE_LABELS_RESPONSE))
-
-    # Use a pattern that matches regardless of param order if above specific params fail
-    # But respx handles params matching well.
-
-    result = await collector.collect()
-
-    assert isinstance(result, PrometheusMetric)
-
-    # Check CPU data (2 valid, 3 invalid entries in mock)
-    assert len(result.pod_cpu_usage) == 2
-    assert result.pod_cpu_usage[0].namespace == "prod"
-    assert result.pod_cpu_usage[0].pod == "api-deployment-12345"
-    assert result.pod_cpu_usage[0].container == "app"
-    assert result.pod_cpu_usage[0].node == "node-1"  # Assert node
-    assert result.pod_cpu_usage[0].cpu_usage_cores == 0.5
-
-    assert result.pod_cpu_usage[1].pod == "db-deployment-67890"
-    assert result.pod_cpu_usage[1].node == "node-2"  # Assert node
-    assert result.pod_cpu_usage[1].cpu_usage_cores == 1.2
-
-    # Check Node data (2 valid, 1 invalid entry in mock)
-    assert len(result.node_instance_types) == 2
-    assert result.node_instance_types[0].node == "node-1"
-    assert result.node_instance_types[0].instance_type == "m5.large"
-    assert result.node_instance_types[1].node == "node-2"
-    assert result.node_instance_types[1].instance_type == "t3.medium"
-
-
-@pytest.mark.asyncio
-@respx.mock
-@patch.object(PrometheusDiscovery, "discover")
-async def test_collect_with_no_url_triggers_discovery(mock_discover, collector):
-    """
-    Test that collect() triggers discovery when PROMETHEUS_URL is not set.
-    """
-    # We need a collector with no URL
-    collector.base_url = None
-
-    # 1. Discovery is mocked to return a new URL
-    discovered_url = "http://discovered-prometheus:9090"
-    mock_discover.return_value = discovered_url
-
-    # 2. Mock the API calls to the *discovered* URL.
-    # collect() now makes 3 concurrent queries: CPU, nodes, and memory
-    respx.get(f"{discovered_url}/api/v1/query").mock(
-        side_effect=[
-            Response(200, json=MOCK_CPU_USAGE_RESPONSE),
-            Response(200, json=MOCK_NODE_LABELS_RESPONSE),
-            Response(200, json={"status": "success", "data": {"result": []}}),  # memory query
-        ]
-    )
-
-    # 3. Call collect - this should now succeed via discovery
-    # Note: connect_timeout logic in async client might need attention if we rely on it
-    result = await collector.collect()
-
-    # 4. Assertions
-    # Discovery may be called once for CPU (when base_url is None) — the node/memory
-    # queries reuse the discovered URL so they don't re-trigger discovery.
-    assert mock_discover.call_count >= 1
-    assert collector.base_url == discovered_url
-    assert len(result.pod_cpu_usage) == 2
-    assert len(result.node_instance_types) == 2
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_collect_connection_error(collector):
-    """
-    Test behavior when Prometheus is unreachable.
-    """
-    respx.get(f"{collector.base_url}/api/v1/query").mock(side_effect=httpx.ConnectError("Connection refused"))
-
-    result = await collector.collect()
-
-    # Should fail gracefully and return an empty data object
-    assert isinstance(result, PrometheusMetric)
-    assert len(result.pod_cpu_usage) == 0
-    assert len(result.node_instance_types) == 0
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_collect_api_error(collector):
-    """
-    Test behavior when Prometheus returns an HTTP 500 or other error.
-    """
-    respx.get(f"{collector.base_url}/api/v1/query").mock(
-        return_value=Response(500, json={"status": "error", "error": "Internal error"})
-    )
-
-    result = await collector.collect()
-
-    # Should fail gracefully and return an empty data object
-    assert isinstance(result, PrometheusMetric)
-    assert len(result.pod_cpu_usage) == 0
-    assert len(result.node_instance_types) == 0
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_collect_empty_results(collector):
-    """
-    Test behavior when Prometheus is reachable but returns no data.
-    """
-    respx.get(f"{collector.base_url}/api/v1/query").mock(return_value=Response(200, json=MOCK_EMPTY_RESPONSE))
-
-    result = await collector.collect()
-
-    # Should return an empty data object
-    assert isinstance(result, PrometheusMetric)
-    assert len(result.pod_cpu_usage) == 0
-    assert len(result.node_instance_types) == 0
-
-
-def test_parsing_malformed_cpu_data(collector):
-    """
-    Test that malformed data is gracefully handled and returns None.
-    """
-    # This logic is synchronous parsing, so no async needed
-    malformed_cpu_data = {
-        "metric": {"namespace": "n", "pod": "p", "container": "c", "node": "n1"},
-        "value": [0, "not-a-float"],
-    }
-
-    assert collector._parse_cpu_data(malformed_cpu_data) is None
-
-
-def test_parsing_missing_cpu_labels(collector):
-    """
-    Test that the parser returns None if key labels are missing.
-    """
-    # Missing 'pod'
-    missing_label_data = {
-        "metric": {"namespace": "n", "container": "c", "node": "n1"},
-        "value": [0, "0.5"],
-    }
-    assert collector._parse_cpu_data(missing_label_data) is None
-
-    # Missing 'node'
-    missing_label_data_2 = {
-        "metric": {"namespace": "n", "pod": "p", "container": "c"},
-        "value": [0, "0.5"],
-    }
-    assert collector._parse_cpu_data(missing_label_data_2) is None
-
-
-def test_parsing_missing_node_labels(collector):
-    """
-    Test that the parser returns None if key node labels are missing.
-    """
-    # Missing 'label_node_kubernetes_io_instance_type'
-    missing_label_data = {"metric": {"node": "node-1"}, "value": [0, "1"]}
-    assert collector._parse_node_data(missing_label_data) is None
-
-
-def test_parsing_nan_value(collector):
-    """
-    Test that values of 'NaN' are gracefully skipped.
-    """
-    nan_data = {
-        "metric": {"namespace": "n", "pod": "p", "container": "c", "node": "n1"},
-        "value": [0, "NaN"],
-    }
-    assert collector._parse_cpu_data(nan_data) is None
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_collect_ignores_non_pod_series(collector):
-    """
-    Ensure collect() ignores node-level/non-pod series and only returns pod-level entries.
-    """
-    mock_url = collector.base_url
-    # Build CPU response mixing node-level and pod-level series
-    mixed_result = {
-        "status": "success",
-        "data": {
-            "resultType": "vector",
-            "result": [
-                {
-                    "metric": {"node": "node-1"},
-                    "value": [1678886400, "0.5"],
-                },  # node-level
-                {
-                    "metric": {
-                        "namespace": "prod",
-                        "pod": "p1",
-                        "container": "c1",
-                        "node": "node-1",
-                    },
-                    "value": [1678886400, "0.7"],
-                },
-            ],
-        },
-    }
-
-    query_params_cpu = {"query": collector.cpu_usage_query}
-    respx.get(f"{mock_url}/api/v1/query", params=query_params_cpu).mock(return_value=Response(200, json=mixed_result))
-
-    # Node labels empty to avoid interfering
-    query_params_node = {"query": collector.node_labels_query}
-    respx.get(f"{mock_url}/api/v1/query", params=query_params_node).mock(
-        return_value=Response(200, json=MOCK_EMPTY_RESPONSE)
-    )
-
-    result = await collector.collect()
-    # Only one pod-level entry should be returned
-    assert len(result.pod_cpu_usage) == 1
-    assert result.pod_cpu_usage[0].pod == "p1"
-
-
-def test_parse_pod_series_variants(collector):
-    """
-    Ensure parsing helpers accept pod-level series both with and without 'container' label.
-    """
-    pod_with_container = {
-        "metric": {"namespace": "ns", "pod": "p-a", "container": "ctr", "node": "n1"},
-        "value": [0, "0.25"],
-    }
-    pod_without_container = {
-        "metric": {"namespace": "ns", "pod": "p-b", "node": "n1"},
-        "value": [0, "0.5"],
-    }
-
-    p1 = collector._parse_cpu_data(pod_with_container)
-    assert isinstance(p1, PodCPUUsage)
-    assert p1.container == "ctr"
-
-    p2 = collector._parse_cpu_data_no_container(pod_without_container)
-    assert isinstance(p2, PodCPUUsage)
-    assert p2.container == ""
 
 
 @pytest.mark.asyncio
@@ -461,50 +122,6 @@ def test_update_url_respects_config_verify_certs(mock_config):
 
 
 @pytest.mark.asyncio
-async def test_query_run_loop_handles_non_success_errors_and_then_success(collector):
-    non_success = MagicMock()
-    non_success.raise_for_status.return_value = None
-    non_success.json.return_value = {"status": "error", "error": "bad query"}
-    success = MagicMock()
-    success.raise_for_status.return_value = None
-    success.json.return_value = {"status": "success", "data": {"result": [{"metric": {}, "value": [0, "1"]}]}}
-    client = AsyncMock()
-    client.get = AsyncMock(side_effect=[non_success, httpx.ConnectError("refused"), RuntimeError("boom"), success])
-
-    result = await collector._query_run_loop(
-        client,
-        ["http://p/one", "http://p/two", "http://p/three", "http://p/four"],
-        {"query": "up"},
-        {},
-        None,
-        "up",
-    )
-
-    assert result == [{"metric": {}, "value": [0, "1"]}]
-    assert client.get.await_count == 4
-
-
-@pytest.mark.asyncio
-async def test_query_run_loop_returns_empty_when_all_candidates_fail(collector):
-    client = AsyncMock()
-    client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
-    collector._discover_and_update_url = AsyncMock(return_value=False)
-
-    result = await collector._query_run_loop(client, ["http://p/query"], {"query": "up"}, {}, None, "up")
-
-    assert result == []
-    collector._discover_and_update_url.assert_awaited_once_with(client)
-
-
-@pytest.mark.asyncio
-async def test_query_run_loop_handles_empty_candidate_list(collector):
-    client = AsyncMock()
-    collector._discover_and_update_url = AsyncMock(return_value=False)
-
-    assert await collector._query_run_loop(client, [], {"query": "up"}, {}, None, "up") == []
-
-
-@pytest.mark.asyncio
 async def test_probe_url_tries_candidate_paths_and_uses_auth_headers(collector):
     collector.bearer_token = "token"
     collector.username = "user"
@@ -536,19 +153,51 @@ async def test_discover_and_update_url_uses_well_known_in_cluster_url(collector)
 
 
 @pytest.mark.asyncio
-async def test_collect_range_returns_empty_for_invalid_dates_or_failed_discovery(collector):
+async def test_collect_range_rejects_invalid_dates_and_reports_missing_prometheus(collector):
+    """An unreachable or unconfigured Prometheus must never look like an empty window (A2)."""
     collector.base_url = None
     collector._discover_and_update_url = AsyncMock(return_value=False)
 
-    assert await collector.collect_range("not-a-date", datetime.now(timezone.utc)) == []
-    assert await collector.collect_range(datetime.now(timezone.utc), datetime.now(timezone.utc)) == []
+    with pytest.raises(ValueError):
+        await collector.collect_range("not-a-date", datetime.now(timezone.utc))
+    with pytest.raises(PrometheusQueryError):
+        await collector.collect_range(datetime.now(timezone.utc), datetime.now(timezone.utc))
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_collect_range_retries_cpu_query_without_container_label(collector):
-    respx.get(f"{collector.base_url}/api/v1/query_range").mock(
-        side_effect=[Response(200, json=MOCK_EMPTY_RESPONSE), Response(200, json=MOCK_CPU_RANGE_RESPONSE)]
+async def test_collect_range_raises_when_every_endpoint_fails(collector):
+    respx.get(url__startswith=collector.base_url).mock(side_effect=httpx.ConnectError("Connection refused"))
+    end_time = datetime.now(timezone.utc)
+
+    with pytest.raises(PrometheusQueryError):
+        await collector.collect_range(end_time - timedelta(minutes=5), end_time)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_range_raises_on_prometheus_error_status(collector):
+    respx.get(url__startswith=collector.base_url).mock(
+        return_value=Response(200, json={"status": "error", "error": "bad_data"})
+    )
+    end_time = datetime.now(timezone.utc)
+
+    with pytest.raises(PrometheusQueryError, match="bad_data"):
+        await collector.collect_range(end_time - timedelta(minutes=5), end_time)
+
+
+def test_container_scoped_queries_exclude_pod_cgroup_and_pause_series(collector):
+    """BUG-01, COL-09: one query reads containers and pod cgroups; pause and node-level cgroups are excluded."""
+    assert 'pod!="",container!="POD"' in collector.cpu_usage_query
+    assert "by (namespace,pod,container,node)" in collector.cpu_usage_query
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_range_reads_containers_and_pod_cgroups_in_one_query(collector):
+    """COL-09: no empty-result fallback; one query returns both levels."""
+    route = respx.get(f"{collector.base_url}/api/v1/query_range").mock(
+        return_value=Response(200, json=MOCK_CPU_RANGE_RESPONSE)
     )
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(minutes=5)
@@ -557,42 +206,7 @@ async def test_collect_range_retries_cpu_query_without_container_label(collector
 
     assert len(result) == 1
     assert result[0]["metric"]["pod"] == "api-1"
-
-
-def test_parsing_memory_network_disk_and_restart_edge_cases(collector):
-    valid_metric = {"namespace": "prod", "pod": "api", "node": "node-a"}
-    invalid_values = [None, "NaN", "-1", "inf", "not-a-number"]
-
-    for value in invalid_values:
-        assert collector._parse_memory_data({"metric": valid_metric, "value": [0, value]}) is None
-
-    assert collector._parse_memory_data({"metric": valid_metric, "value": [0, "1024"]}).memory_usage_bytes == 1024
-    assert collector._parse_network_receive_data({"metric": {}, "value": [0, "1"]}) is None
-    assert collector._parse_network_transmit_data({"metric": valid_metric, "value": [0, "bad"]}) is None
-    assert collector._parse_disk_read_data({"metric": {}, "value": [0, "1"]}) is None
-    assert collector._parse_disk_write_data({"metric": valid_metric, "value": [0, "bad"]}) is None
-    assert collector._parse_restart_count_data({"metric": {"namespace": "prod"}, "value": [0, "1"]}) is None
-    assert collector._parse_restart_count_data({"metric": valid_metric, "value": [0, "bad"]}) is None
-
-
-def test_network_and_disk_parsers_merge_receive_transmit_and_read_write(collector):
-    base_metric = {"namespace": "prod", "pod": "api", "node": "node-a"}
-
-    network = collector._parse_network_io(
-        [{"metric": base_metric, "value": [0, "10"]}],
-        [{"metric": base_metric, "value": [0, "5"]}],
-    )
-    disk = collector._parse_disk_io(
-        [{"metric": base_metric, "value": [0, "20"]}],
-        [{"metric": base_metric, "value": [0, "7"]}],
-    )
-
-    assert len(network) == 1
-    assert network[0].network_receive_bytes == 10
-    assert network[0].network_transmit_bytes == 5
-    assert len(disk) == 1
-    assert disk[0].disk_read_bytes == 20
-    assert disk[0].disk_write_bytes == 7
+    assert route.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -615,43 +229,3 @@ async def test_collect_range_cpu_fallback_returns_empty_without_recursion(collec
     start_time = end_time - timedelta(minutes=5)
 
     assert await collector.collect_range(start_time, end_time) == []
-
-
-@pytest.mark.asyncio
-async def test_collect_pod_storage_joins_pvc_metrics(collector):
-    """Per-pod PVC requests and usage are joined from the kube-state-metrics series."""
-
-    async def fake_query(client, query):
-        if query == "kube_pod_spec_volumes_persistentvolumeclaims_info":
-            return [
-                {"metric": {"namespace": "prod", "pod": "app-0", "persistentvolumeclaim": "data-app-0"}},
-                {"metric": {"namespace": "prod", "pod": "app-0", "persistentvolumeclaim": "logs-app-0"}},
-                {"metric": {"namespace": "dev", "pod": "worker-0", "persistentvolumeclaim": "data-worker-0"}},
-            ]
-        if query == "kube_persistentvolumeclaim_resource_requests_storage_bytes":
-            return [
-                {"metric": {"persistentvolumeclaim": "data-app-0"}, "value": [0, "10737418240"]},
-                {"metric": {"persistentvolumeclaim": "logs-app-0"}, "value": [0, "1073741824"]},
-                {"metric": {"persistentvolumeclaim": "data-worker-0"}, "value": [0, "5368709120"]},
-            ]
-        if query == "kubelet_volume_stats_used_bytes":
-            return [{"metric": {"persistentvolumeclaim": "data-app-0"}, "value": [0, "2147483648"]}]
-        return []
-
-    collector._get_client = AsyncMock(return_value=MagicMock())
-    collector._query_prometheus = AsyncMock(side_effect=fake_query)
-
-    storage = await collector.collect_pod_storage()
-
-    assert storage[("prod", "app-0")]["request"] == pytest.approx(11811160064.0)
-    assert storage[("prod", "app-0")]["usage"] == pytest.approx(2147483648.0)
-    assert storage[("dev", "worker-0")]["request"] == pytest.approx(5368709120.0)
-    assert storage[("dev", "worker-0")]["usage"] == 0.0
-
-
-@pytest.mark.asyncio
-async def test_collect_pod_storage_returns_empty_on_prometheus_error(collector):
-    collector._get_client = AsyncMock(return_value=MagicMock())
-    collector._query_prometheus = AsyncMock(side_effect=RuntimeError("prometheus down"))
-
-    assert await collector.collect_pod_storage() == {}

@@ -10,10 +10,14 @@ only locates manifests through workload annotations and edits YAML.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from abc import ABC, abstractmethod
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Iterable, List, Literal, Optional
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
@@ -21,7 +25,19 @@ from urllib.parse import parse_qs, quote, urljoin, urlsplit
 import httpx
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, field_validator
 
+from greenkube.automation.git.budget import charge_provider_call
+from greenkube.automation.git.rate_limit import (
+    MAX_INLINE_RATE_LIMIT_WAIT_SECONDS,
+    announced_wait_seconds,
+    rate_limit_retry_at,
+    record_rate_limited,
+)
+from greenkube.gitops.sha import GIT_OBJECT_SHA
+from greenkube.gitops.sha import is_full_commit_sha as is_full_commit_sha  # re-exported for the adapters
+
 logger = logging.getLogger(__name__)
+
+_IMMUTABLE_CACHE_SIZE = 64
 
 
 class GitProviderCapability(StrEnum):
@@ -41,6 +57,42 @@ class GitProviderCapability(StrEnum):
     BRANCH_PROTECTION_CHECK = "branch_protection_check"
     FIND_OPEN_PULL_REQUEST_FOR_BRANCH = "find_open_pull_request_for_branch"
     DELETE_PLAN_BRANCH = "delete_plan_branch"
+    COMMIT_ANCESTRY = "commit_ancestry"
+    #: Commit statuses on a PR head (``greenkube/validation``, J5).
+    COMMIT_STATUS = "commit_status"
+    #: Create and edit PR comments (the lifecycle comment, J5).
+    PULL_REQUEST_COMMENTS = "pull_request_comments"
+    #: Add labels and reviewers to an existing PR (derived metadata, J2/J3).
+    PULL_REQUEST_METADATA = "pull_request_metadata"
+
+
+#: Commit status states accepted by :meth:`GitProvider.set_commit_status`.
+CommitStatusState = Literal["pending", "success", "failure", "error"]
+#: How many comment pages a lifecycle-comment lookup reads at most.
+MAX_COMMENT_PAGES = 20
+COMMENT_PAGE_SIZE = 100
+MAX_COMMENT_CHARS = 60_000
+MAX_CODEOWNER_REVIEWERS = 10
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestComment:
+    """One provider comment on a pull request.
+
+    ``author_id`` is the provider's numeric user ID of the comment's author
+    (``user.id`` on GitHub and Gitea, ``author.id`` on GitLab), ``None`` when
+    the provider did not report one.
+    """
+
+    id: int
+    body: str
+    author_id: Optional[int] = None
+
+
+class CommentUpsertResult(StrEnum):
+    CREATED = "created"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
 
 
 class GitProviderError(RuntimeError):
@@ -55,6 +107,31 @@ class GitProviderTransientError(GitProviderError):
     """A provider failure which may succeed when retried."""
 
 
+class GitProviderRateLimitError(GitProviderTransientError):
+    """The provider rate-limited the token; the request may be retried at ``retry_at``.
+
+    Never an authorization failure: the provider must not be marked ``permission_denied``.
+    """
+
+    code = "provider-rate-limited"
+
+    def __init__(self, message: str, *, status_code: int | None = None, retry_at: datetime | None = None) -> None:
+        super().__init__(message, status_code=status_code)
+        self.retry_at = retry_at
+
+
+def rate_limit_error(provider: str, response: httpx.Response, *, context: str) -> GitProviderRateLimitError | None:
+    """A typed rate-limit error for ``response`` (counted once), or ``None`` when it is not one."""
+    retry_at = rate_limit_retry_at(response)
+    if retry_at is None:
+        return None
+    return GitProviderRateLimitError(
+        f"{provider} rate limit reached on {context} (HTTP {response.status_code}); retry after {retry_at.isoformat()}",
+        status_code=response.status_code,
+        retry_at=retry_at,
+    )
+
+
 class GitProviderArchiveLimitError(GitProviderError):
     """A provider archive exceeded the caller's compressed-byte limit."""
 
@@ -65,6 +142,12 @@ class GitConflictError(GitProviderError):
     """Raised when a commit cannot be applied to the expected repository revision."""
 
     code = "revision-conflict"
+
+
+class ProviderCallBudgetExceededError(GitProviderError):
+    """Raised before a request when the operation's provider call budget is spent."""
+
+    code = "provider-call-budget-exceeded"
 
 
 class GitProviderCapabilityError(GitProviderError):
@@ -92,7 +175,7 @@ class PullRequestOptions(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
     draft: StrictBool = False
-    labels: tuple[str, ...] = ("greenkube", "sustainability")
+    labels: tuple[str, ...] = ()
     reviewers: tuple[str, ...] = ()
     team_reviewers: tuple[str, ...] = Field(
         default=(),
@@ -165,7 +248,6 @@ def pull_request_option_capabilities(options: PullRequestOptions) -> frozenset[G
 # the building blocks of URL/path injection, so both are rejected up front.
 _GIT_REF_FORBIDDEN_CHARS = re.compile(r"[\x00-\x1f\x7f ~^:?*\[\\]")
 _GIT_REF_FORBIDDEN_SEQUENCES = ("..", "@{", "//")
-_GIT_OBJECT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _GREENKUBE_PLAN_BRANCH = re.compile(r"greenkube/plan/[0-9a-f]{32}\Z")
 
 
@@ -195,8 +277,16 @@ def validate_greenkube_plan_branch(ref: str) -> str:
     return value
 
 
+def git_blob_id(content: str | bytes, *, object_format: Literal["sha1", "sha256"] = "sha1") -> str:
+    """Return the Git blob object ID (``git hash-object``) of UTF-8 file content."""
+    payload = content.encode("utf-8") if isinstance(content, str) else content
+    header = b"blob " + str(len(payload)).encode("ascii") + b"\0"
+    digest = hashlib.sha256 if object_format == "sha256" else hashlib.sha1
+    return digest(header + payload).hexdigest()
+
+
 def _validate_full_commit_sha(revision: object, *, provider: str, ref: str) -> str:
-    if not isinstance(revision, str) or _GIT_OBJECT_SHA.fullmatch(revision) is None:
+    if not isinstance(revision, str) or GIT_OBJECT_SHA.fullmatch(revision) is None:
         raise GitProviderError(f"{provider} returned an invalid full commit SHA for ref '{ref}'.")
     return revision
 
@@ -238,6 +328,67 @@ class GitFile:
     content: str
     sha: Optional[str] = None
     blob_sha: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class GitTreeEntry:
+    """One non-directory entry of a recursive repository tree."""
+
+    path: str
+    sha: str
+    mode: str = "100644"
+    type: str = "blob"
+
+
+@dataclass(frozen=True, slots=True)
+class GitTree:
+    """A complete recursive listing of file entries at one revision."""
+
+    entries: Mapping[str, GitTreeEntry]
+    sha: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class GitTreeChange:
+    """One path whose entry differs between two trees.
+
+    ``blob_sha`` is the head-side object ID when the provider reports it; it is
+    ``None`` for deletions and for providers whose comparison API only lists
+    paths (callers then read the head blob of the paths they care about).
+    """
+
+    path: str
+    status: Literal["added", "modified", "deleted"]
+    blob_sha: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class GitTreeComparison:
+    """The complete set of paths that differ between an immutable base and a head ref."""
+
+    base_revision: str
+    head_ref: str
+    changes: tuple[GitTreeChange, ...] = ()
+    head_revision: Optional[str] = None
+
+
+def diff_git_trees(base: GitTree, head: GitTree) -> tuple[GitTreeChange, ...]:
+    """Compare two complete trees by entry identity (object ID, mode and type)."""
+    changes: list[GitTreeChange] = []
+    for path in sorted(set(base.entries) | set(head.entries)):
+        base_entry = base.entries.get(path)
+        head_entry = head.entries.get(path)
+        if head_entry is None:
+            changes.append(GitTreeChange(path=path, status="deleted"))
+        elif base_entry is None:
+            changes.append(GitTreeChange(path=path, status="added", blob_sha=head_entry.sha))
+        elif (base_entry.sha.lower(), base_entry.mode, base_entry.type) != (
+            head_entry.sha.lower(),
+            head_entry.mode,
+            head_entry.type,
+        ):
+            changes.append(GitTreeChange(path=path, status="modified", blob_sha=head_entry.sha))
+    return tuple(changes)
 
 
 @dataclass
@@ -335,6 +486,12 @@ class GitCommitRequest:
                 raise GitProviderError(f"Git commit request requires a valid {field_name}.")
 
 
+#: Open pull requests read per repository and base branch by the plan trailer linkage.
+OPEN_PULL_REQUEST_SCAN_LIMIT = 50
+#: Commit messages read per pull request by the plan trailer linkage.
+PULL_REQUEST_COMMIT_SCAN_LIMIT = 50
+
+
 @dataclass
 class GitCommitResult:
     """Result of a single atomic commit containing multiple file edits."""
@@ -342,6 +499,10 @@ class GitCommitResult:
     commit_sha: str
     branch: str
     files_changed: List[str]
+    #: The platform's signature verification of the new commit (J8): True when it shows as
+    #: Verified (GitHub App commits), False when unsigned or unverified, None when unknown.
+    verified: Optional[bool] = None
+    verification_reason: Optional[str] = None
 
 
 def repository_matches_allowlist(repository_name: str, pattern: str) -> bool:
@@ -407,6 +568,10 @@ class GitProvider(ABC):
     """Adapter contract for a Git platform."""
 
     name: str = "git"
+    #: The platform signs the commits this adapter creates through its API (J8). A GitHub App
+    #: installation commit shows as Verified only when it names no author or committer, so
+    #: the adapter omits both and GitHub attributes the commit to the App's bot.
+    platform_signed_commits: bool = False
 
     def __init__(
         self,
@@ -425,6 +590,7 @@ class GitProvider(ABC):
         self.timeout = timeout
         self._client = client
         self._owns_client = client is None
+        self._immutable_cache: OrderedDict[tuple[str, ...], object] = OrderedDict()
 
     capabilities: frozenset[GitProviderCapability] = frozenset()
 
@@ -502,7 +668,7 @@ class GitProvider(ABC):
         """Check file-operation preconditions against the requested base revision."""
         files: dict[str, Optional[GitFile]] = {}
         for edit in request.files:
-            current = await self.get_file(request.repo, edit.path, request.base_revision)
+            current = await self._get_file_cached(request.repo, edit.path, request.base_revision)
             if edit.action == "create" and current is not None:
                 raise GitConflictError(f"Cannot create '{edit.path}': the file already exists at the base revision.")
             if edit.action != "create" and current is None:
@@ -521,6 +687,39 @@ class GitProvider(ABC):
             default_branch=base_branch or "main",
             validate_provider=self.name in ("github", "gitlab", "gitea"),
         )
+
+    # ------------------------------------------------------------------
+    # Immutable-revision cache
+    # ------------------------------------------------------------------
+
+    def _cache_get(self, key: tuple[str, ...]) -> object | None:
+        cache = getattr(self, "_immutable_cache", None)
+        if cache is None or key not in cache:
+            return None
+        cache.move_to_end(key)
+        return cache[key]
+
+    def _cache_put(self, key: tuple[str, ...], value: object) -> None:
+        cache = getattr(self, "_immutable_cache", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._immutable_cache = cache
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > _IMMUTABLE_CACHE_SIZE:
+            cache.popitem(last=False)
+
+    async def _get_file_cached(self, repo: GitRepository, path: str, ref: str) -> Optional[GitFile]:
+        """Read a file once per immutable commit SHA; mutable refs are always re-read."""
+        if not is_full_commit_sha(ref):
+            return await self.get_file(repo, path, ref)
+        key = ("file", repo.full_name, ref.lower(), path)
+        cached = self._cache_get(key)
+        if isinstance(cached, _CachedFile):
+            return cached.file
+        git_file = await self.get_file(repo, path, ref)
+        self._cache_put(key, _CachedFile(git_file))
+        return git_file
 
     # ------------------------------------------------------------------
     # HTTP plumbing
@@ -545,6 +744,7 @@ class GitProvider(ABC):
         client = await self._client_or_create()
         url = f"{self.api_base_url}{path}" if self.api_base_url else path
         for attempt in range(3 if retryable else 1):
+            charge_provider_call(self.name)
             try:
                 response = await client.request(
                     method,
@@ -561,8 +761,17 @@ class GitProvider(ABC):
                 raise GitProviderTransientError(f"{self.name} transient request failure: {exc}") from exc
             except httpx.HTTPError as exc:
                 raise GitProviderError(f"{self.name} request failed: {exc}") from exc
-            if retryable and response.status_code in (429, 500, 502, 503, 504) and attempt < 2:
-                await asyncio.sleep(0.05 * (2**attempt))
+            if response.status_code in (403, 429):
+                rate_limited = rate_limit_error(self.name, response, context=f"{method} {path}")
+                if rate_limited is not None:
+                    record_rate_limited(self.name)
+                    wait = _inline_retry_wait(response, attempt)
+                    if retryable and attempt < 2 and wait is not None:
+                        await asyncio.sleep(wait)
+                        continue
+                    raise rate_limited
+            if retryable and response.status_code in (500, 502, 503, 504) and attempt < 2:
+                await asyncio.sleep(_inline_retry_wait(response, attempt) or 0.05 * (2**attempt))
                 continue
             break
 
@@ -608,9 +817,11 @@ class GitProvider(ABC):
             current_params = params
             current_headers = self._headers()
             retry_response = False
+            retry_wait = 0.05 * (2**attempt)
             try:
                 redirects = 0
                 while True:
+                    charge_provider_call(self.name)
                     async with client.stream(
                         "GET",
                         current_url,
@@ -620,8 +831,20 @@ class GitProvider(ABC):
                         timeout=self.timeout,
                         follow_redirects=False,
                     ) as response:
+                        if response.status_code in (403, 429):
+                            await response.aread()
+                            rate_limited = rate_limit_error(self.name, response, context="archive download")
+                            if rate_limited is not None:
+                                record_rate_limited(self.name)
+                                rate_limit_wait = _inline_retry_wait(response, attempt)
+                                if attempt >= 2 or rate_limit_wait is None:
+                                    raise rate_limited
+                                retry_wait = rate_limit_wait
+                                retry_response = True
+                                break
                         if response.status_code in retryable_statuses:
                             if attempt < 2:
+                                retry_wait = _inline_retry_wait(response, attempt) or 0.05 * (2**attempt)
                                 retry_response = True
                                 break
                             raise GitProviderTransientError(
@@ -682,7 +905,7 @@ class GitProvider(ABC):
                         return bytes(content)
 
                 if retry_response:
-                    await asyncio.sleep(0.05 * (2**attempt))
+                    await asyncio.sleep(retry_wait)
                     continue
             except (httpx.TimeoutException, httpx.NetworkError):
                 if attempt < 2:
@@ -725,6 +948,87 @@ class GitProvider(ABC):
     @abstractmethod
     async def list_files(self, repo: GitRepository, ref: str) -> List[str]: ...
 
+    async def get_tree(self, repo: GitRepository, ref: str) -> GitTree:
+        """Return every file entry at ``ref`` with its object ID.
+
+        This portable fallback costs one call per file; adapters override it
+        with their recursive tree API so cost does not grow with repository size.
+        """
+        entries: dict[str, GitTreeEntry] = {}
+        for path in await self.list_files(repo, ref):
+            git_file = await self._get_file_cached(repo, path, ref)
+            if git_file is None:
+                raise GitProviderError(f"{self.name} could not read listed file {path!r} at {ref!r}.")
+            entries[path] = GitTreeEntry(path=path, sha=git_file.blob_sha or git_blob_id(git_file.content))
+        return GitTree(entries=entries)
+
+    async def _get_tree_cached(self, repo: GitRepository, ref: str) -> GitTree:
+        if not is_full_commit_sha(ref):
+            return await self.get_tree(repo, ref)
+        key = ("tree", repo.full_name, ref.lower())
+        cached = self._cache_get(key)
+        if isinstance(cached, GitTree):
+            return cached
+        tree = await self.get_tree(repo, ref)
+        self._cache_put(key, tree)
+        return tree
+
+    async def compare_trees(self, repo: GitRepository, base_revision: str, head_ref: str) -> GitTreeComparison:
+        """Return every path whose entry differs between ``base_revision`` and ``head_ref``.
+
+        ``base_revision`` must be an immutable full commit SHA. The result is a
+        direct (two-dot) tree comparison and is always complete: adapters whose
+        fast comparison API cannot prove completeness fall back to full trees.
+        """
+        base_revision = _validate_full_commit_sha(base_revision, provider=self.name, ref=base_revision)
+        base_tree = await self._get_tree_cached(repo, base_revision)
+        head_tree = await self._get_tree_cached(repo, head_ref)
+        return GitTreeComparison(
+            base_revision=base_revision,
+            head_ref=head_ref,
+            changes=diff_git_trees(base_tree, head_tree),
+            head_revision=head_ref if is_full_commit_sha(head_ref) else None,
+        )
+
+    async def get_blob_ids(self, repo: GitRepository, ref: str, paths: Sequence[str]) -> dict[str, Optional[str]]:
+        """Return the blob object ID of each path at ``ref`` (``None`` when absent).
+
+        Costs at most one call per requested path; results for immutable commit
+        SHAs are cached for the lifetime of the adapter.
+        """
+        blob_ids: dict[str, Optional[str]] = {}
+        for path in paths:
+            _validate_git_path(path)
+            git_file = await self._get_file_cached(repo, path, ref)
+            blob_ids[path] = None if git_file is None else git_file.blob_sha or git_blob_id(git_file.content)
+        return blob_ids
+
+    async def is_ancestor(self, repo: GitRepository, ancestor_sha: str, descendant_sha: str) -> Optional[bool]:
+        """Return whether ``descendant_sha`` contains ``ancestor_sha`` in its history.
+
+        ``True`` also covers identical commits. ``None`` means the provider
+        cannot tell (unknown commit, unsupported API); callers must not treat
+        it as a negative answer.
+        """
+        self._validate_ancestry_request(repo, ancestor_sha, descendant_sha)
+        raise GitProviderCapabilityError(
+            self.name,
+            GitProviderCapability.COMMIT_ANCESTRY,
+            reason="This adapter does not implement commit ancestry checks.",
+        )
+
+    def _validate_ancestry_request(
+        self,
+        repo: GitRepository,
+        ancestor_sha: str,
+        descendant_sha: str,
+    ) -> tuple[str, str]:
+        if not isinstance(repo, GitRepository) or repo.provider != self.name:
+            raise GitProviderError(f"Ancestry check must target a {self.name} repository.")
+        ancestor = _validate_full_commit_sha(ancestor_sha, provider=self.name, ref=ancestor_sha)
+        descendant = _validate_full_commit_sha(descendant_sha, provider=self.name, ref=descendant_sha)
+        return ancestor.lower(), descendant.lower()
+
     async def get_archive(self, repo: GitRepository, revision: str, *, max_bytes: int) -> bytes:
         """Return a bounded archive for one immutable full commit SHA."""
         self._validate_archive_request(repo, revision, max_bytes)
@@ -736,17 +1040,6 @@ class GitProvider(ABC):
 
     @abstractmethod
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None: ...
-
-    @abstractmethod
-    async def update_file(
-        self,
-        repo: GitRepository,
-        path: str,
-        content: str,
-        message: str,
-        branch: str,
-        sha: Optional[str] = None,
-    ) -> None: ...
 
     async def create_commit(self, request: GitCommitRequest) -> GitCommitResult:
         """Creates one native atomic commit, or fails when the provider cannot guarantee it."""
@@ -776,6 +1069,15 @@ class GitProvider(ABC):
             "find_pull_request",
             reason="This adapter does not implement provider-side pull-request lookup.",
         )
+
+    async def find_terminal_pull_request(
+        self, repo: GitRepository, head: str, base: str
+    ) -> Optional["PullRequestInfo"]:
+        """Finds the most recently updated merged or closed request for an exact branch pair (D10).
+
+        Adapters without the lookup return ``None``: the caller then behaves as before.
+        """
+        return None
 
     async def find_open_pull_request_for_branch(
         self,
@@ -809,6 +1111,247 @@ class GitProvider(ABC):
             raise GitProviderError(f"Plan branch operation targets provider '{repo.provider}', not '{self.name}'.")
         return validate_greenkube_plan_branch(branch)
 
+    # ------------------------------------------------------------------
+    # Pull-request experience (roadmap J2, J3, J5)
+    # ------------------------------------------------------------------
+
+    def _validate_pull_request_number(self, repo: GitRepository, number: object) -> int:
+        if not isinstance(repo, GitRepository) or repo.provider != self.name:
+            raise GitProviderError(f"Pull-request operation must target a {self.name} repository.")
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise GitProviderError("Pull-request number must be a positive integer.")
+        return number
+
+    async def add_pull_request_metadata(
+        self,
+        repo: GitRepository,
+        pull_request: "PullRequestInfo",
+        *,
+        labels: Sequence[str] = (),
+        reviewers: Sequence[str] = (),
+        team_reviewers: Sequence[str] = (),
+    ) -> None:
+        """Add labels and reviewers to an open request without removing existing ones.
+
+        Missing labels are created where the provider allows it (GitHub and
+        GitLab create them implicitly; Gitea through its label API).
+        """
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.PULL_REQUEST_METADATA)
+
+    async def set_commit_status(
+        self,
+        repo: GitRepository,
+        sha: str,
+        *,
+        state: CommitStatusState,
+        context: str,
+        description: str,
+        target_url: Optional[str] = None,
+    ) -> None:
+        """Publish a commit status (e.g. ``greenkube/validation``) on ``sha``."""
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.COMMIT_STATUS)
+
+    def _validate_commit_status(self, repo: GitRepository, sha: str, state: str, context: str) -> str:
+        if not isinstance(repo, GitRepository) or repo.provider != self.name:
+            raise GitProviderError(f"Commit status must target a {self.name} repository.")
+        if state not in ("pending", "success", "failure", "error"):
+            raise GitProviderError(f"Unsupported commit status state {state!r}.")
+        if not isinstance(context, str) or not context.strip() or len(context) > 255:
+            raise GitProviderError("Commit status context must be 1-255 characters.")
+        return _validate_full_commit_sha(sha, provider=self.name, ref=str(sha))
+
+    # -- plan trailer linkage (F4 patch mode) -------------------------------------------
+
+    def _open_pull_requests_query(self, repo: GitRepository, base: str, limit: int) -> tuple[str, dict[str, str]]:
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.FIND_PULL_REQUEST)
+
+    def _pull_request_commits_path(self, repo: GitRepository, number: int) -> str:
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.FIND_PULL_REQUEST)
+
+    async def list_open_pull_requests(
+        self, repo: GitRepository, base: str, *, limit: int = OPEN_PULL_REQUEST_SCAN_LIMIT
+    ) -> List[PullRequestInfo]:
+        """The most recent open pull requests targeting ``base`` (one page, at most ``limit``).
+
+        Used to link a ``patch``-mode pull request opened from any branch to its plan by
+        the ``GreenKube-Plan`` trailer. Items that do not validate are skipped.
+        """
+        base = validate_git_ref(base, field="base branch")
+        limit = max(1, min(int(limit), 100))
+        path, params = self._open_pull_requests_query(repo, base, limit)
+        response = await self._request("GET", path, params=params)
+        if response.status_code == 404:
+            raise GitProviderError(f"Could not list pull requests in {repo.full_name}: repository not found.")
+        result: List[PullRequestInfo] = []
+        for item in parse_pull_request_list(response, repo=repo)[:limit]:
+            base_data = item.get("base")
+            target = base_data.get("ref") if isinstance(base_data, dict) else item.get("target_branch")
+            if target != base:
+                continue
+            try:
+                result.append(normalize_pull_request(item, repo=repo))
+            except GitProviderError:
+                continue
+        return result
+
+    async def list_pull_request_commit_messages(
+        self, repo: GitRepository, number: int, *, limit: int = PULL_REQUEST_COMMIT_SCAN_LIMIT
+    ) -> List[str]:
+        """Commit messages of a pull request (first page, at most ``limit``)."""
+        number = self._validate_pull_request_number(repo, number)
+        limit = max(1, min(int(limit), 100))
+        response = await self._request(
+            "GET",
+            self._pull_request_commits_path(repo, number),
+            params={"per_page": str(limit), "limit": str(limit)},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"Could not list the commits of pull request {number} in {repo.full_name}.")
+        try:
+            data = response.json()
+        except ValueError:
+            raise GitProviderError(f"{self.name} returned an invalid pull-request commit list.") from None
+        if not isinstance(data, list):
+            raise GitProviderError(f"{self.name} returned an invalid pull-request commit list.")
+        messages: List[str] = []
+        for item in data[:limit]:
+            if not isinstance(item, dict):
+                continue
+            commit = item.get("commit")
+            message = commit.get("message") if isinstance(commit, dict) else item.get("message")
+            if isinstance(message, str):
+                messages.append(message)
+        return messages
+
+    async def upsert_pull_request_comment(
+        self,
+        repo: GitRepository,
+        number: int,
+        *,
+        marker: str,
+        body: str,
+    ) -> tuple[CommentUpsertResult, int]:
+        """Create or edit the one comment whose body starts with ``marker``; never post a duplicate.
+
+        An identical body is not written again. Returns the outcome and the comment ID.
+        """
+        if not self.supports(GitProviderCapability.PULL_REQUEST_COMMENTS):
+            raise GitProviderCapabilityError(self.name, GitProviderCapability.PULL_REQUEST_COMMENTS)
+        number = self._validate_pull_request_number(repo, number)
+        if not isinstance(marker, str) or not marker.strip() or not body.startswith(marker):
+            raise GitProviderError("A managed pull-request comment must start with its marker.")
+        if len(body) > MAX_COMMENT_CHARS or "\x00" in body:
+            raise GitProviderError("Pull-request comment is too long or contains a NUL character.")
+        author_id = await self._managed_comment_author_id(repo, number)
+        existing = await self._find_marked_comment(repo, number, marker, author_id=author_id)
+        if existing is None:
+            created = await self._create_pull_request_comment(repo, number, body)
+            return CommentUpsertResult.CREATED, created
+        if existing.body.strip() == body.strip():
+            return CommentUpsertResult.UNCHANGED, existing.id
+        await self._update_pull_request_comment(repo, number, existing.id, body)
+        return CommentUpsertResult.UPDATED, existing.id
+
+    async def _managed_comment_author_id(self, repo: GitRepository, number: int) -> int:
+        """Return the user ID whose marker comments GreenKube may adopt and edit.
+
+        A marker is plain text that anyone with comment access can post, and
+        GreenKube's token can edit other users' comments. Adopting a foreign
+        marker comment would publish GreenKube's status under (and editable by)
+        someone else, or overwrite a human's text. Only comments written by
+        GreenKube's own identity are adopted: the token's user (``GET /user``)
+        or, when the token cannot read its own profile, the author of the pull
+        request, which GreenKube opened.
+        """
+        user_id = await self._authenticated_user_id()
+        if user_id is None:
+            pull_request = await self.get_pull_request(repo, number)
+            user_id = pull_request_author_id(pull_request.raw)
+        if user_id is None:
+            raise GitProviderError(
+                f"{self.name} did not report GreenKube's identity; the lifecycle comment is not published."
+            )
+        return user_id
+
+    async def _authenticated_user_id(self) -> Optional[int]:
+        """The numeric ID of the token's user, or ``None`` when the token may not read it."""
+        response = await self._request("GET", "/user", ok_statuses=(200, 401, 403))
+        if response.status_code != 200:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        return _positive_user_id(data.get("id") if isinstance(data, dict) else None)
+
+    async def _find_marked_comment(
+        self, repo: GitRepository, number: int, marker: str, *, author_id: int
+    ) -> Optional[PullRequestComment]:
+        for page in range(1, MAX_COMMENT_PAGES + 1):
+            comments, has_next = await self._list_pull_request_comments(repo, number, page)
+            for comment in comments:
+                if comment.author_id == author_id and comment.body.lstrip().startswith(marker):
+                    return comment
+            if not has_next:
+                return None
+        raise GitProviderError("Pull-request comment pagination exceeded the safety limit.")
+
+    async def _list_pull_request_comments(
+        self, repo: GitRepository, number: int, page: int
+    ) -> tuple[list[PullRequestComment], bool]:
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.PULL_REQUEST_COMMENTS)
+
+    async def _create_pull_request_comment(self, repo: GitRepository, number: int, body: str) -> int:
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.PULL_REQUEST_COMMENTS)
+
+    async def _update_pull_request_comment(self, repo: GitRepository, number: int, comment_id: int, body: str) -> None:
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.PULL_REQUEST_COMMENTS)
+
+    async def read_codeowners(self, repo: GitRepository, revision: str):
+        """Parse the CODEOWNERS file at ``revision`` from the provider's documented locations.
+
+        Returns a :class:`~greenkube.automation.pr_content.codeowners.CodeOwners`
+        or ``None`` when the repository has none. Blob IDs come from the cached
+        tree where the adapter has one, so a missing file usually costs no call.
+        """
+        from greenkube.automation.pr_content.codeowners import CODEOWNERS_PATHS, Dialect, parse_codeowners
+
+        dialect: Dialect = "gitlab" if self.name == "gitlab" else "gitea" if self.name == "gitea" else "github"
+        paths = CODEOWNERS_PATHS[dialect]
+        blob_ids = await self.get_blob_ids(repo, revision, paths)
+        for path in paths:
+            if not blob_ids.get(path):
+                continue
+            git_file = await self._get_file_cached(repo, path, revision)
+            if git_file is not None:
+                return parse_codeowners(git_file.content, dialect)
+        return None
+
+    async def codeowner_reviewers(
+        self,
+        repo: GitRepository,
+        owners: Sequence[str],
+    ) -> tuple[list[str], list[str]]:
+        """Map CODEOWNERS owners to ``(reviewers, team_reviewers)`` this provider accepts.
+
+        ``@user`` becomes a user reviewer and ``@org/team`` a team of the
+        repository's organization; e-mail owners are skipped.
+        """
+        users: list[str] = []
+        teams: list[str] = []
+        for owner in owners:
+            if not owner.startswith("@"):
+                continue
+            name = owner[1:]
+            if "/" in name:
+                organization, _, team = name.partition("/")
+                if organization.casefold() == repo.owner.casefold() and team and "/" not in team:
+                    if team not in teams:
+                        teams.append(team)
+            elif name and name not in users:
+                users.append(name)
+        return users[:MAX_CODEOWNER_REVIEWERS], teams[:MAX_CODEOWNER_REVIEWERS]
+
     async def test_connection(self) -> bool:
         """Checks that the provider is reachable and the token is valid."""
         try:
@@ -816,6 +1359,30 @@ class GitProvider(ABC):
             return True
         except GitProviderError:
             return False
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedFile:
+    file: Optional[GitFile]
+
+
+def _inline_retry_wait(response: httpx.Response, attempt: int) -> float | None:
+    """Seconds to sleep before retrying ``response`` within the same request, or ``None``.
+
+    A provider-announced wait longer than :data:`MAX_INLINE_RATE_LIMIT_WAIT_SECONDS` is not
+    slept through: the caller gets a typed error and reschedules at the reset time.
+    """
+    backoff = 0.05 * (2**attempt)
+    announced = announced_wait_seconds(response.headers, now=datetime.now(timezone.utc))
+    if announced is None:
+        if response.status_code == 403:
+            # A rate-limited 403 without reset headers is a secondary limit: GitHub asks
+            # clients to wait at least a minute, and fast retries extend the penalty.
+            return None
+        return backoff
+    if announced > MAX_INLINE_RATE_LIMIT_WAIT_SECONDS:
+        return None
+    return max(announced, backoff)
 
 
 def _error_detail(response: httpx.Response) -> str:
@@ -877,9 +1444,22 @@ def _archive_redirect_target(
     return target_url, same_origin
 
 
+class MergeCommitSource(StrEnum):
+    """Which provider field identified the commit that landed on the base branch."""
+
+    MERGE_COMMIT = "merge_commit"
+    SQUASH_COMMIT = "squash_commit"
+    FAST_FORWARD_HEAD = "fast_forward_head"
+
+
 @dataclass
 class PullRequestInfo:
-    """Normalized pull-request information across providers."""
+    """Normalized pull-request information across providers.
+
+    ``merge_commit_sha`` is set only for merged requests and names the commit
+    that landed on the base branch; ``merge_commit_source`` records which
+    provider field it came from (:class:`MergeCommitSource`).
+    """
 
     number: int
     url: str
@@ -888,6 +1468,8 @@ class PullRequestInfo:
     raw: dict = field(default_factory=dict)
     head_branch: Optional[str] = None
     base_branch: Optional[str] = None
+    merge_commit_sha: Optional[str] = None
+    merge_commit_source: Optional[str] = None
 
     # Keep compatibility with the service's existing mapping-style access
     # while exposing a typed result to callers.
@@ -929,6 +1511,10 @@ def normalize_pull_request(data: dict, *, repo: GitRepository) -> PullRequestInf
     base = data.get("base")
     head_branch = head.get("ref") if isinstance(head, dict) else data.get("source_branch")
     base_branch = base.get("ref") if isinstance(base, dict) else data.get("target_branch")
+    # GitHub keeps a test-merge ``merge_commit_sha`` on requests closed without
+    # merging; only a merged request has a merge commit (BUG-45).
+    raw_merge_sha = data.get("merge_commit_sha")
+    merge_commit_sha = raw_merge_sha if merged and is_full_commit_sha(raw_merge_sha) else None
     return PullRequestInfo(
         number=number,
         url=url,
@@ -937,7 +1523,59 @@ def normalize_pull_request(data: dict, *, repo: GitRepository) -> PullRequestInf
         raw=data,
         head_branch=head_branch if isinstance(head_branch, str) else None,
         base_branch=base_branch if isinstance(base_branch, str) else None,
+        merge_commit_sha=merge_commit_sha,
+        merge_commit_source=MergeCommitSource.MERGE_COMMIT.value if merge_commit_sha is not None else None,
     )
+
+
+def parse_comment_list(response: httpx.Response, *, provider: str) -> list[PullRequestComment]:
+    """Validate a provider's comment (or note) list: objects with an integer ``id`` and a ``body``."""
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise GitProviderError(f"{provider} returned invalid JSON for a comment list.") from exc
+    if not isinstance(data, list):
+        raise GitProviderError(f"{provider} returned an invalid comment list.")
+    comments: list[PullRequestComment] = []
+    for item in data:
+        comment_id = item.get("id") if isinstance(item, dict) else None
+        body = item.get("body") if isinstance(item, dict) else None
+        if isinstance(comment_id, bool) or not isinstance(comment_id, int) or comment_id <= 0:
+            raise GitProviderError(f"{provider} returned a comment without a valid ID.")
+        author = item.get("user") or item.get("author")
+        comments.append(
+            PullRequestComment(
+                id=comment_id,
+                body=body if isinstance(body, str) else "",
+                author_id=_positive_user_id(author.get("id") if isinstance(author, dict) else None),
+            )
+        )
+    return comments
+
+
+def pull_request_author_id(raw: object) -> Optional[int]:
+    """The author's user ID from a raw PR payload (``user`` on GitHub/Gitea, ``author`` on GitLab)."""
+    if not isinstance(raw, dict):
+        return None
+    author = raw.get("user") or raw.get("author")
+    return _positive_user_id(author.get("id") if isinstance(author, dict) else None)
+
+
+def _positive_user_id(value: object) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def parse_comment_id(response: httpx.Response, *, provider: str) -> int:
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise GitProviderError(f"{provider} returned invalid JSON after creating a comment.") from exc
+    comment_id = data.get("id") if isinstance(data, dict) else None
+    if isinstance(comment_id, bool) or not isinstance(comment_id, int) or comment_id <= 0:
+        raise GitProviderError(f"{provider} returned an invalid comment after creating it.")
+    return comment_id
 
 
 def parse_pull_request_list(response: httpx.Response, *, repo: GitRepository) -> list[dict]:
@@ -990,6 +1628,33 @@ def normalize_open_pull_request_match(
         raise GitProviderError(f"{repo.provider} returned an invalid pull-request state.")
     pull_request = normalize_pull_request(data, repo=repo)
     if state not in open_states or provider_head != head or provider_base != base or pull_request.merged:
+        return None
+    return pull_request
+
+
+def normalize_terminal_pull_request_match(
+    data: dict,
+    *,
+    repo: GitRepository,
+    head: str,
+    base: str,
+    provider_head: object,
+    provider_base: object,
+    open_states: tuple[str, ...],
+) -> Optional[PullRequestInfo]:
+    """Normalizes a merged or closed request whose branch pair matches exactly (D10).
+
+    Open requests are left to :func:`normalize_open_pull_request_match`.
+    """
+    if not isinstance(provider_head, str) or not provider_head:
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request head branch.")
+    if not isinstance(provider_base, str) or not provider_base:
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request base branch.")
+    state = data.get("state")
+    if not isinstance(state, str) or not state:
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request state.")
+    pull_request = normalize_pull_request(data, repo=repo)
+    if provider_head != head or provider_base != base or (state in open_states and not pull_request.merged):
         return None
     return pull_request
 

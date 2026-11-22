@@ -66,4 +66,303 @@ spec:
           annotations:
             summary: GreenKube automation worker heartbeat is stale
             description: At least one persisted automation worker heartbeat is older than the stale threshold.
+    {{- if and .Values.monitoring.prometheusRule.controllerAlerts .Values.monitoring.serviceMonitor.enabled (gt (int (include "greenkube.controllerMetricsPort" .)) 0) }}
+    # Controller loops (M8). Rendered only with the controller ServiceMonitor
+    # (same condition), otherwise GreenKubeNoActiveController would always fire.
+    - name: greenkube.controller
+      rules:
+        - alert: GreenKubeControllerLoopFailing
+          expr: max by (loop) (greenkube_loop_consecutive_failures) >= 3
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A GreenKube controller loop keeps failing
+            description: {{ `Controller loop {{ $labels.loop }} failed {{ $value }} times in a row; see GET /api/v1/automation/status (controller.instances[].loops) and the controller logs.` | quote }}
+        - alert: GreenKubeAutomationLoopStale
+          expr: time() - max(greenkube_loop_last_success_timestamp_seconds{loop="automation-controller"}) > 600
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: The GreenKube automation controller loop has not succeeded for 10 minutes
+            description: Webhook outbox, PR polling, plan expiry and retention are not advancing on the leader controller.
+        - alert: GreenKubeNoActiveController
+          expr: (max(greenkube_controller_leader) or vector(0)) < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: No GreenKube controller holds the leader Lease
+            description: Collection, scans, apply detection, measurement and automation run only on the leader controller; none is running or scraped.
+    {{- $thresholds := .Values.monitoring.prometheusRule.thresholds | default dict }}
+    {{- $collectionLag := int ($thresholds.collectionLagSeconds | default 1800) }}
+    {{- $scanStale := int ($thresholds.recommendationScanStaleSeconds | default 10800) }}
+    {{- $measurementStale := int ($thresholds.measurementStaleSeconds | default 1800) }}
+    # Loop health (N7): collection watermark, recommendation scans and
+    # measurement. Every series comes from the controller metrics endpoint,
+    # hence the same rendering condition as greenkube.controller.
+    - name: greenkube.loop
+      rules:
+        - alert: GreenKubeCollectionLagging
+          # Only the leader collects: a standby keeps the last value it set.
+          expr: |
+            max by (source) (
+              greenkube_collection_watermark_lag_seconds
+              * on (job, instance) group_left ()
+              greenkube_controller_leader
+            ) > {{ $collectionLag }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube metric collection is falling behind
+            description: {{ printf "The %s collection watermark is {{ $value | humanizeDuration }} behind (threshold %ds): recommendations and measurements read stale data. See the collection loop in GET /api/v1/automation/status and the controller logs." "{{ $labels.source }}" $collectionLag | quote }}
+        - alert: GreenKubeRecommendationScanFailing
+          expr: |
+            sum(increase(greenkube_optimization_runs_total{status="failed"}[1h])) > 0
+            unless
+            sum(increase(greenkube_optimization_runs_total{status="succeeded"}[1h])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube recommendation scans are failing
+            description: Every recommendation scan of the last hour failed and none succeeded; the inbox is not refreshed. See GET /api/v1/optimization/runs and the controller logs.
+        - alert: GreenKubeRecommendationSourceFailing
+          expr: sum by (source) (increase(greenkube_optimization_analyzer_failures_total[2h])) > 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: A GreenKube recommendation source keeps failing
+            description: {{ `Recommendation source {{ $labels.source }} failed during scans for more than an hour; its signals are missing from consensus. See the Sources page (/sources).` | quote }}
+        - alert: GreenKubeRecommendationScanStale
+          expr: |
+            (time() - max(greenkube_last_successful_optimization_run_timestamp_seconds) > {{ $scanStale }})
+            and
+            max(greenkube_last_successful_optimization_run_timestamp_seconds) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: No GreenKube recommendation scan has succeeded recently
+            description: {{ printf "The last successful recommendation scan is older than %ds." $scanStale | quote }}
+        - alert: GreenKubeMeasurementStalled
+          expr: time() - max(greenkube_loop_last_success_timestamp_seconds{loop="recommendation-lifecycle"}) > {{ $measurementStale }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube measurements are not advancing
+            description: {{ printf "The recommendation-lifecycle loop (apply detection, verification, change measurement) has not succeeded for more than %ds: applied changes wait unmeasured and the measurement backlog grows." $measurementStale | quote }}
+        - alert: GreenKubeGitProviderRateLimited
+          # Plan operations are rescheduled at the provider's reset time, so a short burst is
+          # harmless; a limit that persists delays every pull request of that provider.
+          expr: sum by (provider) (increase(greenkube_git_provider_rate_limited_total[30m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: A Git provider keeps rate-limiting GreenKube
+            description: {{ `Git provider {{ $labels.provider }} answered {{ $value | humanize }} rate-limited request(s) in the last 30 minutes, for more than 30 minutes: pull requests are delayed until its quota resets. Lower the request volume (fewer polling replicas, a GitHub App instead of a personal token) or raise the provider quota; see docs/automation.md (rate limits).` | quote }}
+        - alert: GreenKubeCollectionDegraded
+          # A window is stored degraded only after COLLECTION_K8S_LIST_MAX_FAILURES failed
+          # Kubernetes lists in a row: any new one means the controller cannot list pods or nodes.
+          # The second clause catches a series that first appears already above zero
+          # (a controller older than the label pre-initialisation), which increase() cannot see.
+          expr: |
+            sum by (list) (increase(greenkube_collection_degraded_windows_total[1h])) > 0
+            or
+            (
+              sum by (list) (greenkube_collection_degraded_windows_total) > 0
+              unless
+              sum by (list) (greenkube_collection_degraded_windows_total offset 1h)
+            )
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube stores collection windows without a working Kubernetes list
+            description: {{ `The Kubernetes {{ $labels.list }} list failed COLLECTION_K8S_LIST_MAX_FAILURES times in a row for collection windows stored in the last hour: their rows carry the reason k8s_list_failed (missing owner and requests, or default node attributes). Check the controller RBAC (list pods and nodes) and the API server latency.` | quote }}
+        - alert: GreenKubeClusterIdentityMismatch
+          # The database belongs to another cluster (kube-system UID): collection stops (fail closed).
+          expr: max(greenkube_collection_identity_mismatch) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: GreenKube refuses to collect into a database of another cluster
+            description: The database installation row holds another cluster's kube-system UID (cluster rebuilt, or a backup restored into a new cluster), so no metric is collected and every figure is stale. If this database is meant for this cluster, set config.collection.allowClusterUidChange=true for one controller start, then back to false; otherwise give this install its own database schema. See docs/operations/backup-restore.md.
+    {{- end }}
+    {{- if .Values.monitoring.serviceMonitor.enabled }}
+    # Ledger integrity (N7). Rendered whenever a GreenKube process is scraped,
+    # independently of the controller alerts: the verification may run in the
+    # API as well as in the controller. The second clause catches a counter
+    # series that first appears already above zero (created on its first
+    # failure, or right after a restart), which increase() cannot see.
+    - name: greenkube.ledger
+      rules:
+        - alert: GreenKubeLedgerChainVerificationFailed
+          expr: min by (cluster_uid) (greenkube_ledger_chain_ok) == 0
+          labels:
+            severity: critical
+          annotations:
+            summary: The GreenKube savings ledger hash chain failed verification
+            description: {{ `An entry of the append-only savings ledger of cluster {{ $labels.cluster_uid }} was modified, removed or reordered; greenkube_ledger_chain_verification_failures_total gives the reason, GET /api/v2/ledger/summary (chain) and the controller logs the position.` | quote }}
+        - alert: GreenKubeLedgerProjectionBacklog
+          expr: max by (source_table) (greenkube_ledger_unprojected_rows) > 0
+          for: 3h
+          labels:
+            severity: warning
+          annotations:
+            summary: Savings accruals are missing from the GreenKube savings ledger v2
+            description: {{ `{{ $value }} row(s) of {{ $labels.source_table }} have no savings ledger v2 entry after full sweeps for 3 hours; the v2 totals do not reconcile with GET /api/v1/recommendations/savings. See greenkube_ledger_write_errors_total and the controller logs.` | quote }}
+        - alert: GreenKubeLedgerReconciliationFailed
+          expr: min by (cluster_uid) (greenkube_ledger_reconciliation_ok) == 0
+          for: 3h
+          labels:
+            severity: warning
+          annotations:
+            summary: The GreenKube savings ledger v2 does not reconcile with the v1 staging ledger
+            description: {{ `The accrued book of the savings ledger v2 of cluster {{ $labels.cluster_uid }} differs from the non-superseded v1 accrual rows for 3 hours (an unprojected row or an unreversed supersession); the controller logs name the method and quantity.` | quote }}
+        - alert: GreenKubeAttributionClockSkew
+          expr: sum(increase(greenkube_attribution_errors_total{reason="clock_skew"}[1h])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube refused to accrue savings because of a clock skew
+            description: {{ `The controller's clock is more than 5 minutes away from the PostgreSQL clock, so savings attribution writes nothing (LED-06). Fix the node's time synchronisation; accrual catches up afterwards.` | quote }}
+        - alert: GreenKubeAccrualWatermarkAhead
+          expr: max by (cluster_name) (greenkube_accrual_watermark_ahead_seconds) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: The GreenKube savings accrual watermark is in the future
+            description: {{ `The accrual watermark of cluster {{ $labels.cluster_name }} is {{ $value }} s ahead of the current hour: an earlier run used a wrong clock and may have booked future hours. Recommendations keep accruing from their own cursors.` | quote }}
+        - alert: GreenKubeLedgerChainKeyDropped
+          expr: max_over_time(greenkube_ledger_chain_head_keyed[30d]) == 1 and greenkube_ledger_chain_head_keyed == 0
+          labels:
+            severity: critical
+          annotations:
+            summary: The GreenKube savings ledger head is no longer chained with the key
+            description: {{ `The verified head of the savings ledger of cluster {{ $labels.cluster_uid }} was keyed (HMAC) during the last 30 days and is not any more: the chain may have been rewritten without LEDGER_CHAIN_KEY (LED-05). Compare with the published head history and investigate before accepting a head.` | quote }}
+    {{- end }}
+    {{- $ops := .Values.monitoring.prometheusRule.operations | default dict }}
+    {{- if ne (toString $ops.enabled) "false" }}
+    {{- $ns := .Release.Namespace }}
+    {{- $fullname := include "greenkube.fullname" . }}
+    {{- $ksm := ne (toString $ops.kubeStateMetrics) "false" }}
+    {{- $freeRatio := $ops.volumeFreeRatio | default 0.15 | float64 }}
+    {{- $fullWithin := int ($ops.volumeFullWithinHours | default 96) }}
+    {{- $backupMaxAge := int ($ops.backupMaxAgeHours | default 36) }}
+    {{- $backup := (.Values.postgres | default dict).backup | default dict }}
+    {{- $claims := list }}
+    {{- if and (include "greenkube.bundledPostgres" .) .Values.postgres.persistence.enabled }}
+    {{- $claims = append $claims (printf "data-%s-postgres-[0-9]+" $fullname) }}
+    {{- end }}
+    {{- if and $backup.enabled (not ($backup.persistence | default dict).existingClaim) }}
+    {{- $claims = append $claims (printf "%s-postgres-backup" $fullname) }}
+    {{- end }}
+    {{- $volumeSelector := printf "namespace=%q,persistentvolumeclaim=~%q" $ns (join "|" $claims) }}
+    {{- if or .Values.monitoring.serviceMonitor.enabled $ksm $claims }}
+    # Operations (production readiness): API and database availability, the
+    # data volumes and the scheduled backup. Series from the GreenKube scrapes,
+    # kube-state-metrics and the kubelet (kube-prometheus-stack ships both).
+    - name: greenkube.operations
+      rules:
+        {{- if .Values.monitoring.serviceMonitor.enabled }}
+        - alert: GreenKubeAPIDown
+          # No scraped API target is up, including when every API pod is gone.
+          expr: (sum(up{namespace="{{ $ns }}",job="{{ $fullname }}-api"}) or vector(0)) < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: The GreenKube API is down
+            description: {{ printf "No %s-api pod in namespace %s answers its metrics scrape: the UI, the API and Git provider webhooks are unavailable. Check kubectl -n %s get pods -l app.kubernetes.io/component=api and the API logs." $fullname $ns $ns | quote }}
+        {{- end }}
+        {{- if and .Values.monitoring.serviceMonitor.enabled (gt (int (include "greenkube.controllerMetricsPort" .)) 0) }}
+        - alert: GreenKubeDatabaseUnavailable
+          # Every controller replica writes a heartbeat row every 30 s, leader or
+          # standby: repeated failures mean the database refuses writes.
+          expr: max(greenkube_loop_consecutive_failures{namespace="{{ $ns }}",loop="controller-heartbeat"}) >= 3
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: GreenKube cannot write to its database
+            description: {{ `The controller heartbeat has failed {{ $value }} times in a row; collection, scans, measurement and the ledger are stopped. Check the PostgreSQL pod or the external database, its disk and the controller logs (docs/operations/backup-restore.md).` | quote }}
+        {{- end }}
+        {{- if $ksm }}
+        - alert: GreenKubeAPIUnavailable
+          # Pods exist but none is ready: migrations pending or a wedged loop.
+          expr: kube_deployment_status_replicas_available{namespace="{{ $ns }}",deployment="{{ $fullname }}-api"} < 1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: No GreenKube API replica is ready
+            description: {{ printf "Deployment %s-api has no available replica: readiness reports migrating (the controller has not finished the schema migrations), database_unavailable or degraded. See GET /api/v1/health and the controller logs." $fullname | quote }}
+        {{- if include "greenkube.bundledPostgres" . }}
+        - alert: GreenKubePostgresDown
+          expr: kube_statefulset_status_replicas_ready{namespace="{{ $ns }}",statefulset="{{ $fullname }}-postgres"} < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: The bundled GreenKube PostgreSQL is not ready
+            description: {{ printf "StatefulSet %s-postgres has no ready replica. Check its events, its volume (GreenKubeDataVolumeLow) and kubectl -n %s logs %s-postgres-0." $fullname $ns $fullname | quote }}
+        {{- end }}
+        {{- if $backup.enabled }}
+        - alert: GreenKubeBackupMissing
+          # Last success too old, or never succeeded since the CronJob was created.
+          expr: |
+            (time() - max(kube_cronjob_status_last_successful_time{namespace="{{ $ns }}",cronjob="{{ $fullname }}-postgres-backup"}) > {{ mul $backupMaxAge 3600 }})
+            or
+            (
+              time() - max(kube_cronjob_created{namespace="{{ $ns }}",cronjob="{{ $fullname }}-postgres-backup"}) > {{ mul $backupMaxAge 3600 }}
+              unless on ()
+              max(kube_cronjob_status_last_successful_time{namespace="{{ $ns }}",cronjob="{{ $fullname }}-postgres-backup"})
+            )
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: The GreenKube database backup has not succeeded recently
+            description: {{ printf "No successful %s-postgres-backup run for more than %d hours. Check kubectl -n %s get jobs and the logs of the last job (docs/operations/backup-restore.md)." $fullname $backupMaxAge $ns | quote }}
+        {{- end }}
+        {{- end }}
+        {{- if $claims }}
+        - alert: GreenKubeDataVolumeLow
+          expr: |
+            kubelet_volume_stats_available_bytes{ {{- $volumeSelector -}} }
+            /
+            kubelet_volume_stats_capacity_bytes{ {{- $volumeSelector -}} }
+            < {{ $freeRatio }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A GreenKube data volume is almost full
+            description: {{ printf "Volume {{ $labels.persistentvolumeclaim }} has {{ $value | humanizePercentage }} free (threshold %v). Expand the claim or shorten retention (docs/installation.md#sizing)." $freeRatio | quote }}
+        - alert: GreenKubeDataVolumeFillingUp
+          expr: |
+            (
+              kubelet_volume_stats_available_bytes{ {{- $volumeSelector -}} }
+              /
+              kubelet_volume_stats_capacity_bytes{ {{- $volumeSelector -}} }
+            ) < 0.4
+            and
+            predict_linear(kubelet_volume_stats_available_bytes{ {{- $volumeSelector -}} }[6h], {{ mul $fullWithin 3600 }}) < 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: A GreenKube data volume will fill up
+            description: {{ printf "At the growth rate of the last 6 hours, volume {{ $labels.persistentvolumeclaim }} is full within %d hours. Expand the claim or shorten retention (docs/installation.md#sizing)." $fullWithin | quote }}
+        {{- end }}
+    {{- end }}
+    {{- end }}
 {{- end }}

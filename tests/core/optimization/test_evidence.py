@@ -143,3 +143,89 @@ class TestBuildPatch:
     def test_no_patch_without_container_identity(self):
         rec = _cpu_rec().model_copy(update={"container_name": None})
         assert build_patch(rec) is None
+
+
+class TestReliabilitySignalsInEvidence:
+    """OOM kills and CPU throttling of the scan's usage summary reach the evidence block."""
+
+    def _context_with_summary(self, **signals):
+        from greenkube.models.workload_usage import UsageSnapshot, WorkloadUsageSummary
+
+        context = _context(_series())
+        summary = WorkloadUsageSummary(
+            namespace="prod", target_kind="Deployment", target_name="api", container_name="api", **signals
+        )
+        snapshot = UsageSnapshot(source="rollup")
+        snapshot.summaries.setdefault(summary.target, {})[summary.container_name] = summary
+        context.usage = snapshot
+        return context
+
+    def test_fills_oom_events_and_throttling_from_the_usage_summary(self):
+        context = self._context_with_summary(oom_kill_count=3, throttling_ratio=0.42)
+        evidence = build_evidence(_cpu_rec(), context)
+        assert evidence is not None
+        assert evidence.oom_events == 3
+        assert evidence.cpu_throttling_ratio == 0.42
+
+    def test_unknown_signals_stay_unknown(self):
+        evidence = build_evidence(_cpu_rec(), self._context_with_summary())
+        assert evidence is not None
+        assert evidence.oom_events is None and evidence.cpu_throttling_ratio is None
+        bare = build_evidence(_cpu_rec(), _context(_series()))
+        assert bare is not None and bare.oom_events is None
+
+
+class TestFirstObservedInEvidence:
+    """The evidence records when the workload was first observed in its window (H1 baseline exposure)."""
+
+    END = datetime(2026, 11, 10, 18, 50, tzinfo=timezone.utc)
+
+    def _context(self, *, first_hour, step_count):
+        from greenkube.models.workload_usage import UsageSnapshot, WorkloadUsageSummary
+
+        context = _context(_series())
+        context.window_start = self.END - timedelta(hours=8.4)
+        context.window_end = self.END
+        summary = WorkloadUsageSummary(
+            namespace="prod",
+            target_kind="Deployment",
+            target_name="api",
+            container_name="api",
+            first_hour=first_hour,
+            last_hour=first_hour,
+            step_count=step_count,
+            oom_kill_count=23,
+        )
+        snapshot = UsageSnapshot(source="rollup")
+        snapshot.summaries.setdefault(summary.target, {})[summary.container_name] = summary
+        context.usage = snapshot
+        return context
+
+    def test_a_young_workload_is_first_observed_at_its_first_sample(self):
+        """Eight 5-minute steps in the current hour: first sample 40 minutes before the scan."""
+        context = self._context(first_hour=datetime(2026, 11, 10, 18, tzinfo=timezone.utc), step_count=8)
+        evidence = build_evidence(_cpu_rec(), context)
+        assert evidence is not None
+        assert evidence.first_observed_at == self.END - timedelta(minutes=40)
+
+    def test_the_first_sample_stays_in_the_first_observed_hour_and_the_window(self):
+        """Steps never move the first observation out of its hour (gaps, or compressed rows that
+        overcount), and the first observation never precedes the evidence window."""
+        first_hour = datetime(2026, 11, 10, 15, tzinfo=timezone.utc)
+        few = build_evidence(_cpu_rec(), self._context(first_hour=first_hour, step_count=2))
+        many = build_evidence(_cpu_rec(), self._context(first_hour=first_hour, step_count=10_000))
+        old = build_evidence(_cpu_rec(), self._context(first_hour=self.END - timedelta(days=3), step_count=10_000))
+        assert few is not None and few.first_observed_at == first_hour + timedelta(hours=1)
+        assert many is not None and many.first_observed_at == first_hour
+        assert old is not None and old.first_observed_at == self.END - timedelta(hours=8.4)
+
+    def test_raw_series_give_their_first_sample(self):
+        evidence = build_evidence(_cpu_rec(), _context(_series()[3:]))
+        assert evidence is not None
+        assert evidence.first_observed_at == NOW + timedelta(hours=3)
+
+    def test_older_evidence_without_the_field_still_loads(self):
+        from greenkube.models.evidence import RecommendationEvidence
+
+        legacy = RecommendationEvidence.model_validate({"observation_window_seconds": 3600.0})
+        assert legacy.first_observed_at is None

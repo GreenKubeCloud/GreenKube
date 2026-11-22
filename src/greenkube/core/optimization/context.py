@@ -5,9 +5,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Set, Tuple
 
 from greenkube.models.metrics import CombinedMetric
+from greenkube.models.workload_usage import POD_LEVEL, TargetKey, UsageSnapshot, WorkloadUsageSummary
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -20,6 +21,13 @@ class OptimizationContext:
     The context is built once per scan by
     :class:`~greenkube.core.optimization.context_builder.ContextBuilder` and
     shared by every recommendation source.
+
+    Analyzers read :meth:`usage_snapshot`: one usage summary per target
+    container, computed in SQL from the ``workload_usage_hourly`` rollup
+    (roadmap E3). ``metrics`` and ``container_metrics`` then hold baseline
+    rows aggregated from the same rollup, which the Impact Model and the
+    evidence builder consume. A context built from in-memory metric rows (CLI
+    ``--live``, tests) derives the same snapshot from its rows.
     """
 
     config: "Config"
@@ -33,12 +41,28 @@ class OptimizationContext:
     hpa_targets: Optional[Set[Tuple[str, str, str]]] = None
     persistent_volumes: Optional[List] = None
     load_balancers: Optional[List] = None
+    usage: Optional[UsageSnapshot] = None
+    #: Rightsizing decreases withheld by this scan because the restart/OOM history
+    #: could not be read (REC-04), as ``(namespace, target_kind, target_name,
+    #: container, resource)``; filled by the analyzers, read by the engine.
+    withheld_decreases: Set[Tuple[str, str, str, str, str]] = field(default_factory=set)
+    #: Targets confirmed gone from the cluster (REC-05): their records are retired (``target_gone``).
+    gone_targets: Set[Tuple[str, str, str]] = field(default_factory=set)
+    #: Targets not running (scaled to zero, or liveness unknown): nothing is emitted, records are kept.
+    not_running_targets: Set[Tuple[str, str, str]] = field(default_factory=set)
+    #: Targets of static (mirror) pods left out of every analyzer (F-04): their manifests live on the node.
+    static_pod_targets: Set[Tuple[str, str, str]] = field(default_factory=set)
+    #: Static pods behind ``static_pod_targets`` (reported as a source-run diagnostic).
+    static_pod_count: int = 0
     _target_series_cache: Optional[Dict[Tuple[str, str, str], List[CombinedMetric]]] = field(
         default=None, init=False, repr=False, compare=False
     )
 
     def target_series(self) -> Dict[Tuple[str, str, str], List[CombinedMetric]]:
-        """Returns metrics grouped by stable workload owner, computed once."""
+        """Returns metrics grouped by stable workload owner, computed once.
+
+        Container rows replace the pod rows of the pods they belong to.
+        """
         if self._target_series_cache is None:
             from greenkube.core.optimization.targeting import group_by_recommendation_target
 
@@ -49,3 +73,64 @@ class OptimizationContext:
             target_metrics.extend(self.container_metrics)
             self._target_series_cache = group_by_recommendation_target(target_metrics)
         return self._target_series_cache
+
+    def container_rows(self, target: TargetKey, container: Optional[str]) -> List[CombinedMetric]:
+        """Rows that price a request change of one container (``None`` = pod-level aggregate)."""
+        series = self.target_series().get(target, [])
+        if container is None:
+            pod_rows = [metric for metric in series if not metric.container_name]
+            return pod_rows or series
+        return [metric for metric in series if metric.container_name == container]
+
+    # ------------------------------------------------------------------ #
+    # Usage summaries (roadmap E3)                                        #
+    # ------------------------------------------------------------------ #
+
+    def usage_snapshot(self) -> UsageSnapshot:
+        """Usage summaries per target container, computed once from the rows when not preloaded."""
+        if self.usage is None:
+            from greenkube.core.workload_usage import summarize_rows
+            from greenkube.utils.time import parse_query_step_seconds
+
+            step = parse_query_step_seconds(getattr(self.config, "PROMETHEUS_QUERY_RANGE_STEP", "5m") or "5m")
+            pod_rows = [metric for metric in self.metrics if not metric.container_name]
+            container_rows = [metric for metric in self.metrics if metric.container_name]
+            container_rows.extend(self.container_metrics)
+            warmup = int(getattr(self.config, "RIGHTSIZING_WARMUP_MINUTES", 0) or 0) * 60
+            self.usage = summarize_rows(pod_rows, container_rows, step_seconds=step, warmup_seconds=warmup)
+        self._exclude_static_pods(self.usage)
+        return self.usage
+
+    def _exclude_static_pods(self, snapshot: UsageSnapshot) -> None:
+        """Leaves static (mirror) pods out of the snapshot and records them (F-04, idempotent)."""
+        from greenkube.core.optimization.liveness import exclude_static_pods
+
+        excluded = exclude_static_pods(snapshot)
+        if excluded.targets:
+            self.static_pod_targets |= excluded.targets
+            self.static_pod_count += excluded.pod_count
+
+    def workload_summaries(self) -> Iterator[Tuple[TargetKey, WorkloadUsageSummary]]:
+        """Pod-level usage summary of every target."""
+        for target, containers in self.usage_snapshot().summaries.items():
+            summary = containers.get(POD_LEVEL)
+            if summary is not None:
+                yield target, summary
+
+    def container_summaries(self, target: TargetKey) -> List[Tuple[Optional[str], WorkloadUsageSummary]]:
+        """Usage summaries of a target's containers, or its pod-level summary when it has none.
+
+        Mirrors :func:`~greenkube.core.optimization.targeting.split_series_by_container`:
+        once container identities exist, the pod-level aggregate is never mixed in.
+        """
+        containers = self.usage_snapshot().summaries.get(target, {})
+        named = [(name, summary) for name, summary in sorted(containers.items()) if name != POD_LEVEL]
+        if named:
+            return [(name, summary) for name, summary in named]
+        summary = containers.get(POD_LEVEL)
+        return [(None, summary)] if summary is not None else []
+
+    def iter_container_summaries(self) -> Iterator[Tuple[TargetKey, Optional[str], WorkloadUsageSummary]]:
+        for target in self.usage_snapshot().summaries:
+            for container, summary in self.container_summaries(target):
+                yield target, container, summary

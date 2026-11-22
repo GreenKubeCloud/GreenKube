@@ -3,8 +3,9 @@
  *
  * Verifies default values and write behaviour for all stores.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { get } from 'svelte/store';
+import { createMemoryStorage, installBlockedStorage, installStorage } from '../helpers/storage.js';
 import {
 	selectedNamespace,
 	selectedTimeRange,
@@ -12,7 +13,7 @@ import {
 	sidebarCollapsed,
 	servicesHealth,
 	healthPopupDismissed
-} from '$lib/stores.js';
+} from '#lib/stores.js';
 
 
 describe('selectedNamespace', () => {
@@ -99,5 +100,43 @@ describe('healthPopupDismissed', () => {
 		healthPopupDismissed.set(true);
 		expect(get(healthPopupDismissed)).toBe(true);
 		healthPopupDismissed.set(false);
+	});
+});
+
+
+describe('healthPopupDismissed session persistence (K9)', () => {
+	let restore = [];
+
+	afterEach(() => {
+		restore.reverse().forEach((undo) => undo());
+		restore = [];
+		vi.resetModules();
+	});
+
+	it('remembers the dismissal across reloads of the same tab', async () => {
+		const storage = createMemoryStorage();
+		restore.push(installStorage('sessionStorage', storage));
+		vi.resetModules();
+		const first = await import('#lib/stores.js');
+
+		first.healthPopupDismissed.set(true);
+		expect(storage.getItem(first.HEALTH_POPUP_DISMISSED_KEY)).toBe('true');
+
+		vi.resetModules();
+		const reloaded = await import('#lib/stores.js');
+		expect(get(reloaded.healthPopupDismissed)).toBe(true);
+
+		reloaded.healthPopupDismissed.update(() => false);
+		expect(storage.getItem(reloaded.HEALTH_POPUP_DISMISSED_KEY)).toBeNull();
+	});
+
+	it('falls back to memory when sessionStorage is unavailable', async () => {
+		restore.push(installBlockedStorage('sessionStorage'));
+		vi.resetModules();
+		const stores = await import('#lib/stores.js');
+
+		expect(get(stores.healthPopupDismissed)).toBe(false);
+		expect(() => stores.healthPopupDismissed.set(true)).not.toThrow();
+		expect(get(stores.healthPopupDismissed)).toBe(true);
 	});
 });

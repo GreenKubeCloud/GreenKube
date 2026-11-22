@@ -46,7 +46,7 @@ def _source(
     source_id: str | None = None,
     status: BindingStatus = BindingStatus.RESOLVED,
     reason: str | None = None,
-    observed_at: datetime = _NOW,
+    observed_at: datetime | None = None,
     controller_generation: int = 7,
 ) -> WorkloadSource:
     return WorkloadSource(
@@ -71,7 +71,7 @@ def _source(
         confidence=0.95,
         status=status,
         evidence={"credential": _SECRET, "resource": {"kind": "Deployment", "name": workload_name}},
-        observed_at=observed_at,
+        observed_at=observed_at or _NOW,
         reason=reason,
     )
 
@@ -654,7 +654,7 @@ def test_binding_redacts_unrecognized_reason_values(gitops_client):
 
 @pytest.mark.parametrize(
     "reason",
-    ("invalid-helm-values-mapping", "helm-values-mapping-source-index-required"),
+    ("invalid-helm-values-mapping", "helm-values-mapping-source-index-required", "destination_remote"),
 )
 def test_binding_preserves_supported_helm_mapping_reasons(gitops_client, reason):
     client, repository, _ = gitops_client
@@ -736,3 +736,16 @@ def test_openapi_is_stable_and_exposes_manual_resolution_routes(gitops_client):
     assert "200" in status_responses
     assert "default" in status_responses
     assert "200" in first["paths"]["/api/v1/gitops/coverage"]["get"]["responses"]
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``_NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "_NOW", datetime.now(timezone.utc))
+
+
+def test_cross_repository_git_chart_reason_is_exposed():
+    """F-11: the blocked reason of an upstream Git chart is readable, not redacted."""
+    from greenkube.api.routers.gitops import _public_reason
+
+    assert _public_reason("cross-repository-git-chart") == "cross-repository-git-chart"

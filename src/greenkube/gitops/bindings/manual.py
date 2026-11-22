@@ -16,6 +16,7 @@ from greenkube.gitops.contracts import (
     binding_candidate_generation_token,
 )
 from greenkube.storage.base_gitops_repository import WorkloadBinding, WorkloadBindingEvent
+from greenkube.utils.time import ensure_utc
 
 
 class ManualResolutionError(ValueError):
@@ -63,14 +64,14 @@ def prepare_manual_binding_resolution(
     candidate = next((item for item in binding.candidates if item.id == candidate_id), None)
     if candidate is None or candidate.controller_kind is ControllerKind.MANUAL_RESOLUTION:
         raise ManualResolutionCandidateError("candidate is not part of the current binding")
-    observed_at = _as_utc(now or datetime.now(timezone.utc))
+    observed_at = ensure_utc(now or datetime.now(timezone.utc))
     if candidate.status not in {BindingStatus.RESOLVED, BindingStatus.AMBIGUOUS}:
         raise ManualResolutionCandidateError("candidate is not a current, selectable source")
     if candidate.provider_id == "unresolved" or candidate.repo_url == "unresolved":
         raise ManualResolutionCandidateError("candidate source is unresolved")
-    if candidate.expires_at is not None and _as_utc(candidate.expires_at) <= observed_at:
+    if candidate.expires_at is not None and ensure_utc(candidate.expires_at) <= observed_at:
         raise ManualResolutionCandidateError("candidate has expired")
-    if observed_at - _as_utc(candidate.observed_at) >= ttl:
+    if observed_at - ensure_utc(candidate.observed_at) >= ttl:
         raise ManualResolutionCandidateError("candidate is no longer current")
 
     current_generation = binding_candidate_generation_token(candidate)
@@ -79,7 +80,7 @@ def prepare_manual_binding_resolution(
 
     expires_at = observed_at + ttl
     if candidate.expires_at is not None:
-        expires_at = min(expires_at, _as_utc(candidate.expires_at))
+        expires_at = min(expires_at, ensure_utc(candidate.expires_at))
     manual = _manual_source(
         candidate,
         generation_token=current_generation,
@@ -149,7 +150,7 @@ def manual_resolution_event(
         source_generation=generation_token if isinstance(generation_token, str) else None,
         expires_at=source.expires_at,
         details=details,
-        created_at=_as_utc(now or datetime.now(timezone.utc)),
+        created_at=ensure_utc(now or datetime.now(timezone.utc)),
     )
 
 
@@ -236,7 +237,3 @@ def _audit_details(candidate: WorkloadSource) -> dict[str, object]:
 def _safe_actor(value: str) -> str:
     normalized = value.strip()[:80]
     return normalized if re.fullmatch(r"[A-Za-z0-9@._:-]{1,80}", normalized) else "operator"
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)

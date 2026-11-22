@@ -1,29 +1,233 @@
 # Default values for greenkube.
-# This is a YAML-formatted file.
-# Declare variables to be passed into your templates.
+#
+# One install, one topology (roadmap F11): `helm install` with these defaults
+# deploys the full loop (api, controller, renderer and the bundled PostgreSQL)
+# sized for an evaluation cluster such as kind or minikube. High availability
+# is two numbers (api.replicas: 2, controller.replicas: 2), not another
+# install. There is no profile to choose and no feature flag to flip: GitOps
+# discovery, previews and pull-request delivery activate themselves when their
+# prerequisites appear (docs/installation.md).
+#
+# Upgrading from 0.3.x: profile, replicaCount, production.*, automation.enabled,
+# automation.mode, rendererSandbox.*, collector.*, resources, apiResources and
+# the SQLite values are still accepted for this minor release, mapped onto the
+# keys below and reported in the install notes (docs/upgrading.md).
 
-replicaCount: 1
+global:
+  # Pull secrets of every GreenKube pod (names, or {name: ...} entries), for a
+  # private registry or mirror.
+  imagePullSecrets: []
 
 # Scratch space for archive snapshots and renderer request streaming.
 tmp:
   sizeLimit: 768Mi
 
-# Deployment profile. "standalone" preserves the single-pod collector/API
-# deployment; "production" renders independent API, controller, and
-# automation-worker Deployments.
-profile: standalone
+# ---------------------------------------------------------------------------
+# Components
+# ---------------------------------------------------------------------------
+# Stateless REST API, UI, webhook ingress and authentication. No background job.
+api:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # Scheduling (all optional). With more than one replica and no affinity,
+  # replicas prefer distinct nodes (podAntiAffinity: soft | hard | none).
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAntiAffinity: soft
+  topologySpreadConstraints: []
+  priorityClassName: ''
+  podAnnotations: {}
+  podLabels: {}
+  # Rendered only with more than one replica: voluntary disruptions (node
+  # drains) keep at least one pod running.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # Liveness: process heartbeat only, never restarts the API for a slow dependency.
+  livenessProbe:
+    enabled: true
+    path: /api/v1/health/heartbeat
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+  # Readiness: 503 until the controller has applied every database migration.
+  readinessProbe:
+    enabled: true
+    path: /api/v1/health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+    successThreshold: 1
 
+# Every leader-gated loop: collection, scans, lifecycle and measurement,
+# discovery, sync, the automation readiness reconciler, the automation
+# controller loop and plan execution. Runs the database migrations at startup
+# (PostgreSQL advisory lock). Extra replicas are hot standbys.
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: '1'
+      memory: 1Gi
+  # Scheduling (all optional). With more than one replica and no affinity,
+  # replicas prefer distinct nodes (podAntiAffinity: soft | hard | none).
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAntiAffinity: soft
+  topologySpreadConstraints: []
+  priorityClassName: ''
+  podAnnotations: {}
+  podLabels: {}
+  # Rendered only with more than one replica: voluntary disruptions (node
+  # drains) keep at least one pod running.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # Recreate: the old release stops before the new one migrates the schema,
+  # so two versions never write side by side. Set RollingUpdate only if a
+  # short controller gap matters more than that guarantee.
+  strategy:
+    type: Recreate
+  # Port of the controller's /prometheus/metrics, /healthz, /readyz and /loops
+  # listener. The probes use it; 0 disables it (process probes then).
+  metricsPort: 9102
+  leaderElection:
+    # Empty: <release>-leader. The Lease is always rendered.
+    leaseName: ''
+    leaseDurationSeconds: 30
+  # Generous startup budget: a large upgrade can spend minutes in migrations.
+  startupProbe:
+    enabled: true
+    periodSeconds: 10
+    failureThreshold: 60
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+
+# Isolated Helm/Kustomize renderer: no Secrets, no service-account token and an
+# egress-deny NetworkPolicy. Always deployed; raw-manifest repositories never
+# call it. It probes whether that egress policy is enforced at startup and
+# daily; the setup checklist reports renderer_egress_unenforced otherwise.
+renderer:
+  replicas: 1
+  servicePort: 8090
+  tmpSizeLimit: 768Mi
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  # Scheduling (all optional). With more than one replica and no affinity,
+  # replicas prefer distinct nodes (podAntiAffinity: soft | hard | none).
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAntiAffinity: soft
+  topologySpreadConstraints: []
+  priorityClassName: ''
+  podAnnotations: {}
+  podLabels: {}
+  # Defense in depth for CNIs that do not enforce NetworkPolicy: an init
+  # container installs a deny-all egress firewall (needs NET_ADMIN).
+  egressFirewall:
+    enabled: false
+    privilegedInitContainer: false
+
+# Optional dedicated plan executors for very large installations. The
+# controller always executes plans; operation leases make extra workers safe.
+worker:
+  replicas: 0
+  metricsPort: 8001
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  # Scheduling (all optional). With more than one replica and no affinity,
+  # replicas prefer distinct nodes (podAntiAffinity: soft | hard | none).
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAntiAffinity: soft
+  topologySpreadConstraints: []
+  priorityClassName: ''
+  podAnnotations: {}
+  podLabels: {}
+  # Recreate: the old release stops before the new one migrates the schema,
+  # so two versions never write side by side. Set RollingUpdate only if a
+  # short controller gap matters more than that guarantee.
+  strategy:
+    type: Recreate
+
+# ---------------------------------------------------------------------------
+# GitOps automation (always on; see docs/automation.md)
+# ---------------------------------------------------------------------------
+# Discovery runs whenever Argo CD or Flux CRDs are present. Pull-request
+# delivery activates within one to two minutes of creating the credentials Secret,
+# with no upgrade and no restart:
+#
+#   kubectl -n <namespace> create secret generic greenkube-git-credentials \
+#     --from-literal=token=<token with repository write access> \
+#     --from-literal=host=github.com
+#
+# The token is only sent to the host named by "host" (or, without that key, to
+# github.com or gitlab.com when it is the only discovered host).
+#
+# The provider (GitHub, GitLab, Gitea) and its API URL are inferred from each
+# discovered repository host. List providers only for several credentials or
+# to pin a self-hosted URL.
 automation:
-  enabled: false
-  mode: '' # Empty defaults to inline for standalone and worker for production.
-  # Port for the dedicated worker's authenticated control-loop metrics listener.
-  workerMetricsPort: 8001
+  # Secret in the release namespace read for inferred providers: key "token",
+  # or keys "appId" + "privateKey" for a GitHub App (installation tokens scoped
+  # to each repository, bot identity: docs/automation.md#github-app), and an
+  # optional key "host" (or "apiBaseUrl") binding them to one Git host.
+  credentialsSecret: greenkube-git-credentials
+  # Repositories automation may open pull requests against, for inferred
+  # providers and for providers without their own repositoryAllowlist.
+  # "@discovered": repositories referenced by discovered Argo CD/Flux sources.
+  # An explicit list of "owner/repo" names or globs narrows it.
+  repositoryAllowlist:
+    - '@discovered'
   prPollIntervalSeconds: 120
   syncPollIntervalSeconds: 30
   # GitOps discovery refresh cadence and workload-binding freshness window.
   # Format: integer followed by ms, s, m, or h.
   discoveryInterval: 5m
   bindingTtl: 30m
+  # Delivery safety: extra Argo CD destination server URLs or cluster names that
+  # address this cluster (besides https://kubernetes.default.svc and in-cluster).
+  # Applications deploying to any other cluster, and Flux objects with
+  # spec.kubeConfig, never bind a workload or resource here (destination_remote).
+  localClusterAliases: []
   syncTimeoutSeconds: 1800
   # Signed Git provider webhook credentials. The referenced Secret must be in
   # the Helm release namespace; only the selected key is projected into API pods.
@@ -33,139 +237,107 @@ automation:
     secretNamespace: ''
     secretName: ''
     secretKey: ''
-  # Git provider credentials are supplied only by Kubernetes Secret references.
-  # Each provider's Secret must be in the Helm release namespace.
+  # Explicit Git providers override the inference. Each provider's Secret
+  # must be in the Helm release namespace.
   providers: []
-  policy:
-    maxRiskLevel: medium
-    minConfidence: 0.6
-    minSamples: 36
-    minCoverage: 0.5
-    maxOpenPullRequestsPerWorkload: 1
-    cooldownMinutes: 60
-    changeFreezeLabels: []
-    changeFreezeWindows: []
-  pullRequests:
-    draft: false
-    labels:
-    - greenkube
-    - sustainability
-    reviewers: []
-    teamReviewers: []
   # Example:
   # providers:
   #   - id: github-main
   #     type: github
   #     apiBaseUrl: https://api.github.com
-  #     # secretNamespace is optional and, if set, must match the release namespace.
   #     secretName: github-token
-  #     secretKey: token
-  #     repositoryAllowlist:
+  #     secretKey: token          # "privateKey" for a GitHub App (appId in the same Secret)
+  #     repositoryAllowlist:      # optional, defaults to automation.repositoryAllowlist
   #       - "acme/*"
-
-rendererSandbox:
-  enabled: true
-  egressFirewall:
+  policy:
+    # Change freeze and incident switch: plan approval returns a policy error
+    # and no pull request is opened, while discovery, previews and measurement
+    # keep running. A policy, not a feature flag.
+    pauseDelivery: false
+    maxRiskLevel: medium
+    minConfidence: 0.6
+    minCoverage: 0.5
+    maxOpenPullRequestsPerWorkload: 1
+    cooldownMinutes: 60
+    changeFreezeLabels: []
+    changeFreezeWindows: []
+    # What rollout, controller-health and HPA/VPA/PDB gates do when discovery could
+    # not collect their live evidence: "fail" rejects the plan, "warn" allows it
+    # with a warning.
+    missingEvidence: fail
+  # How approved plans become pull requests (docs/automation.md#delivery-modes):
+  #   direct: GreenKube commits and opens the PR (write credentials).
+  #   patch:  nobody in the cluster writes to Git; download the approved plan as a
+  #           git format-patch or run "greenkube plan apply-patch <id>", open the
+  #           PR yourself; GreenKube links it by branch name or GreenKube-Plan trailer.
+  #   ci:     a CI job polls GET /api/v1/automation/plans?status=approved&delivery=ci,
+  #           opens the PR with its own token and reports it back
+  #           (docs/examples/github-actions-greenkube-delivery.yaml).
+  # patch and ci need only read access to the repositories.
+  delivery:
+    mode: direct
+  # Policy-based auto-approval (opt-in): a preview whose recommendations are all at
+  # or below maxRisk and at or above minConfidence is approved without the extra
+  # click; it is still a pull request, still reviewed in Git. Contested consensus
+  # is never auto-approved (contested must stay false), and a decrease also needs
+  # GreenKube's own usage evidence or two independent agreeing sources.
+  # increases: also auto-approve request increases (reliability fixes that cost
+  # money, roadmap H1); off by default, so a person approves every increase.
+  autoApprove:
     enabled: false
-  replicas: 1
-  servicePort: 8090
-  tmpSizeLimit: 768Mi
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 1Gi
-
-production:
-  migration:
-    enabled: true
-    backoffLimit: 6
-    image:
-      repository: busybox
-      tag: '1.37'
-      pullPolicy: IfNotPresent
-  leaderElection:
-    enabled: true
-    leaseName: ''
-    leaseDurationSeconds: 30
-    renewDeadlineSeconds: 10
-    retryPeriodSeconds: 2
-  components:
-    api:
-      replicas: 2
-      resources:
-        limits:
-          cpu: 500m
-          memory: 512Mi
-        requests:
-          cpu: 100m
-          memory: 128Mi
-      livenessProbe:
-        enabled: true
-        path: /api/v1/health
-        port: http-api
-        initialDelaySeconds: 10
-        periodSeconds: 30
-        timeoutSeconds: 5
-        failureThreshold: 3
-        successThreshold: 1
-      readinessProbe:
-        enabled: true
-        path: /api/v1/health
-        port: http-api
-        initialDelaySeconds: 5
-        periodSeconds: 10
-        timeoutSeconds: 3
-        failureThreshold: 3
-        successThreshold: 1
-    controller:
-      replicas: 1
-      resources:
-        limits:
-          cpu: 500m
-          memory: 512Mi
-        requests:
-          cpu: 100m
-          memory: 128Mi
-      livenessProbe:
-        enabled: true
-        initialDelaySeconds: 15
-        periodSeconds: 30
-        timeoutSeconds: 5
-        failureThreshold: 3
-        successThreshold: 1
-      readinessProbe:
-        enabled: true
-        initialDelaySeconds: 5
-        periodSeconds: 10
-        timeoutSeconds: 5
-        failureThreshold: 3
-        successThreshold: 1
-    automation:
-      replicas: 1
-      resources:
-        limits:
-          cpu: 250m
-          memory: 256Mi
-        requests:
-          cpu: 50m
-          memory: 64Mi
-      livenessProbe:
-        enabled: true
-        initialDelaySeconds: 15
-        periodSeconds: 30
-        timeoutSeconds: 5
-        failureThreshold: 3
-        successThreshold: 1
-      readinessProbe:
-        enabled: true
-        initialDelaySeconds: 5
-        periodSeconds: 10
-        timeoutSeconds: 5
-        failureThreshold: 3
-        successThreshold: 1
+    maxRisk: low
+    minConfidence: 0.8
+    contested: false
+    increases: false
+  pullRequests:
+    draft: false
+    labels: [] # Optional extra labels; missing labels are created where the provider allows it.
+    reviewers: [] # Fallback reviewers, requested in addition to the CODEOWNERS of the touched paths.
+    teamReviewers: []
+  # Pull-request experience: titles, body template, derived labels, CODEOWNERS
+  # reviewers, validation status and the lifecycle comment (docs/automation.md).
+  pr:
+    # Prefix of PR titles ("greenkube: rightsize payments/api ..."); empty drops it.
+    titlePrefix: greenkube
+    # PR body template: Markdown with {{ summary }}, {{ changes }}, {{ why }},
+    # {{ risk }}, {{ assumptions }}, {{ rollback }}, {{ verification }},
+    # {{ provenance }}, {{ diffs }} and scalar placeholders. Empty uses the
+    # built-in template. The greenkube:v1 footer is always appended.
+    template: ''
+    # Labels greenkube, optimization/<capability>, risk/<level> and reliability.
+    defaultLabels: true
+    # Open high-risk plans as draft PRs (GitLab "Draft:", Gitea "WIP:").
+    draftHighRisk: true
+    # Request reviews from the CODEOWNERS of the touched paths.
+    codeowners: true
+    # Publish the greenkube/validation commit status on the PR head.
+    commitStatus: true
+    # Keep one GreenKube status comment up to date on merged PRs
+    # (synced, applied, measuring, outcome) for lifecycleLookbackDays after the merge.
+    lifecycleComments: true
+    lifecycleLookbackDays: 30
+  # Helm charts (docs/automation.md#helm-support). Remote charts (HTTP repositories,
+  # OCI registries) are pre-fetched by the controller, verified against the digest
+  # their repository publishes and rendered offline: the renderer sandbox keeps no
+  # network egress. Values edits land in the values file of the Argo CD $values
+  # source or, for Flux, in a managed post-renderer patch.
+  helm:
+    remoteCharts:
+      enabled: true
+      # Hosts the controller may fetch charts from: "host", "host:port" or "*.domain".
+      # Empty: any public host named by a discovered Argo CD/Flux chart source
+      # (loopback, link-local and metadata addresses are always refused). When set,
+      # Docker Hub charts also need auth.docker.io and *.docker.com; plain-HTTP
+      # repositories must always be listed.
+      allowedHosts: []
+    # Values-path mappings per chart and version, tried before the built-in registry
+    # of well-known charts (Bitnami, ingress-nginx, cert-manager...). Each mapping is
+    # still render-validated: a wrong one fails closed instead of editing anything.
+    #   - chart: nginx          # chart name or <repository>/<name>; globs allowed
+    #     version: "18.3.1"     # exact version or glob ("18.*"); default "*"
+    #     container: nginx      # container name or glob; default "*"
+    #     path: resources       # dotted values path ending with "resources"
+    chartMappings: []
 
 image:
   repository: greenkube/greenkube
@@ -184,32 +356,16 @@ image:
 initContainer:
   image:
     repository: busybox
-    tag: '1.37'
+    # Tag pinned to the multi-arch index digest of busybox:1.37: a re-pushed
+    # tag cannot change it. Overriding the tag drops the pin; an explicit
+    # "digest" key pins any tag.
+    tag: '1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec'
     pullPolicy: IfNotPresent
 
-# Probes for the collector process. The collector has no HTTP listener, so
-# these process-heartbeat probes verify that its PID is still alive.
-collector:
-  livenessProbe:
-    enabled: true
-    initialDelaySeconds: 15
-    periodSeconds: 30
-    timeoutSeconds: 5
-    failureThreshold: 3
-    successThreshold: 1
-  readinessProbe:
-    enabled: true
-    initialDelaySeconds: 5
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 3
-    successThreshold: 1
-
 serviceAccount:
-  # Specifies whether a service account should be created
+  # Create one ServiceAccount per component (<release>-api, -controller, -worker).
   create: true
-  # The name of the service account to use.
-  # If not set and create is true, a name is generated using the fullname template
+  # With create=false: the existing ServiceAccount every component uses.
   name: ''
 
 rbac:
@@ -223,23 +379,36 @@ config:
   # Log output format: "json" (structured, for Loki/Grafana) or "console" (human-readable).
   logFormat: json
   # Runtime environment and API authentication mode.
-  # Development permits an empty API key for local demonstrations; production does not.
+  # Development leaves an instance without accounts or API key open for local
+  # demonstrations; production never does.
   environment: production
-  apiAuthMode: api_key
-  # Exact hostnames allowed for runtime service URL overrides. Existing
-  # Prometheus/OpenCost/Boavizta hosts remain accepted without this list.
-  serviceUrlAllowlist: []
+  # session (default): sign in to the UI with a username and password
+  # (server-side sessions); machines use scoped API keys (Bearer gk_...).
+  # api_key: API keys only; the UI signs in with a key, there are no user accounts.
+  # proxy: single sign-on through an authentication proxy (oauth2-proxy,
+  # Authentik, Pomerium) whose identity headers are trusted only from
+  # config.trustedProxyIps (required). oidc: native OpenID Connect sign-in
+  # (auth.oidc.*). Both create the same server-side sessions and map IdP groups
+  # to roles (auth.roles). See auth.* below and docs/authentication.md.
+  apiAuthMode: session
+  # Public URL of the GreenKube UI (e.g. https://greenkube.example.com), used for
+  # deep links in pull requests and commit statuses. Empty: no links.
+  externalUrl: ''
   cloudProvider: unknown
   # Cluster name used as the `cluster` label in Prometheus metrics for
   # multi-cluster Grafana filtering.  Leave empty (default) to auto-detect:
-  #   1. Node name from the Kubernetes Downward API (works for minikube/kind/k3s).
-  #   2. Well-known cloud-provider node labels (EKS, GKE, AKS).
-  #   3. Falls back to "default" when nothing is detectable.
+  #   1. Single-node cluster (minikube/kind/k3s): the node name.
+  #   2. Well-known cluster-name node labels (EKS, GKE, AKS, Cluster API).
+  #   3. Any other multi-node cluster: "default" (the same in every pod).
+  #   4. Nodes unreadable: the pod's node name (Downward API), else "default".
   clusterName: ''
   defaultZone: '' # Override with your Electricity Maps zone code (e.g. 'FR', 'DE', 'US-CAL-CISO').
                   # Used when an individual node's zone and region cannot be mapped.
                   # Leave empty to rely on mapped node zones.
   defaultIntensity: 500.0 # gCO2e/kWh, global fallback when no zone-specific intensity is available
+  # Maximum age of a stored grid carbon intensity. Older values are stale: the
+  # zone default is used instead and rows are tagged intensity_source=zone_default.
+  intensityMaxAge: 6h
   # Grid carbon intensity data provider: "electricity_maps" (default) or "wattnet".
   # Wattnet (https://wattnet.eu) provides free EU-wide data at 15-min resolution;
   # set secrets.wattnetEmail / secrets.wattnetPassword when using it.
@@ -257,6 +426,8 @@ config:
   # --- Metrics Retention & Compression ---
   # Age threshold (hours) after which raw 5-min metrics are compressed
   # into hourly aggregates. Aligns with Electricity Maps hourly granularity.
+  # Keep it >= 24: the carbon-intensity recompute only refreshes raw rows of
+  # the last 24 hours, and compressed hours are never re-read.
   metricsCompressionAgeHours: 24
   # Maximum number of days to retain raw (uncompressed) 5-min metrics.
   # Older raw rows are deleted after compression. Set -1 to disable deletion.
@@ -274,21 +445,40 @@ config:
 
   # Boavizta configuration
   boavizta:
-    url: https://api.boavizta.org
+    # If empty, GreenKube uses the public API (https://api.boavizta.org) unless
+    # the URL is changed from the Settings page. A URL set here always wins.
+    url: ''
     # Per-instance manufacturing GWP fallback (kg CO₂eq) used when Boavizta does not
     # recognize a cloud provider or instance type. Boavizta returns per-instance
     # allocated values (typically 50–170 kg for common cloud VMs). 100 kg is a
     # conservative midpoint. The former value of 350 kg represented a full physical
     # server and over-estimated Scope 3 by 2–7× on low-carbon grids.
     defaultEmbodiedEmissionsKg: 100
+    # Capacity-proportional fallback for nodes Boavizta does not know (on-prem, kind, unknown
+    # instance types) and without a greenkube.io/embodied-kg node annotation: kg CO2e per vCPU
+    # (the Boavizta m5 family ratio) plus kg CO2e per GiB of memory. Rows using it carry
+    # embodied_source=fallback_per_vcpu. defaultEmbodiedEmissionsKg applies only when the node
+    # capacity is unknown.
+    embodiedKgPerVcpu: 12
+    embodiedKgPerGib: 0
+    # Whole-node embodied emissions (kg CO2e) by instance type, for on-prem hardware or to
+    # override Boavizta, e.g. {r740: 1300}. A greenkube.io/embodied-kg node annotation wins.
+    embodiedKgByInstanceType: {}
 
-  # Database configuration
+  # Node power model.
+  power:
+    # Nodes that are one physical host (same status.nodeInfo.bootID, or kind:// and k3d://
+    # provider IDs) share the host idle power, memory power and embodied emissions 1/N
+    # instead of each being charged the whole host. Set false to disable.
+    sharedHostDetection: true
+    # Utilisation (0-100 %) assumed for a GPU a pod requests on a node the DCGM exporter does
+    # not report: the pod is charged idle + util x (TDP - idle) per requested GPU. GPUs no pod
+    # requests stay at the idle floor on the node's idle row.
+    gpuAssumedUtilizationPct: 50
+
+  # PostgreSQL connection settings. SQLite is for `greenkube demo` and local
+  # development only; the chart always uses PostgreSQL (bundled or external).
   db:
-    # Supported: "postgres" (recommended), "sqlite" (standalone/dev)
-    # WARNING: "sqlite" is not recommended for production as data will be lost on pod restart.
-    type: postgres
-    # Path for the sqlite database file (only used if db.type is "sqlite")
-    path: /data/greenkube_data.db
     # Database schema (only used if db.type is "postgres")
     schema: public
     # SSL mode for PostgreSQL connections. Set to "disable" for in-cluster traffic
@@ -300,23 +490,19 @@ config:
     # Statement timeout in milliseconds (prevents runaway queries)
     statementTimeoutMs: 30000
 
-  # Persistence configuration for SQLite
-  persistence:
-    enabled: false
-    # Storage Class Name (leave empty for default)
-    storageClassName: ''
-    accessMode: ReadWriteOnce
-    size: 10Gi
-
   # Prometheus collector configuration
   prometheus:
     # If empty, GreenKube will attempt in-cluster discovery.
     url: ''
     verifyCerts: true
+    # OpenCost cluster id (properties.cluster) to read when one OpenCost or Kubecost
+    # serves several clusters. Empty: an answer covering several clusters stores no
+    # OpenCost cost (the window stays opencost_pending).
+    clusterId: ''
     # Prometheus query step (e.g., "5m", "1h"). Must be a divisor of 24 hours.
     queryRangeStep: 5m
-    # Maximum number of data points to fetch in a single range query.
-    queryRangeMaxSamples: 10000
+    # cAdvisor scrape interval; rate windows span max(queryRangeStep, 4 x scrapeInterval).
+    scrapeInterval: 30s
     # The node label to use for discovering the instance type.
     nodeInstanceLabel: label_node_kubernetes_io_instance_type
 
@@ -326,15 +512,39 @@ config:
     url: ''
     verifyCerts: true
 
-  # Threshold in cores below which Prometheus totals are considered too small
-  lowNodeCpuThreshold: 0.05
+  # Metric collection catch-up. Each window [start, end) is collected once it is
+  # older than safetyLag; after downtime the controller backfills missing windows
+  # up to maxBackfill in the past (older windows are reported as gaps).
+  # A maxBackfill longer than metricsCompressionAgeHours delays compression to it.
+  collection:
+    safetyLag: 1m
+    maxBackfill: 24h
+    # Consecutive failed Kubernetes pod or node list attempts for the same window
+    # before it is stored in degraded mode (rows flagged metadata_source=missing,
+    # reason k8s_list_failed) instead of being retried until it becomes a gap.
+    k8sListMaxFailures: 3
+    # The database records the cluster it belongs to (kube-system namespace UID);
+    # a controller of another cluster refuses to collect into it. Set true once to
+    # adopt a database moved to a new cluster, then set it back to false.
+    allowClusterUidChange: false
 
-  # Comma-separated list of allowed CORS origins.
-  # Use "*" to allow all origins (default).
-  corsOrigins: '*'
+  # Comma-separated list of allowed CORS origins. Empty (default) keeps the API
+  # same-origin: the bundled UI needs no CORS. List exact origins (for example
+  # "https://greenkube.example.com") only for a UI served from another origin;
+  # credentials are allowed for listed origins only. "*" allows any origin but
+  # disables credentialed CORS.
+  corsOrigins: ''
 
-  # Rate limit for API endpoints (slowapi format, e.g. "60/minute", "100/hour").
+  # Rate limit per client IP and per API route template (e.g. "60/minute",
+  # "60/minute;1000/hour").
   apiRateLimit: 60/minute
+
+  # Comma-separated IPs or CIDRs of reverse proxies whose X-Forwarded-For and
+  # X-Forwarded-Proto headers are trusted: the Ingress controller or gateway
+  # pods, often the pod CIDR (e.g. "10.244.0.0/16"). Behind an Ingress, set it:
+  # otherwise every client shares the controller's address for rate limits and
+  # sign-in lockouts (helm install prints a warning).
+  trustedProxyIps: ''
 
   # Root path prefix when the API is served behind a reverse proxy at a
   # sub-path (e.g. "/greenkube").  Leave empty for root deployments.
@@ -344,31 +554,11 @@ config:
   # Requests wider than this return HTTP 400 to prevent loading millions of rows.
   metricsListMaxRangeDays: 30
 
-  # API server configuration
+  # API server listener (probes and replicas: see api.* above).
   api:
-    enabled: true
     host: 0.0.0.0
     port: 8000
 
-    # Liveness probe: restarts the container if the API becomes unresponsive.
-    livenessProbe:
-      enabled: true
-      path: /api/v1/health
-      initialDelaySeconds: 10
-      periodSeconds: 30
-      timeoutSeconds: 5
-      failureThreshold: 3
-      successThreshold: 1
-
-    # Readiness probe: removes the pod from service endpoints until the API is ready.
-    readinessProbe:
-      enabled: true
-      path: /api/v1/health
-      initialDelaySeconds: 5
-      periodSeconds: 10
-      timeoutSeconds: 3
-      failureThreshold: 3
-      successThreshold: 1
 
   # Default instance profile for energy estimation when an instance type is unknown
   defaults:
@@ -381,28 +571,39 @@ config:
 
   # Recommendation engine configuration
   recommendations:
-    lookbackDays: 7
-    # Hard bound on combined + container rows loaded into one recommendation scan.
-    # The lookback window is shortened automatically before loading above this bound.
+    # Lookback of recommendation scans; 14 days covers two weekly cycles.
+    lookbackDays: 14
+    # Hard bound on combined + container rows loaded into one recommendation scan
+    # by the row-loading path (backends without the workload usage rollup). SQLite
+    # and PostgreSQL scans read per-target summaries and are bounded by targets.
     maxMetricRows: 750000
     rightsizingCpuThreshold: 0.3
     rightsizingMemoryThreshold: 0.3
     rightsizingHeadroom: 1.2
-    zombieCostThreshold: 0.01
-    zombieEnergyThreshold: 1000
-    autoscalingCvThreshold: 0.7
-    autoscalingSpikeRatio: 3.0
-    offPeakIdleThreshold: 0.05
-    offPeakMinIdleHours: 4
-    idleNamespaceEnergyThreshold: 1000
-    carbonAwareThreshold: 1.5
-    nodeUtilizationThreshold: 0.2
+    # Recommend a request increase when p99 usage exceeds this share of the request.
+    rightsizingIncreaseThreshold: 0.9
+    # One increase step is capped at this multiple of the current request unless
+    # OOM kills back it; the next scan re-evaluates once the step is applied.
+    rightsizingMaxIncreaseFactor: 2.0
+    # Minutes after a container (re)start left out of usage percentiles (startup
+    # spikes such as WAL replay, JIT or cache fill do not size requests). 0 disables.
+    rightsizingWarmupMinutes: 10
+    # Hours after its last sample a target without a running pod is left out of
+    # rightsizing (deleted, renamed or scaled-to-zero workloads).
+    targetMaxStalenessHours: 2
+    # Observed coverage (days) required before a request decrease is recommended.
+    minDecreaseCoverageDays: 7
+    # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.
+    limitsPolicy: keep
     # Assumed monthly cost per GiB of provisioned storage (USD), used to estimate
     # the annual cost savings of deleting orphaned PersistentVolumes.
     storageCostPerGibMonth: 0.1
     # Assumed monthly cost of a provisioned cloud LoadBalancer (USD), used to
     # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
     loadBalancerCostPerMonth: 18.0
+    # Days a LoadBalancer or PersistentVolume must look unused continuously before
+    # its deletion is recommended. Deletions are never automated; see docs/recommendation.md.
+    deletionMinUnusedDays: 7
     # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
     recommendSystemNamespaces: false
     # Minimum realistic thresholds — recommendations below these are flagged as unrealistic
@@ -410,53 +611,279 @@ config:
     minMemoryBytes: '16777216'  # 16 MiB — quoted to prevent YAML float serialization
     # Tolerance for considering a recommendation "applied" (e.g. 0.25 = 25% deviation allowed)
     applyTolerance: 0.25
-    # --- Recommendation sources (connectors) ---
-    # VPA recommendation mode (updateMode: Off). When enabled, VPA recommendations
-    # replace native CPU/memory rightsizing for the same workload to avoid duplicates.
-    # Enabled by default; the source detects the CRD and skips cleanly when absent.
-    vpaEnabled: true
-    # Karpenter node pool consolidation recommendations. Enabled by default; the
-    # source detects the CRDs and skips cleanly when absent.
-    karpenterEnabled: true
-    # Source precedence used to arbitrate conflicts (highest priority first).
-    sourcePriority: vpa,karpenter,greenkube
     # --- Ranking & review ---
     # Time-to-live of a recommendation before it is considered expired (days).
     ttlDays: 14
-    # Multi-criteria ranking profile: balanced | carbon_first | cost_first | quick_wins | low_risk
+    # Default ranking profile: balanced | carbon_first | cost_first | quick_wins | low_risk.
+    # Recommendations are ranked by risk-adjusted expected value (EV, currency per
+    # year); profiles are presets over the carbon price (impact.carbonPricePerTonne),
+    # the risk aversion and the effort weight. Requests can override it with ?profile=.
     rankingProfile: balanced
-    # Optional JSON object overriding ranking weights, e.g. '{"carbon": 0.5, "risk": 0.3}'.
+    # Deprecated and ignored since the EV ranking (weights of the former batch-normalized score).
     rankingWeights: ''
-    # Minimum raw samples expected for a high-confidence recommendation.
+    # Expected cost (impact.pricing.currency) of a failed high-risk change on one
+    # workload of normal criticality. Scaled by risk level, blast radius (scope,
+    # greenkube.io/criticality label, single replica) and the profile's risk aversion.
+    incidentCost: 100
+    # Cost of one engineer hour, used to weigh implementation effort. 0 ignores
+    # effort, except in the quick_wins profile (at least 100 per hour).
+    engineerHourCost: 0
+    # Weight of the allocated cost a change releases beyond its billable projection
+    # (allocated - expected billable) in the ranking value. On fixed nodes the billable
+    # projection is 0, so 1 ranks by the capacity freed; 0 ranks by billable savings only.
+    capacityValueWeight: 1
+    # Minimum raw samples of evidence, used everywhere a sample count gates a
+    # decision: recommendation confidence, the plan policy gate and verification
+    # (one knob since 0.4; replaces automation.policy.minSamples and
+    # config.recommendations.verification.minSamples).
     minSamples: 36
+    # Interval between scheduled recommendation scans. Scans run only in the
+    # controller (leader-gated); the API enqueues on-demand runs through
+    # POST /api/v1/optimization/runs. Accepts s, m or h (1m to 24h).
+    scanInterval: 1h
     # --- Verification (apply detection, health gates, rollback review) ---
     verification:
-      # Observation window after a change lands before the outcome is verified.
+      # Fixed measurement window after the rollout completes (baseline: same length, ending at the PR merge).
       windowHours: 72
-      # Minimum raw samples required before a verdict is rendered.
-      minSamples: 36
-      # Measured savings must reach this ratio of the projection to pass the cost gate.
+      # Projection accuracy below which a realized saving is flagged (reported only, not a gate).
       minSavingsRatio: 0.5
-      # p95 usage must stay below proposed request x this factor to pass the health gate.
+      # Per-pod p95 usage must stay below the applied per-pod request x this factor.
       usageHeadroom: 1.1
-      # Maximum allowed restart-count increase during the observation window.
+      # Maximum allowed restart-count increase during the observation window. Change
+      # measurements compare with the baseline rate per replica-hour instead: a restart
+      # gate fails on a significant rise (p <= 0.05) of at least max(1, maxRestartDelta).
       maxRestartDelta: 0
-      # Minimum readiness ratio during the observation window.
+      # Minimum readiness ratio during the observation window. Change measurements
+      # fail below min(minReadiness, baseline readiness - 0.01).
       minReadiness: 0.99
-      # Maximum allowed CPU throttling ratio during the observation window.
+      # Maximum allowed CPU throttling ratio during the observation window. Change
+      # measurements fail above the baseline throttling ratio plus this value.
       maxThrottleRatio: 0.05
       # Interval between lifecycle jobs (apply detection, verification, expiry).
       lifecycleInterval: 5m
+    # --- Change measurement (docs/methodology/savings-measurement.md) ---
+    # Every detected change is recorded with a baseline snapshot and measured
+    # against an hour-of-week counterfactual with a 90% bootstrap CI.
+    changeMeasurement:
+      # false: changes are measured by the interim verifier (windowHours) instead.
+      enabled: true
+      # Baseline window in days, ending at the PR merge or plan approval (at least 7).
+      preWindowDays: 7
+      # Post-change window in days, starting after the rollout and its warm-up. A verdict needs
+      # 5 complete days of aligned hours: a shorter value is raised to 5 days at startup, with a
+      # warning in the logs (30 minutes with accelerated).
+      postWindowDays: 7
+      # Hours after rollout completion excluded from the post-window.
+      warmupHours: 1
+      # Minimum share of post-window hours matched with a baseline hour of the week.
+      minCoverage: 0.8
+      # Circular block bootstrap resamples for the within-window part of the confidence interval.
+      bootstrapSamples: 1000
+      # Noise floor: realized only when the CI lower bound is above this share of the counterfactual,
+      # not realized when the CI upper bound is at most this share.
+      epsilonRatio: 0.02
+      # Drift monitor (C8): share of a realized change's per-replica saving that must be
+      # lost for a day to count as drifted (0 excluded, at most 1).
+      driftThreshold: 0.5
+      # Consecutive drifted days (1 to 7) after which the change is regressed.
+      driftSustainedDays: 3
+      # Demo and quickstart only: lifts the 7-day minimum of preWindowDays (down to
+      # 1 hour) and the 5-day minimum of postWindowDays (down to 30 minutes) so a
+      # change is decided minutes after it lands. Such measurements use 5-minute slots,
+      # a flat baseline-mean counterfactual and demo thresholds (6 post slots), and are
+      # labelled representative=false: they show the pipeline, not a saving. Keep
+      # false in production: the defaults above are the safe minimum.
+      accelerated: false
+      # Week-to-week variation (share of the counterfactual, 0 to 1) assumed when the baseline
+      # holds fewer than two weeks; with 14 days or more it is estimated from the baseline weeks.
+      priorWeekCv: 0.05
+  # Savings ledger v2 (roadmap C6): append-only, hash-chained entries.
+  ledger:
+    # How often the controller catches the ledger up and verifies its hash chain
+    # (greenkube_ledger_chain_verification_failures_total counts failures).
+    chainVerifyInterval: 1h
+
+# ---------------------------------------------------------------------------
+# Recommendation sources (Source SDK, docs/sources.md)
+# ---------------------------------------------------------------------------
+sources:
+  # Load third-party sources installed in the image and registered under the
+  # `greenkube.sources` Python entry points. GET /api/v1/sources lists them.
+  pluginsEnabled: true
+  # Per-source settings keyed by source id; `enabled` is true, false or auto
+  # (auto: the source probes its prerequisites, such as the VPA CRD).
+  # Replaces config.recommendations.vpaEnabled. Example:
+  #   settings:
+  #     greenkube.orphaned_lb: { enabled: false }
+  #     vpa: { enabled: auto }
+  # Do not put credentials here: this map is rendered into the ConfigMap.
+  # Connector settings (docs/sources/): krr and push { max_age_hours }.
+  # GreenKube's measured value decides every size; VPA, KRR and pushed signals
+  # move the confidence up or down (docs/recommendation.md).
+  settings: {}
+  # Known minimum each tool proposes, per engine family or source id (roadmap
+  # A.5). A proposal equal to it is the tool's floor, not a signal of need, and
+  # is not counted in the consensus. Defaults: KRR `simple` (--mem-min 100,
+  # --cpu-min 10) and the Fairwinds VPA chart (100 MB, 15m, split per container).
+  # Set the values your tools run with; {} disables floor detection.
+  toolFloors:
+    krr:
+      cpu: 10m
+      memory: 100Mi
+    vpa:
+      cpu: 15m
+      memory: 100Mi
+  # Smallest change an external source (VPA, KRR, push) must propose to vote for
+  # its own value: both the relative and the absolute minimum must be reached.
+  # A smaller change votes to keep the current request.
+  minChange:
+    percent: 5
+    cpuMillicores: 10
+    memoryBytes: 16777216
+  vpa:
+    # Hours of samples a VPA needs before its target counts as a vote (checkpoint
+    # firstSampleStart..lastSampleStart, else totalSamplesCount at one a minute).
+    # A VPA with LowConfidence=True never votes. 0 disables the check.
+    minSampleHours: 24
+
+# ---------------------------------------------------------------------------
+# Impact Model (docs/methodology/impact-model.md)
+# ---------------------------------------------------------------------------
+impact:
+  # CustomRates: last tier of the cost fallback chain (observed OpenCost costs,
+  # then bundled list prices per instance type, then these rates). Leave null
+  # to use the OpenCost default custom pricing (0.031611 per core-hour and
+  # 0.004237 per GiB-hour, USD). Set both for on-premises or negotiated rates.
+  pricing:
+    cpuCoreHour: null
+    ramGiBHour: null
+    # Currency of every projected cost (custom rates and observed OpenCost
+    # costs). Only bundled catalogs in this currency are used: set EUR for the
+    # OVHcloud and Scaleway catalogs. GreenKube never converts currencies.
+    currency: USD
+  # Override of the share (0-1) of released capacity expected to become removed
+  # billable node-hours. Leave null to derive it per node pool from the
+  # cluster (Cluster Autoscaler status, Karpenter consolidation policies,
+  # do-not-disrupt annotations and blocking PDBs); set a value to pin it.
+  realizationFactor: null
+  # Autoscaler of the nodes outside Karpenter pools when detection cannot see it
+  # (a Cluster Autoscaler with another status ConfigMap, a managed autoscaler
+  # that publishes nothing): none | cluster_autoscaler | karpenter. Empty:
+  # detected from kube-system/cluster-autoscaler-status and Karpenter NodePools.
+  autoscalerHint: ""
+  # Memory power per GiB of node memory (W/GiB). Default: the Cloud Carbon
+  # Footprint memory coefficient.
+  memoryWattsPerGiB: 0.392
+  # Carbon price (currency per tonne CO2e) used to value projected CO2e:
+  # value = cost + carbonPricePerTonne x tCO2e.
+  carbonPricePerTonne: 100
+
+# ---------------------------------------------------------------------------
+# Authentication (sign in once: roadmap F14, F15)
+# ---------------------------------------------------------------------------
+# With config.apiAuthMode=session (default) the UI uses accounts and
+# server-side sessions. On the first start the API creates the account
+# auth.admin.username with the password stored in the Secret
+# "<release>-initial-admin" (created once by the credentials bootstrap Job;
+# read it with the command printed by `helm install`). The UI asks for a new
+# password at first sign-in and the API then erases the initial one.
+# Machines (CI, Prometheus, scripts) use scoped API keys created in
+# Settings > API keys. See docs/authentication.md.
+auth:
+  admin:
+    # Name of the first admin account.
+    username: admin
+    # Optional: an existing Secret holding the first admin password (GitOps).
+    # When set, no initial-admin Secret is generated and no password change
+    # is forced. The password only seeds the account: change it in the UI.
+    existingSecret: ''
+    existingSecretKey: password
+  session:
+    # auto: Secure cookie when the browser uses HTTPS (directly, or through a
+    # proxy listed in config.trustedProxyIps); always; never (plain-HTTP tests).
+    # With an HTTPS exposure (ingress.enabled with ingress.tls, or httpRoute.enabled
+    # with scheme https) auto renders "always".
+    secureCookie: auto
+    # Strict-Transport-Security sent on HTTPS responses (and on every response
+    # when the cookie is always Secure). maxAge 0 disables the header.
+    hsts:
+      maxAge: 31536000
+      includeSubdomains: false
+    # Sign out after this much inactivity (sliding).
+    idleTimeout: 12h
+    # Maximum session lifetime, and with "Keep me signed in".
+    absoluteLifetime: 7d
+    rememberLifetime: 30d
+  login:
+    # Failed sign-ins allowed per username and client IP before an exponential
+    # lockout of that pair; each client IP also gets 4x this budget across
+    # usernames (no escalation). The client IP is read from X-Forwarded-For only
+    # from config.trustedProxyIps: behind an Ingress, list its controller pods.
+    rateLimit: 5/minute
+  # What the deprecated bootstrap key GREENKUBE_API_KEY may do: admin (the
+  # historical full-admin key; required with config.apiAuthMode=api_key),
+  # metrics (Prometheus scrape only) or disabled (rejected). New session, oidc
+  # and proxy installs generate no bootstrap key; installs upgraded with one keep
+  # it as admin until you migrate (docs/authentication.md#the-bootstrap-api-key).
+  legacyApiKey: admin
+  # --- Single sign-on and roles (F16) ---
+  # Roles: viewer (read), operator (approve plans, ignore/restore, mark
+  # applied), admin (settings, users, API keys, repository allowlist).
+  # Local accounts keep a password sign-in in proxy and oidc modes (break-glass
+  # admin); set false to offer SSO only.
+  localLogin: true
+  roles:
+    # IdP groups granting each role; a user gets the highest matching role.
+    # The role of an SSO account is recomputed from its groups at every sign-in.
+    groups:
+      admin: []
+      operator: []
+      viewer: []
+    # Role of an SSO user in no listed group: viewer, operator, admin, or none
+    # (refuse access).
+    defaultRole: viewer
+  proxy:
+    # Identity headers the authentication proxy sets AND overwrites (config.apiAuthMode=proxy),
+    # accepted only from config.trustedProxyIps. The n-th groups header pairs with the n-th
+    # user header; a request carrying more than one family is refused. Defaults match
+    # oauth2-proxy --pass-user-headers.
+    userHeaders: X-Forwarded-User
+    groupsHeaders: X-Forwarded-Groups
+  oidc:
+    # Issuer URL (https), e.g. https://keycloak.example.com/realms/acme
+    # (config.apiAuthMode=oidc). Discovery reads <issuer>/.well-known/openid-configuration.
+    issuer: ''
+    # OAuth client id registered at the provider (OIDC_AUDIENCE).
+    clientId: ''
+    # Optional Secret holding the client secret (confidential client); without it
+    # GreenKube is a public client protected by PKCE.
+    existingSecret: ''
+    existingSecretKey: clientSecret
+    scopes: openid profile email
+    usernameClaim: preferred_username
+    groupsClaim: groups
+    # Redirect URI registered at the provider. Empty: <config.externalUrl>/api/v1/auth/oidc/callback,
+    # or the request's own origin when config.externalUrl is empty.
+    redirectUrl: ''
+    # Label of the sign-in button.
+    providerName: SSO
+
 # ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
-# Option A (default): leave existingSecret empty and fill in the values below.
-# The chart creates a Secret named "<release>". Not recommended when
-# values.yaml is committed to Git (credentials would be stored in plain text).
+# Option A (default): leave existingSecret empty. Values set below are rendered
+# into the Secret "<release>-values". Credentials left empty (the API key and
+# the bundled PostgreSQL password) are generated once at install time by the
+# "<release>-credentials-bootstrap-*" Job into the Secret "<release>", which is
+# not part of the Helm release: upgrades and Argo CD/Flux syncs never rotate
+# it, and `helm uninstall` keeps it alongside the PostgreSQL volume. Rendering
+# never uses lookup or random functions, so `helm template` output is stable.
+# Do not commit plain-text credentials to Git.
 #
-# Option B (recommended for production): create the Secret manually, then
-# set secrets.existingSecret to its name. The chart will skip Secret
-# creation and all other secrets.* values are ignored.
+# Option B (recommended for production and GitOps): create the Secret manually
+# (or with External Secrets / Sealed Secrets), then set secrets.existingSecret
+# to its name. The chart renders no Secret, runs no credentials Job, and all
+# other secrets.* values are ignored.
 #
 #   kubectl create secret generic greenkube-secrets -n greenkube \
 #     --from-literal=GREENKUBE_API_KEY="..." \
@@ -486,12 +913,37 @@ secrets:
   # Boavizta API Token (optional)
   boaviztaToken: ''
 
-  # API key for GreenKube API authentication. An empty key leaves development
-  # API routes open; production configuration requires a non-empty key.
+  # Deprecated bootstrap API key (GREENKUBE_API_KEY): a full-admin Bearer key
+  # (see auth.legacyApiKey) kept for one more minor release. Prefer scoped API
+  # keys created in Settings > API keys. Left empty, a key is generated once by
+  # the credentials bootstrap Job only for config.apiAuthMode=api_key; an
+  # existing generated key is kept on upgrade.
   apiKey: ''
 
-  # PostgreSQL connection string (only used when db.type is "postgres" and
-  # postgres.enabled is false — i.e. bringing your own PostgreSQL instance)
+  # Prometheus scrape token (GREENKUBE_METRICS_TOKEN): metrics:read only, sent by
+  # the ServiceMonitors to the API, controller and worker metrics endpoints.
+  # Left empty, it is generated once by the credentials bootstrap Job.
+  metricsToken: ''
+  # With secrets.existingSecret: true when that Secret holds a
+  # GREENKUBE_METRICS_TOKEN key. Otherwise the ServiceMonitors keep scraping
+  # with its GREENKUBE_API_KEY (deprecated).
+  existingSecretHasMetricsToken: false
+
+  # Key of the savings ledger hash chain (LEDGER_CHAIN_KEY): new ledger entries
+  # are chained with HMAC-SHA256 so that a database writer without the key
+  # cannot rewrite them and keep a valid chain. Left empty, it is generated once
+  # by the credentials bootstrap Job. Never rotate or lose it: entries chained
+  # with a key only verify with that key. With secrets.existingSecret, add a
+  # LEDGER_CHAIN_KEY key to that Secret to enable it.
+  ledgerChainKey: ''
+  # Verify-only previous chain keys (LEDGER_CHAIN_PREVIOUS_KEYS, comma-separated)
+  # for a deliberate rotation: entries chained with them keep verifying and the
+  # controller continues the chain with the new ledgerChainKey. Without them, a
+  # changed or lost key stops the ledger writer (nothing is appended).
+  ledgerChainPreviousKeys: ''
+
+  # PostgreSQL connection string, only used with postgres.enabled=false
+  # (bring your own PostgreSQL instance)
   # Example: "postgresql://user:password@host:port/dbname"
   dbConnectionString: ''
 
@@ -501,20 +953,8 @@ secrets:
     password: ''
     bearerToken: ''
 
-# Pod resource requests and limits
-# -- Collector/scheduler container resources
-# This container runs periodic data collection (Prometheus, OpenCost, K8s API)
-# and writes to the database. Memory usage is proportional to the number of
-# pods in the cluster. For clusters with >200 pods, consider increasing limits.
-resources:
-  limits:
-    cpu: 500m
-    memory: 512Mi
-  requests:
-    cpu: 100m
-    memory: 128Mi
-
-# Security and resource settings for Helm lifecycle hook Jobs.
+# Security and resource settings for the credentials bootstrap Job (the chart
+# renders no Helm hook; the name is kept for compatibility).
 hooks:
   resources:
     requests:
@@ -564,18 +1004,6 @@ tests:
       drop:
       - ALL
 
-# -- API container resources
-# This container serves the FastAPI REST API and the SPA frontend.
-# The API also materializes container-aware recommendation inputs during
-# refreshes; give the default lookback enough headroom for normal clusters.
-apiResources:
-  limits:
-    cpu: 250m
-    memory: 1Gi
-  requests:
-    cpu: 50m
-    memory: 128Mi
-
 # PostgreSQL configuration (custom statefulset)
 postgres:
   enabled: true
@@ -585,13 +1013,19 @@ postgres:
     # Remaining CVEs (libcrypto3 CVE-2026-28390, zlib CVE-2026-22184, gosu Go stdlib)
     # are upstream-only: not yet patched in Alpine 3.23.3 or gosu binary.
     # Tracked in .trivyignore; will auto-resolve on next Alpine package update.
-    tag: 18-alpine
+    # Tag pinned to the multi-arch index digest of postgres:18-alpine
+    # (2026-11-12): every node runs the same build and a re-pushed tag cannot
+    # change the database under a running release. Bump both together
+    # (Renovate understands "tag@digest"). Overriding the tag (e.g.
+    # "18-alpine") drops the pin; an explicit "digest" key pins any tag.
+    tag: 18-alpine@sha256:1018733457011bf88d81db98cf43aac6d5150afc18787dbe204771fedf80ff95
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
-    # Set a fixed password here to ensure stability across upgrades.
-    # If left empty, a random password is generated on first install and
-    # preserved automatically on subsequent upgrades via secret lookup.
+    # If left empty, a random password is generated once by the credentials
+    # bootstrap Job and kept in the Secret "<release>" across upgrades and
+    # GitOps syncs. Set it here (or use secrets.existingSecret) to manage it
+    # yourself.
     password: ''
     database: greenkube
   persistence:
@@ -609,11 +1043,66 @@ postgres:
     requests:
       cpu: 100m
       memory: 128Mi
+  # Memory-backed /dev/shm for parallel query workers (the container runtime
+  # default is 64Mi). Pages in use count against the memory limit above.
+  # '' keeps the runtime default.
+  shmSizeLimit: 128Mi
+  terminationGracePeriodSeconds: 60
+  # Scheduling (all optional): pin the database to nodes whose storage class
+  # the claim needs, keep it off spot nodes, give it a priority class.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ''
+  podAnnotations: {}
+  podLabels: {}
+  # Scheduled logical backup (docs/operations/backup-restore.md): a CronJob
+  # runs pg_dump of the GreenKube schema (custom format, checked with
+  # pg_restore --list) into its own PersistentVolumeClaim and keeps the last
+  # "keep" dumps. Works for the bundled and for an external PostgreSQL (it
+  # reads DB_CONNECTION_STRING). A dump on a volume of the same cluster does
+  # not survive the loss of the cluster: copy it off-site (the guide shows an
+  # object-store variant).
+  backup:
+    enabled: false
+    schedule: '17 3 * * *'
+    keep: 7
+    # Abort a dump that runs longer than this.
+    activeDeadlineSeconds: 3600
+    persistence:
+      # Claim of the dumps; '' creates <release>-postgres-backup.
+      existingClaim: ''
+      size: 20Gi
+      storageClassName: ''
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    priorityClassName: ''
+    podAnnotations: {}
+    podLabels: {}
+  # Ingress NetworkPolicy of the bundled PostgreSQL (security hardening): only
+  # the api, controller and worker of this release (and pods labelled
+  # greenkube.cloud/postgres-client: "true", e.g. a backup or copy Job) reach
+  # port 5432. Needs a CNI that enforces NetworkPolicy.
+  networkPolicy:
+    enabled: true
+    # Extra NetworkPolicy peers allowed to connect, e.g.
+    #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: dba}}
+    additionalIngress: []
 
 # Prometheus → GreenKube monitoring integration (optional).
 # This controls whether Prometheus scrapes GreenKube's own /prometheus/metrics endpoint.
 # This is NOT required for GreenKube to collect metrics FROM Prometheus — that works automatically.
-# Enable this only if you want GreenKube-computed metrics (CO₂e, cost, energy) in Grafana.
+# Enable it to alert on GreenKube itself (collection, loops, scans, measurement, ledger health) and to
+# chart the ledger savings counters (dashboards/greenkube-operations.json).
 # IMPORTANT: ServiceMonitor requires the Prometheus Operator CRDs to be installed
 # (e.g. via kube-prometheus-stack). If you don't have Prometheus Operator,
 # leave serviceMonitor.enabled=false to avoid installation errors.
@@ -624,6 +1113,39 @@ monitoring:
     enabled: false
     namespace: monitoring
     additionalLabels: {}
+    # Controller loop alerts (GreenKubeControllerLoopFailing, GreenKubeAutomationLoopStale,
+    # GreenKubeNoActiveController). They read the controller metrics endpoint, so they
+    # render only when the controller ServiceMonitor does (serviceMonitor.enabled and
+    # controller.metricsPort > 0).
+    controllerAlerts: true
+    # Loop health alerts (N7, group greenkube.loop, rendered with the controller
+    # loop alerts): GreenKubeCollectionLagging, GreenKubeRecommendationScanFailing,
+    # GreenKubeRecommendationSourceFailing, GreenKubeRecommendationScanStale,
+    # GreenKubeMeasurementStalled and GreenKubeLedgerChainVerificationFailed.
+    thresholds:
+      # Collection watermark behind now (leader only).
+      collectionLagSeconds: 1800
+      # Age of the last successful recommendation scan (scans run hourly).
+      recommendationScanStaleSeconds: 10800
+      # Age of the last successful recommendation-lifecycle tick (apply
+      # detection, verification and change measurement; runs every 5 minutes).
+      measurementStaleSeconds: 1800
+    # Operations alerts (group greenkube.operations): GreenKubeAPIDown (API
+    # ServiceMonitor), GreenKubeDatabaseUnavailable (controller ServiceMonitor:
+    # the controller heartbeat cannot be written), GreenKubeAPIUnavailable,
+    # GreenKubePostgresDown and GreenKubeBackupMissing (kube-state-metrics),
+    # GreenKubeDataVolumeLow and GreenKubeDataVolumeFillingUp (kubelet volume
+    # stats of the bundled PostgreSQL and backup claims).
+    operations:
+      enabled: true
+      # false when kube-state-metrics is not scraped (its alerts would never fire).
+      kubeStateMetrics: true
+      # Free-space ratio under which a data volume alerts.
+      volumeFreeRatio: 0.15
+      # Alert when the last 6 hours' growth fills a volume within this horizon.
+      volumeFullWithinHours: 96
+      # Age of the last successful backup (postgres.backup.enabled) that alerts.
+      backupMaxAgeHours: 36
 
   serviceMonitor:
     # Create a ServiceMonitor for Prometheus Operator to discover GreenKube metrics.
@@ -631,8 +1153,13 @@ monitoring:
     # Production worker mode also creates a dedicated worker ServiceMonitor.
     # Set to true only if kube-prometheus-stack (or similar) is installed.
     enabled: false
-    # Namespace where the ServiceMonitor will be created (must match Prometheus serviceMonitorNamespaceSelector).
-    namespace: monitoring
+    # Namespace of the ServiceMonitors. Empty (default): the release namespace,
+    # next to the scrape token Secret (Prometheus Operator reads a ServiceMonitor's
+    # bearer token Secret in the ServiceMonitor's own namespace). Prometheus must
+    # select it (serviceMonitorNamespaceSelector; kube-prometheus-stack selects all
+    # namespaces by default). Another namespace: the chart keeps a copy of the scrape
+    # token there, Secret <release>-scrape-token (see docs/prometheus-grafana.md).
+    namespace: ''
     # Scrape interval (e.g., "30s", "1m").
     interval: 30s
     # Scrape timeout.
@@ -641,6 +1168,19 @@ monitoring:
     additionalLabels: {}
     # Name of the Prometheus ServiceAccount (for RBAC). Defaults to "prometheus-k8s".
     prometheusServiceAccount: prometheus-k8s
+    # Namespace of that ServiceAccount, bound to the prometheus-k8s Role that lets
+    # Prometheus discover GreenKube's Services and Pods. Empty:
+    # monitoring.networkPolicy.prometheusNamespace (default "monitoring"). It is
+    # independent of the ServiceMonitor namespace.
+    prometheusNamespace: ''
+    # Bearer credential Prometheus sends to /prometheus/metrics. Recommended:
+    # create an API key with only the metrics:read scope (Settings > API keys),
+    # store it in a Secret in the ServiceMonitor namespace and reference it
+    # here. Empty: the scrape token GREENKUBE_METRICS_TOKEN (or, without one, the
+    # deprecated bootstrap key GREENKUBE_API_KEY) is used.
+    bearerTokenSecret:
+      name: ''
+      key: token
 
   networkPolicy:
     # Create a NetworkPolicy allowing Prometheus to scrape GreenKube on the API port.
@@ -651,3 +1191,39 @@ monitoring:
     # namespace-specific client. Entries use the Kubernetes NetworkPolicy
     # ingress schema and are appended to the Prometheus rule.
     additionalIngress: []
+
+# ---------------------------------------------------------------------------
+# Exposure (roadmap N6): optional Ingress or Gateway API HTTPRoute to the api
+# Service, which serves both the UI and the API from "/". The first host also
+# sets GREENKUBE_EXTERNAL_URL (pull-request deep links) unless
+# config.externalUrl is set. With monitoring.networkPolicy.enabled, allow the
+# ingress controller or gateway pods in monitoring.networkPolicy.additionalIngress.
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  # IngressClass name (e.g. nginx, traefik). Empty: the cluster default class.
+  className: ''
+  # Host names routed to GreenKube; the first one builds the external URL.
+  hosts: []
+  # Standard Ingress TLS entries, e.g.
+  #   - secretName: greenkube-tls
+  #     hosts: [greenkube.example.com]
+  # The external URL uses https when an entry covers the first host.
+  tls: []
+  annotations: {}
+  labels: {}
+
+httpRoute:
+  enabled: false
+  # Gateways to attach to (required), e.g.
+  #   - name: shared-gateway
+  #     namespace: gateway-system
+  #     sectionName: https
+  parentRefs: []
+  # Host names matched by the route; the first one builds the external URL.
+  hostnames: []
+  # Scheme of the external URL built from the first hostname: https when the
+  # Gateway listener terminates TLS, http otherwise.
+  scheme: https
+  annotations: {}
+  labels: {}

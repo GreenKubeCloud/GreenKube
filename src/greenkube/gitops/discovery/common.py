@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
@@ -16,8 +16,8 @@ from greenkube.gitops.contracts import (
     WorkloadSource,
     canonical_repository_identity,
 )
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 
-_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _ARTIFACT_SHA_PATTERN = re.compile(
     r"^(?:.*@sha1:([0-9a-fA-F]{40})|.*@sha256:([0-9a-fA-F]{64})|sha256:([0-9a-fA-F]{64}))$"
 )
@@ -93,7 +93,7 @@ def join_repo_path(base: str, relative: Any, *, allow_root: bool = False) -> str
 def immutable_revision(value: str | None) -> str | None:
     if value is None:
         return None
-    if _SHA_PATTERN.fullmatch(value):
+    if GIT_OBJECT_SHA.fullmatch(value):
         return value
     match = _ARTIFACT_SHA_PATTERN.fullmatch(value)
     if match is None:
@@ -222,3 +222,84 @@ def workload_source(
     if observed_at is not None:
         values["observed_at"] = observed_at
     return WorkloadSource(**values)
+
+
+# -- destination cluster (production readiness: delivery safety) ---------------------------
+#: Binding reason of a controller that deploys to another cluster than the local one.
+DESTINATION_REMOTE_REASON = "destination_remote"
+#: Argo CD's name of the cluster it runs in.
+ARGO_IN_CLUSTER_NAME = "in-cluster"
+#: Addresses of the local API server as Argo CD and kubeconfigs write them.
+_LOCAL_SERVERS = frozenset(
+    {
+        "https://kubernetes.default.svc",
+        "https://kubernetes.default.svc:443",
+        "https://kubernetes.default.svc.cluster.local",
+        "https://kubernetes.default.svc.cluster.local:443",
+        "https://kubernetes.default",
+        "https://kubernetes.default:443",
+    }
+)
+
+
+def normalize_server_url(value: str) -> str:
+    """A Kubernetes API server URL compared case-insensitively and without a trailing slash."""
+    return value.strip().rstrip("/").lower()
+
+
+def argo_destination_is_local(destination: Mapping[str, Any] | None, local_aliases: Iterable[str] = ()) -> bool:
+    """Whether an Argo CD ``spec.destination`` addresses the cluster GreenKube runs in.
+
+    ``server: https://kubernetes.default.svc`` and ``name: in-cluster`` are Argo CD's own
+    cluster; ``local_aliases`` adds the server URLs or cluster names under which this
+    cluster is registered in Argo CD (``GITOPS_LOCAL_CLUSTER_ALIASES``). A destination
+    with neither ``server`` nor ``name`` is invalid for Argo CD (it refuses to sync it);
+    it is treated as local so partial objects keep their usual binding checks.
+    """
+    destination = destination or {}
+    aliases = [alias.strip() for alias in local_aliases if isinstance(alias, str) and alias.strip()]
+    server = text(destination.get("server"))
+    if server is not None:
+        servers = _LOCAL_SERVERS | {normalize_server_url(alias) for alias in aliases if "://" in alias}
+        return normalize_server_url(server) in servers
+    name = text(destination.get("name"))
+    if name is not None:
+        return name == ARGO_IN_CLUSTER_NAME or name in {alias for alias in aliases if "://" not in alias}
+    return True
+
+
+def flux_targets_remote_cluster(spec: Mapping[str, Any] | None) -> bool:
+    """Whether a Flux Kustomization or HelmRelease applies to another cluster (``spec.kubeConfig``)."""
+    return (spec or {}).get("kubeConfig") is not None
+
+
+def destination_evidence(destination: Mapping[str, Any]) -> dict[str, Any]:
+    """The destination fields shown with a ``destination_remote`` binding (no credentials)."""
+    return {key: destination[key] for key in ("server", "name", "namespace") if text(destination.get(key)) is not None}
+
+
+def flux_destination_evidence(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """The remote target of a Flux object (the kubeconfig Secret name, never its content)."""
+    kube_config = as_mapping(spec.get("kubeConfig")) or {}
+    secret = as_mapping(kube_config.get("secretRef")) or {}
+    name = text(secret.get("name"))
+    return {"kube_config_secret": name} if name is not None else {"kube_config": "configured"}
+
+
+def mark_destination_remote(candidate: WorkloadSource, destination: Mapping[str, Any]) -> WorkloadSource:
+    """``candidate`` blocked because its controller deploys to another cluster: it never binds.
+
+    ``destination`` is the evidence shown with it (:func:`destination_evidence`,
+    :func:`flux_destination_evidence`).
+    """
+    evidence = dict(candidate.evidence)
+    evidence["destination"] = dict(destination)
+    evidence[DESTINATION_REMOTE_REASON] = True
+    return candidate.model_copy(
+        update={
+            "status": BindingStatus.BLOCKED,
+            "confidence": 0.1,
+            "reason": DESTINATION_REMOTE_REASON,
+            "evidence": evidence,
+        }
+    )

@@ -1,4 +1,13 @@
-"""CLI entry point for processing durable GitOps plan operations."""
+"""CLI entry point for the optional dedicated plan executor (roadmap F8).
+
+The worker only claims and executes queued plan operations; operation leases make
+it safe next to the controller's own executor and next to other worker replicas.
+It follows the same delivery gate as the controller's executor (F12): nothing is
+claimed while ``automation.policy.pauseDelivery`` is set or while the readiness
+reconciler does not report delivery as active.
+The webhook outbox, pull-request polling, branch cleanup, plan expiry and retention
+run in the controller's automation loop (:mod:`greenkube.automation.controller`).
+"""
 
 from __future__ import annotations
 
@@ -6,82 +15,64 @@ import asyncio
 import logging
 import os
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol, cast
 
 import typer
 
-from greenkube.automation.branch_cleanup_runtime import BranchCleanupRuntime
 from greenkube.automation.plan_runtime import PlanProvidersNotConfiguredError, create_plan_runtime
 from greenkube.automation.plan_worker import PlanWorker
-from greenkube.automation.pr_lifecycle_runtime import create_pull_request_lifecycle_reconciler
-from greenkube.automation.pr_polling_runtime import PollablePullRequestRepository, PullRequestPollingRuntime
+from greenkube.automation.supervision import backoff_delay, error_code
 from greenkube.cli.worker_metrics import EmbeddedMetricsServer, create_worker_metrics_server
 from greenkube.core.observability import (
     record_automation_failure,
     record_automation_worker_heartbeat,
     set_automation_worker_up,
 )
-from greenkube.storage.base_gitops_repository import PullRequestPollingLeaseRepository, WebhookDelivery
-from greenkube.storage.base_pull_request_repository import MAX_PULL_REQUEST_POLL_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(name="automation-worker", help="Process queued GreenKube GitOps plan operations.")
 WORKER_METRICS_PORT_ENV = "GREENKUBE_WORKER_METRICS_PORT"
-WORKER_HEARTBEAT_RETENTION_DAYS = 7
-WEBHOOK_OUTBOX_BATCH_SIZE = 10
-WEBHOOK_PROCESSING_LEASE_SECONDS = 300
-PENDING_PULL_REQUEST_RECOVERY_GRACE_SECONDS = 900
+WORKER_ITERATION_MAX_BACKOFF_SECONDS = 60.0
+#: A delivery capability row older than this is ignored (the controller stopped reporting).
+DELIVERY_GATE_STALE_AFTER = timedelta(minutes=5)
 
 
-class _WorkerMaintenanceRepository(Protocol):
-    async def prune_worker_heartbeats(self, *, cutoff: datetime) -> int: ...
+async def delivery_allowed(now: datetime | None = None) -> bool:
+    """True when queued operations may open pull requests; fails closed.
 
+    The same gate as the controller's executor: ``pauseDelivery`` is off and the
+    readiness reconciler's global ``delivery`` capability is active and fresh.
+    """
+    from greenkube.core.config import get_config
 
-class _PendingPullRequestRecoveryRepository(Protocol):
-    async def reconcile_open_pull_requests(self, *, stale_before: datetime, limit: int) -> int: ...
+    if get_config().automation_delivery_paused:
+        return False
+    try:
+        from greenkube.core.db import get_db_manager
+        from greenkube.storage.automation_capability_repository import (
+            SCOPE_GLOBAL,
+            AutomationCapabilityRepository,
+        )
 
-
-class _WebhookOutboxRepository(Protocol):
-    async def list_pending_webhook_deliveries(
-        self,
-        *,
-        limit: int,
-        stale_before: datetime,
-    ) -> list[WebhookDelivery]: ...
-
-    async def claim_webhook_delivery(
-        self,
-        provider_id: str,
-        delivery_id: str,
-        *,
-        stale_before: datetime,
-    ) -> bool: ...
-
-    async def update_webhook_delivery(
-        self,
-        provider_id: str,
-        delivery_id: str,
-        *,
-        status: str,
-        processed_at: datetime | None = None,
-        error_code: str | None = None,
-        expected_statuses: Sequence[str] | None = None,
-    ) -> WebhookDelivery | None: ...
+        rows = await AutomationCapabilityRepository(get_db_manager()).list_capabilities(SCOPE_GLOBAL)
+    except Exception as exc:
+        logger.warning("Delivery gate unreadable; no operation is claimed. error_type=%s", type(exc).__name__)
+        return False
+    row = next((row for row in rows if row.subject == "delivery"), None)
+    if row is None or row.state != "active" or row.updated_at is None:
+        return False
+    return (now or datetime.now(timezone.utc)) - row.updated_at <= DELIVERY_GATE_STALE_AFTER
 
 
 async def process_once(
     worker_id: str | None = None,
     *,
-    queue: str = "plans",
     plan_worker: PlanWorker | None = None,
 ) -> bool:
-    if queue != "plans":
-        raise ValueError("queue must be 'plans'; annotation-based operations are no longer supported.")
     if plan_worker is None:
         try:
-            plan_worker = (await create_plan_runtime()).worker
+            plan_worker = (await create_plan_runtime(allow_empty=True, reconcile_providers=False)).worker
         except PlanProvidersNotConfiguredError as exc:
             logger.warning("Plan queue is idle: %s", exc)
             return False
@@ -105,14 +96,12 @@ async def run_worker(
     poll_seconds: float = 5.0,
     once: bool = False,
     *,
-    queue: str = "plans",
     plan_worker: PlanWorker | None = None,
     metrics_port: int | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> None:
-    if queue != "plans":
-        raise ValueError("queue must be 'plans'; annotation-based operations are no longer supported.")
     if metrics_port is None:
-        await _run_worker_loop(poll_seconds=poll_seconds, once=once, plan_worker=plan_worker)
+        await _run_worker_loop(poll_seconds=poll_seconds, once=once, plan_worker=plan_worker, heartbeat=heartbeat)
         return
     if type(metrics_port) is not int or not 1 <= metrics_port <= 65_535:
         raise ValueError("metrics_port must be an integer between 1 and 65535.")
@@ -123,7 +112,7 @@ async def run_worker(
     try:
         await _wait_for_worker_metrics_server(metrics_server, metrics_task)
         worker_task = asyncio.create_task(
-            _run_worker_loop(poll_seconds=poll_seconds, once=once, plan_worker=plan_worker),
+            _run_worker_loop(poll_seconds=poll_seconds, once=once, plan_worker=plan_worker, heartbeat=heartbeat),
             name="automation-worker-loop",
         )
         done, _ = await asyncio.wait(
@@ -161,202 +150,97 @@ async def _run_worker_loop(
     once: bool = False,
     *,
     plan_worker: PlanWorker | None = None,
+    heartbeat: Callable[[], None] | None = None,
+    delivery_gate: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
+    beat = heartbeat or _no_heartbeat
+    gate = delivery_gate or delivery_allowed
     if plan_worker is None:
         try:
-            plan_worker = (await create_plan_runtime()).worker
+            plan_worker = (await create_plan_runtime(allow_empty=True, reconcile_providers=False)).worker
         except PlanProvidersNotConfiguredError as exc:
             logger.warning("Plan queue is idle: %s", exc)
             if once:
                 return
             while True:
+                beat()
                 await asyncio.sleep(poll_seconds)
     if plan_worker is None:
         return
 
     worker_id = str(uuid.uuid4())
-    worker_repository = getattr(plan_worker, "plans", None)
-    if worker_repository is not None:
-        await cast(_WorkerMaintenanceRepository, worker_repository).prune_worker_heartbeats(
-            cutoff=datetime.now(timezone.utc) - timedelta(days=WORKER_HEARTBEAT_RETENTION_DAYS)
-        )
-    pull_request_repository = getattr(plan_worker, "pull_request_repository", None)
-    if pull_request_repository is not None:
-        quarantined = await cast(
-            _PendingPullRequestRecoveryRepository,
-            pull_request_repository,
-        ).reconcile_open_pull_requests(
-            stale_before=datetime.now(timezone.utc) - timedelta(seconds=PENDING_PULL_REQUEST_RECOVERY_GRACE_SECONDS),
-            limit=MAX_PULL_REQUEST_POLL_BATCH_SIZE,
-        )
-        if quarantined:
-            logger.warning(
-                "Quarantined %d stale pending pull-request attempts without plan/provider/PR references.",
-                quarantined,
-            )
-
-    poller_task: asyncio.Task[None] | None = None
-    poller_stop_event = asyncio.Event()
-    if not once:
-        poller = _create_pr_polling_runtime(plan_worker)
-        poller_task = asyncio.create_task(
-            poller.run(poller_stop_event),
-            name="gitops-pr-polling",
-        )
-
-    set_automation_worker_up(True)
+    consecutive_failures = 0
+    gated: bool | None = None
     try:
         while True:
             record_automation_worker_heartbeat(datetime.now(timezone.utc).timestamp())
-            if poller_task is not None and poller_task.done():
-                await _ensure_pr_poller_running(poller_task)
-            webhook_processed = await _process_pending_webhook_deliveries(plan_worker)
-            processed = await process_once(worker_id=worker_id, plan_worker=plan_worker)
-            if poller_task is not None and poller_task.done():
-                await _ensure_pr_poller_running(poller_task)
+            beat()
+            # pauseDelivery and dormant delivery hold every queued operation (F12).
+            try:
+                allowed = bool(await gate())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Delivery gate failed; no operation is claimed. error_type=%s", type(exc).__name__)
+                allowed = False
+            if gated is None or gated is allowed:  # first iteration or the gate changed
+                gated = not allowed
+                set_automation_worker_up(allowed)
+                if gated:
+                    logger.info("Pull-request delivery is paused or dormant; queued operations wait.")
+            if not allowed:
+                if once:
+                    return
+                await asyncio.sleep(poll_seconds)
+                continue
+            try:
+                processed = await process_once(worker_id=worker_id, plan_worker=plan_worker)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if once:
+                    raise
+                # One failed iteration (database hiccup, provider outage, bug in one operation)
+                # must never end the queue loop (D9, BUG-51).
+                consecutive_failures += 1
+                delay = backoff_delay(
+                    consecutive_failures,
+                    initial=min(max(poll_seconds, 0.1), WORKER_ITERATION_MAX_BACKOFF_SECONDS),
+                    maximum=WORKER_ITERATION_MAX_BACKOFF_SECONDS,
+                )
+                logger.error(
+                    "Automation worker iteration failed; retrying in %.1fs. "
+                    "error_code=%s error_type=%s consecutive_failures=%d",
+                    delay,
+                    error_code(exc),
+                    type(exc).__name__,
+                    consecutive_failures,
+                )
+                record_automation_failure("worker")
+                await asyncio.sleep(delay)
+                continue
+            consecutive_failures = 0
             if once:
-                await _create_branch_cleanup_runtime(plan_worker).cleanup_once()
                 return
-            if not processed and not webhook_processed:
-                if poller_task is None:
-                    await asyncio.sleep(poll_seconds)
-                else:
-                    try:
-                        await asyncio.wait_for(asyncio.shield(poller_task), timeout=poll_seconds)
-                    except TimeoutError:
-                        pass
-                    else:
-                        await _ensure_pr_poller_running(poller_task)
+            if not processed:
+                await asyncio.sleep(poll_seconds)
     finally:
         set_automation_worker_up(False)
-        if poller_task is not None:
-            poller_stop_event.set()
-            poller_task.cancel()
-            poller_result = (await asyncio.gather(poller_task, return_exceptions=True))[0]
-            if isinstance(poller_result, Exception):
-                raise poller_result
 
 
-async def _ensure_pr_poller_running(poller_task: asyncio.Task[None]) -> None:
-    await poller_task
-    raise RuntimeError("Git provider pull-request polling runtime stopped unexpectedly.")
-
-
-def _create_pr_polling_runtime(plan_worker: PlanWorker) -> PullRequestPollingRuntime:
-    return PullRequestPollingRuntime(
-        cast(PollablePullRequestRepository, plan_worker.pull_request_repository),
-        create_pull_request_lifecycle_reconciler(plan_worker),
-        cast(PullRequestPollingLeaseRepository, plan_worker.plans),
-        branch_cleanup=_create_branch_cleanup_runtime(plan_worker),
-    )
-
-
-def _create_branch_cleanup_runtime(plan_worker: PlanWorker) -> BranchCleanupRuntime:
-    return BranchCleanupRuntime(
-        pull_request_repository=cast(Any, plan_worker.pull_request_repository),
-        plan_repository=cast(Any, plan_worker.plans),
-        operation_repository=cast(Any, plan_worker.operations),
-        provider_resolver=plan_worker.provider_resolver,
-    )
-
-
-async def _process_pending_webhook_deliveries(plan_worker: PlanWorker) -> bool:
-    raw_repository = getattr(plan_worker, "plans", None)
-    if raw_repository is None:
-        return False
-    repository = cast(_WebhookOutboxRepository, raw_repository)
-
-    now = datetime.now(timezone.utc)
-    stale_before = now - timedelta(seconds=WEBHOOK_PROCESSING_LEASE_SECONDS)
-    deliveries = await repository.list_pending_webhook_deliveries(
-        limit=WEBHOOK_OUTBOX_BATCH_SIZE,
-        stale_before=stale_before,
-    )
-    if not deliveries:
-        return False
-
-    reconciler = create_pull_request_lifecycle_reconciler(plan_worker)
-    worked = False
-    for delivery in deliveries:
-        event = delivery.event
-        if event is None:
-            provider_id = delivery.provider_id
-            delivery_id = delivery.delivery_id
-            if not isinstance(provider_id, str) or not isinstance(delivery_id, str):
-                logger.error("Webhook outbox row %s has no valid provider or delivery ID.", delivery.id)
-                record_automation_failure("webhook")
-                continue
-            if not await repository.claim_webhook_delivery(provider_id, delivery_id, stale_before=stale_before):
-                continue
-            worked = True
-            await repository.update_webhook_delivery(
-                provider_id,
-                delivery_id,
-                status="rejected",
-                processed_at=now,
-                error_code="invalid_persisted_event",
-                expected_statuses=("processing",),
-            )
-            continue
-        if not await repository.claim_webhook_delivery(
-            event.provider_id,
-            event.delivery_id,
-            stale_before=stale_before,
-        ):
-            continue
-        worked = True
-        try:
-            result = await reconciler.reconcile(event, newly_deduplicated=True)
-        except Exception as error:
-            await repository.update_webhook_delivery(
-                event.provider_id,
-                event.delivery_id,
-                status="retryable",
-                error_code="lifecycle_reconcile_failed",
-                expected_statuses=("processing",),
-            )
-            logger.warning(
-                "Webhook outbox reconciliation failed for delivery %s (%s).",
-                event.delivery_id,
-                type(error).__name__,
-            )
-            record_automation_failure("webhook")
-            continue
-
-        outcome = getattr(getattr(result, "outcome", None), "value", None)
-        if outcome == "unlinked":
-            status, error_code = "retryable", "pull_request_unlinked"
-        elif outcome == "mismatched":
-            status, error_code = "rejected", "pull_request_mismatched"
-        elif isinstance(outcome, str):
-            status, error_code = "processed", None
-        else:
-            status, error_code = "retryable", "invalid_lifecycle_outcome"
-        await repository.update_webhook_delivery(
-            event.provider_id,
-            event.delivery_id,
-            status=status,
-            processed_at=now if status in {"processed", "rejected"} else None,
-            error_code=error_code,
-            expected_statuses=("processing",),
-        )
-    return worked
+def _no_heartbeat() -> None:
+    return None
 
 
 @app.command()
 def worker(
     once: bool = typer.Option(False, "--once", help="Process at most one plan operation."),
     poll_seconds: float = typer.Option(5.0, min=0.1, help="Delay when the queue is empty."),
-    queue: str = typer.Option("plans", "--queue", help="The supported queue is 'plans'."),
+    queue: str = typer.Option("plans", "--queue", hidden=True, help="Deprecated; 'plans' is the only queue."),
 ):
-    asyncio.run(
-        run_worker(
-            poll_seconds=poll_seconds,
-            once=once,
-            queue=queue,
-            metrics_port=parse_worker_metrics_port(),
-        )
-    )
+    if queue != "plans":
+        raise typer.BadParameter("the only queue is 'plans'.", param_hint="--queue")
+    asyncio.run(run_worker(poll_seconds=poll_seconds, once=once, metrics_port=parse_worker_metrics_port()))
 
 
 if __name__ == "__main__":

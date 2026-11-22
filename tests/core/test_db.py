@@ -46,3 +46,32 @@ async def test_unit_of_work_commits_and_rolls_back(tmp_path):
     values = [row[0] for row in connection.execute("SELECT value FROM values_table")]
     connection.close()
     assert values == ["committed"]
+
+
+@pytest.mark.asyncio
+async def test_use_after_close_raises_instead_of_reopening(tmp_path):
+    """Roadmap A.9: a closed manager never reopens a connection on first use."""
+    from greenkube.core.config import Config
+    from greenkube.core.exceptions import DatabaseClosedError
+
+    manager = DatabaseManager(Config(DB_TYPE="sqlite", DB_PATH=str(tmp_path / "closed.db")))
+    await manager.connect()
+    await manager.close()
+
+    with pytest.raises(DatabaseClosedError):
+        async with manager.connection_scope():
+            pass
+    with pytest.raises(DatabaseClosedError):
+        async with manager.transaction():
+            pass
+    with pytest.raises(DatabaseClosedError):
+        await manager.schema_status()
+    assert manager.connection is None
+
+    # An explicit connect or setup opens it again.
+    await manager.connect()
+    async with manager.connection_scope() as connection:
+        async with connection.execute("SELECT 1") as cursor:
+            row = await cursor.fetchone()
+            assert row is not None and row[0] == 1
+    await manager.close()

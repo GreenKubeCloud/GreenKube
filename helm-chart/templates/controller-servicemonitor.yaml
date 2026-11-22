@@ -1,0 +1,36 @@
+{{- if and .Values.monitoring.serviceMonitor.enabled (gt (int (include "greenkube.controllerMetricsPort" .)) 0) }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "greenkube.fullname" . }}-controller
+  namespace: {{ include "greenkube.serviceMonitorNamespace" . }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: kube-prometheus
+    {{- with .Values.monitoring.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller-metrics
+  endpoints:
+    - port: ctrl-metrics
+      path: /prometheus/metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
+      # The controller never receives the admin API key (least privilege). With a
+      # scrape token (GREENKUBE_METRICS_TOKEN) its endpoint requires it; without one it
+      # serves only bounded operational counters on the pod network (enable
+      # monitoring.networkPolicy to restrict it to Prometheus).
+      {{- if include "greenkube.dedicatedScrapeToken" . }}
+      authorization:
+        type: Bearer
+        credentials:
+          {{- include "greenkube.scrapeCredentials" . | nindent 10 }}
+      {{- end }}
+{{- end }}

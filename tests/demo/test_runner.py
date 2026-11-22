@@ -62,6 +62,21 @@ class TestConfigureDemoEnvironment:
         assert os.environ["API_HOST"] == "0.0.0.0"
 
 
+def test_demo_environment_sets_demo_mode(monkeypatch):
+    """The demo flags itself so the UI can replace automation diagnostics with one demo notice."""
+    from greenkube.core.config import get_config
+
+    # setenv first so monkeypatch restores the variable the runner overwrites.
+    monkeypatch.setenv("GREENKUBE_DEMO_MODE", "false")
+    try:
+        _configure_demo_environment("/tmp/test.db", port=9000)
+        assert os.environ["GREENKUBE_DEMO_MODE"] == "true"
+        assert get_config().GREENKUBE_DEMO_MODE is True
+    finally:
+        os.environ["GREENKUBE_DEMO_MODE"] = "false"
+        get_config().reload()
+
+
 class TestPopulateDatabase:
     """Tests for _populate_database."""
 
@@ -105,7 +120,6 @@ class TestPopulateDatabase:
 
         mock_savings_repo = AsyncMock()
         mock_savings_repo.save_records = AsyncMock(side_effect=lambda records: len(records))
-        mock_savings_repo.compress_to_hourly = AsyncMock(return_value=12)
 
         mock_db_manager = AsyncMock()
         mock_db_manager.connect = AsyncMock()
@@ -125,6 +139,7 @@ class TestPopulateDatabase:
             patch("greenkube.core.db.db_manager", mock_db_manager),
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
+            patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
         ):
             counts = await _populate_database(days=2)
 
@@ -133,7 +148,6 @@ class TestPopulateDatabase:
         assert "combined_metrics" in counts
         assert "recommendations" in counts
         assert "savings_ledger" in counts
-        assert "savings_ledger_hourly" in counts
         assert "hourly_compressed" in counts
         assert "timeseries_cache_rows" in counts
 
@@ -177,7 +191,6 @@ class TestPopulateDatabase:
 
         mock_savings_repo = AsyncMock()
         mock_savings_repo.save_records = AsyncMock(side_effect=lambda records: len(records))
-        mock_savings_repo.compress_to_hourly = AsyncMock(return_value=12)
 
         mock_db_manager = AsyncMock()
         mock_db_manager.connect = AsyncMock()
@@ -197,6 +210,7 @@ class TestPopulateDatabase:
             patch("greenkube.core.db.db_manager", mock_db_manager),
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
+            patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
         ):
             counts = await _populate_database(days=2)
 
@@ -243,7 +257,6 @@ class TestPopulateDatabase:
 
         mock_savings_repo = AsyncMock()
         mock_savings_repo.save_records = AsyncMock(side_effect=lambda records: len(records))
-        mock_savings_repo.compress_to_hourly = AsyncMock(return_value=12)
 
         mock_db_manager = AsyncMock()
         mock_db_manager.connect = AsyncMock()
@@ -263,6 +276,7 @@ class TestPopulateDatabase:
             patch("greenkube.core.db.db_manager", mock_db_manager),
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
+            patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
         ):
             counts = await _populate_database(days=2)
 
@@ -312,7 +326,6 @@ class TestPopulateDatabase:
 
         mock_savings_repo = AsyncMock()
         mock_savings_repo.save_records = AsyncMock(side_effect=lambda records: len(records))
-        mock_savings_repo.compress_to_hourly = AsyncMock(return_value=24)
 
         mock_db_manager = AsyncMock()
         mock_db_manager.connect = AsyncMock()
@@ -332,9 +345,10 @@ class TestPopulateDatabase:
             patch("greenkube.core.db.db_manager", mock_db_manager),
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
+            patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
         ):
             counts = await _populate_database(days=2)
 
         assert counts["savings_ledger"] > 0
-        assert counts["savings_ledger_hourly"] == 24
+        assert "savings_ledger_hourly" not in counts  # the ledger is never compressed (C0.6)
         assert mock_savings_repo.save_records.await_count > 0

@@ -2,7 +2,83 @@
 
 GreenKube can turn eligible CPU and memory rightsizing recommendations into reviewed Git pull requests. The workflow is deliberately conservative: GreenKube discovers the workload's Git owner, renders the change in isolation, requires an exact-digest approval, opens one atomic multi-file PR, and only records the recommendation as applied after the GitOps controller has synced the merged revision and the live workload matches the plan.
 
-Automation is disabled by default. Everything below applies only after `automation.enabled=true`.
+Automation is always on: there is no feature flag. Each capability activates itself when its prerequisites
+appear and stays dormant, with a reason, when they are missing (see [Capability activation](#capability-activation)).
+`automation.policy.pauseDelivery: true` is the only off switch.
+
+## Capability activation
+
+The controller's `automation-readiness` loop reconciles every 60 seconds:
+
+| Capability | Active when | Otherwise |
+|---|---|---|
+| Discover | Argo CD or Flux CRDs are present (re-probed every discovery interval) | Dormant (`no_gitops_controller`) |
+| Preview | A discovered repository on a known provider host, allowlisted, with credentials and a resolved binding | Dormant with the blocker (`provider_unknown`, `not_allowlisted`, `credentials_missing`, `binding_unresolved`) |
+| Deliver | Preview + `pauseDelivery: false`. The capability details name the [delivery mode](#delivery-modes) and whether it needs write credentials (`direct` only) | Dormant (`delivery_paused`, or the preview blocker) |
+| Sync tracking | A provider has credentials (PR polling) or webhooks are configured | Dormant; changes are still detected from the live state and measured |
+| Webhooks | A provider webhook Secret is configured | Polling only |
+| Renderer | The isolated renderer answers (warning `renderer_egress_unenforced` when its egress policy is not enforced) | Helm/Kustomize previews blocked |
+
+The result is stored in `automation_capabilities`, exported as `greenkube_capability_active{capability}`, and shown
+by `GET /api/v1/setup/status` (the setup checklist). The plan executor runs only while delivery is active; the
+webhook outbox and PR polling only while tracking is active. Creating or deleting the credentials Secret switches
+them within 60 seconds, with no restart: GreenKube reads that one Secret through the Kubernetes API (`get` and a
+`watch` selected by `metadata.name`, granted by a Role limited to its `resourceName`; Secrets are never listed), so
+the next reconciler tick sees it without waiting for the kubelet to refresh the optional projected volume. When the
+API cannot be read (for example a chart older than this Role), the mounted volume remains the fallback (one to two
+minutes). Values are kept in memory only and never logged.
+
+### Provider inference
+
+For every repository host referenced by a discovered source that no explicit `automation.providers` entry
+serves, the reconciler infers a provider named `inferred-<host>`:
+
+- `github.com` is GitHub and `gitlab.com` is GitLab;
+- a self-hosted host is probed at `<scheme>://<host>/api/v4/version` (GitLab answers, `401` without a token) and
+  `/api/v1/version` (Gitea); a success is cached, a failure retried after 10 minutes. The probe is an
+  unauthenticated GET from the controller to a host a discovered source names: it carries no credential and
+  follows no redirect; restrict the controller egress to your Git hosts if outbound requests matter to you.
+  Only `https://` hosts are probed, never a literal loopback, link-local (cloud metadata), multicast or
+  unspecified address: a plain-HTTP self-hosted Gitea or GitLab is declared in `automation.providers`;
+- an unidentified host stays dormant with `provider_unknown`: declare it explicitly.
+
+Inferred providers read the Secret `automation.credentialsSecret` (default `greenkube-git-credentials`), key
+`token`, or keys `appId` + `privateKey` for a [GitHub App](#github-app). One credential belongs to one Git host, and
+the reconciler binds it to at most one inferred provider:
+
+- the host named by the Secret's optional `host` key (or `apiBaseUrl`, reduced to its host);
+- without that key, `github.com` or `gitlab.com` when it is the only inferred host.
+
+Every other inferred provider keeps no Secret reference and stays disabled, with `credentials_host_mismatch` (the
+key names another host) or `credentials_host_ambiguous` (no key, and several hosts or a self-hosted one). GitHub App
+credentials follow the same rules and are only ever bound to a host inferred as GitHub (otherwise
+`github_app_host_unsupported`). The token
+is therefore never sent to a host it was not issued for, even when someone who can create an Argo CD Application or
+a Flux GitRepository points it at a server they control. The bound provider is enabled only while `token` is
+present. With GitHub App credentials, the repositories the App is installed on are the inferred GitHub
+provider's allowlist (see [GitHub App](#github-app)). `GET /api/v1/automation/repositories/suggestions` lists
+the discovered repositories with their inferred provider type, API URL and allowlist state.
+
+### Repository allowlist
+
+`automation.repositoryAllowlist` defaults to `["@discovered"]`: every repository referenced by a discovered Argo CD
+or Flux source. An explicit list of `owner/repo` names or segment globs narrows it. An administrator can allow more
+repositories from the suggestions (`POST /api/v1/automation/repositories/allowlist`, `admin` scope, `{"repo_urls":
+[...]}`); they are stored in the database and applied within a minute, and the response returns the equivalent
+values snippet for installs whose values are managed in Git.
+
+### Pause delivery
+
+```yaml
+automation:
+  policy:
+    pauseDelivery: true
+```
+
+For change freezes and incident response: plan approval returns `409 delivery_paused`, queued operations wait (in
+the controller and in dedicated `worker` replicas, which claim nothing while delivery is paused or dormant), and
+discovery, previews, PR tracking and measurement keep running. Recommendations show the `automation_disabled`
+blocker until it is set back to `false`.
 
 ## How it works
 
@@ -32,21 +108,20 @@ Components:
 | Discovery runtime | Reads Argo CD/Flux resources and live workloads, then persists generation-bound workload bindings. |
 | Renderer sandbox | Renders Helm/Kustomize plans from a bounded repository snapshot without database or provider credentials. |
 | Plan service | Resolves recommendation IDs to server-side actions, validates the source and rendered diff, and stores an expiring preview. |
-| Plan worker | Executes approved operations, creates commits and PRs, polls linked PRs, and reconciles terminal states. Runs inline in `standalone` or as a dedicated Deployment in `production`. |
-| Controller runtime | Observes the exact Argo CD/Flux revision and readiness after merge, then gates apply detection and verification. |
+| Plan executor | Executes approved operations, creates commits and PRs. Runs in the controller (`plan-executor` loop, active while delivery is) and, with `worker.replicas`, also in dedicated worker pods. |
+| Readiness reconciler | Runs in the controller (`automation-readiness` loop): provider inference, credentials, allowlist, capability states. |
+| Automation controller loop | Runs in the controller, under one database lease: webhook outbox, PR polling, branch cleanup, plan expiry and retention. |
+| Controller runtime | Observes the Argo CD/Flux revision and readiness after merge (the landed commit or a descendant of it), then gates apply detection and verification. |
 | Webhook endpoint | Accepts signed GitHub/Gitea/GitLab delivery events. Polling remains the recovery path. |
 
 ## Prerequisites
 
 - Kubernetes cluster with GreenKube installed and healthy.
 - Argo CD and/or Flux controllers installed if you want discovery-driven plans. GreenKube only plans workloads it can bind to a supported Git source.
-- A CNI that enforces NetworkPolicy. The renderer sandbox relies on an egress-deny policy. If your CNI does not enforce NetworkPolicy:
-  - keep automation disabled, or
-  - set `rendererSandbox.egressFirewall.enabled=true` on clusters that permit `NET_ADMIN` and validate the resulting boundary, or
-  - leave rendering disabled and validate plans only through the API without applying them.
+- A CNI that enforces NetworkPolicy, for Kustomize and Helm sources. The renderer relies on an egress-deny policy and checks it with a canary at startup and daily. If it is not enforced, previews still work and the setup checklist reports `renderer_egress_unenforced`; set `renderer.egressFirewall.enabled=true` on clusters that permit `NET_ADMIN`, or use an enforcing CNI. Raw-manifest repositories never call the renderer.
+- `renderer.egressFirewall.privilegedInitContainer` grants `NET_ADMIN` to a short-lived init container. Leave it disabled in production and enable it only after reviewing the cluster security model and validating the resulting egress boundary.
 - Metrics Server or another source of per-container CPU/memory for evidence, apply detection, and verification.
-- A GitHub, GitLab, or Gitea repository containing the workload manifests, plus a token with read/write repository and pull-request permissions.
-- A repository allowlist. An empty allowlist denies every repository.
+- A GitHub, GitLab, or Gitea repository containing the workload manifests, plus credentials in the Secret `greenkube-git-credentials`: a token (key `token`) or a [GitHub App](#github-app) (`appId` + `privateKey`). The `direct` [delivery mode](#delivery-modes) needs read/write repository and pull-request permissions; `patch` and `ci` need read access only.
 
 GreenKube needs read access to the GitOps APIs it discovers:
 
@@ -56,21 +131,23 @@ GreenKube needs read access to the GitOps APIs it discovers:
 
 The chart grants the corresponding read-only RBAC by default.
 
+The **Automation & GitOps** page shows one card per controller: Argo CD and Flux. Each card reports `Detected` (every resource kind is readable), `Not detected` (no CRD found), `Degraded` (only some kinds are readable; the card names the missing ones, and workloads reconciled through them cannot be bound) or `Unknown` (the status could not be read). The Flux card lists its reconcilers (Kustomizations, HelmReleases) and sources (GitRepositories, OCIRepositories, HelmRepositories, Buckets) with the status of each.
+
 ## Configure a provider
 
-Create the token Secret in the Helm release namespace. Do not put the token in `values.yaml`:
+Most installations need no provider configuration: create the default Secret in the release namespace (never
+put the token in `values.yaml`) and the provider is inferred from the repository host:
 
 ```bash
-kubectl -n greenkube create secret generic greenkube-git \
-  --from-file=github-token=./github-token
+kubectl -n greenkube create secret generic greenkube-git-credentials --from-file=token=./git-token \
+  --from-literal=host=github.com
 ```
 
-Configure one or more providers:
+Declare providers explicitly for several credentials, a self-hosted URL that cannot be probed, or a separate
+Secret. Explicit providers win over inference for their host:
 
 ```yaml
 automation:
-  enabled: true
-  mode: worker          # default for profile=production; use inline for standalone
   providers:
     - id: github-main
       type: github      # github | gitlab | gitea
@@ -85,13 +162,207 @@ automation:
 Rules:
 
 - Provider `id` values must be unique.
-- `repositoryAllowlist` is mandatory and uses segment-aware globs. `acme/*` matches `acme/repo`, not `acme/team/repo`.
-- The Secret must be in the release namespace. Only the selected key is projected read-only into API/worker pods.
+- `repositoryAllowlist` uses segment-aware globs (`acme/*` matches `acme/repo`, not `acme/team/repo`). Without it, the provider uses `automation.repositoryAllowlist`; `@discovered` adds the discovered repositories of the provider's host.
+- The Secret must be in the release namespace. Only the selected key is projected read-only into the api, controller and worker pods.
 - Provider credentials are never rendered into a ConfigMap and are never returned by the API.
 - For GitLab, `apiBaseUrl` can point at a self-managed instance. For Gitea, point it at the Gitea API root (for example `https://gitea.example.com/api/v1`).
-- `pullRequests.draft`, `labels`, `reviewers`, and `teamReviewers` are preflighted against provider capabilities. Unsupported options fail the operation instead of being silently dropped.
+- Set `webBaseUrl` when GreenKube must reach Gitea through an in-cluster API URL but users open pull requests through a different browser-reachable URL. It must be an HTTP(S) origin (no repository path or `/api/v1`); it is used only for pull-request links.
+- `pullRequests.draft`, `labels`, `reviewers`, and `teamReviewers` are preflighted against provider capabilities. Unsupported options fail the operation instead of being silently dropped. Derived labels, drafts and CODEOWNERS reviewers are best effort (see [Pull-request content](#pull-request-content)).
 
-### Signed webhooks (optional)
+## GitHub App
+
+A GitHub App is the recommended credential for GitHub: no personal account, a bot identity on commits and pull
+requests, per-installation rate limits, and tokens that expire after an hour. GreenKube needs no hosted service.
+
+1. Create the App in your organization from the manifest
+   [`docs/examples/github-app-manifest.json`](examples/github-app-manifest.json) (GitHub > Settings > Developer
+   settings > GitHub Apps > New GitHub App, or `POST /settings/apps/new` with the manifest). It requests only
+   **Contents: read and write**, **Pull requests: read and write**, **Commit statuses: read and write** and
+   **Metadata: read**; with the `patch` or `ci` [delivery mode](#delivery-modes), set Contents and Pull requests to
+   read-only.
+2. Install it on the GitOps repositories. The installation's repository selection ("All repositories" or "Only
+   select repositories") is the allowlist of the inferred GitHub provider: the readiness reconciler lists it every
+   5 minutes (`GET /app/installations`, then `GET /installation/repositories` with a short-lived installation
+   token) and allows exactly those repositories. With the default `["@discovered"]`, every selected repository is
+   allowed; explicit `automation.repositoryAllowlist` patterns narrow the selection, and repositories an
+   administrator allowed from the UI (`POST /api/v1/automation/repositories`) stay allowed when they are in the
+   selection. A discovered repository the App is not installed on stays dormant with `github_app_not_installed`. If the selection cannot be read, the last
+   known one is kept (before the first read, the discovered repositories apply; installation tokens still fail
+   closed for repositories the App cannot reach).
+3. Put its id and private key in the default Secret:
+
+```bash
+kubectl -n greenkube create secret generic greenkube-git-credentials \
+  --from-literal=appId=123456 \
+  --from-file=privateKey=./greenkube.private-key.pem \
+  --from-literal=host=github.com
+```
+
+For each repository GreenKube signs a 9-minute JSON Web Token with the private key, discovers the installation that
+covers the repository (`GET /repos/{owner}/{repo}/installation`, so one App installed in several organizations needs
+no installation id), and requests an installation token scoped to that single repository. Tokens are cached in the
+process until five minutes before they expire. Commits and pull requests are authored by the App's bot
+(`<app-slug>[bot]`). Commits are created without an explicit author or committer, which is what GitHub requires to
+sign an App's API commits: they show as **Verified** in the pull request (the commit result records GitHub's
+`verification.verified` and `reason`). This satisfies branch protection rules that require signed commits. The private key, the JSON Web Token and installation tokens are never logged, returned by the API
+or put in a ConfigMap. An explicit provider authenticates as a GitHub App when its `secretKey` is `privateKey`; the
+App id is read from the `appId` key of the same Secret (both keys are projected):
+
+```yaml
+automation:
+  providers:
+    - id: github-app
+      type: github
+      apiBaseUrl: https://github.example.com/api/v3   # GitHub Enterprise Server; omit for github.com
+      secretName: greenkube-github-app
+      secretKey: privateKey
+```
+
+### Signed commits on GitLab and Gitea
+
+GitLab and Gitea create GreenKube's commits server-side through their REST APIs (GitLab Commits API, Gitea
+contents API), which accept no client signature: a signing key held by GreenKube could only be used by pushing
+commits over the Git protocol, which GreenKube deliberately does not do (no clone, no Git binary in the image). Use
+the platform's own signing instead: GitLab signs commits created through the web and API with its instance key where
+web commit signing is available, and Gitea signs API commits with the instance key when `[repository.signing]`
+sets `CRUD_ACTIONS`. A branch rule requiring signed commits is then satisfied without a key in the cluster.
+
+### GitLab project and group access tokens
+
+For GitLab, prefer a [project access token](https://docs.gitlab.com/user/project/settings/project_access_tokens/)
+(one repository) or a group access token (every project of a group) over a personal token:
+
+| Delivery mode | Role | Scopes |
+|---|---|---|
+| `direct` | Developer (Maintainer when the target branch is protected against Developer merges) | `api` (merge requests, branches, commits, statuses) |
+| `patch`, `ci` | Reporter | `read_api`, `read_repository` |
+
+Give the token an expiry date and rotate it by updating the Secret (`kubectl -n greenkube create secret generic
+greenkube-git-credentials --from-literal=token=... --from-literal=host=gitlab.example.com --dry-run=client -o yaml |
+kubectl apply -f -`); it is picked up within one to two minutes. For Gitea, create an access token with the
+`write:repository` scope (`read:repository` for `patch` and `ci`).
+
+## Delivery modes
+
+`automation.delivery.mode` decides who opens the pull request of an approved plan. The mode is recorded on each plan
+when it is approved, so a later change of the setting never re-routes an approval.
+
+| Mode | What happens | Credentials in the cluster |
+|---|---|---|
+| `direct` (default) | GreenKube commits on the deterministic plan branch `greenkube/plan/<hash>` and opens the PR. | Read and write |
+| `patch` | Approval queues nothing. The approved plan downloads as a `git format-patch` (`GET /api/v1/automation/plans/{id}/patch`, or **Download the patch** in the plan dialog); `greenkube plan apply-patch <id>` applies it on the plan branch. You push and open the PR. | Read only |
+| `ci` | Approval queues nothing. A CI job lists `GET /api/v1/automation/plans?status=approved&delivery=ci`, applies each patch with the CI's own token, opens the PR and reports it (`POST /api/v1/automation/plans/{id}/delivery`). | Read only |
+
+All three modes then follow the same lifecycle: `pr_open` → `merged` → `synced` → `applied`, tracked by PR polling or
+webhooks, then the controller sync and apply detection. The controller also links, at the PR poll interval, a pull
+request opened from the plan branch without any report. An approved `patch` or `ci` plan waits for its pull request
+up to 7 days after the preview TTL, then becomes `stale` (cancel it earlier to preview the workload again). GreenKube
+never deletes the branch of an externally delivered plan. If recording a verified report fails midway (for example a
+database error), the report answers `503 delivery_not_recorded` and the plan returns to `approved`; retry the report.
+Should the plan stay `applying`, the next report, or the controller after 5 idle minutes, resumes the recording.
+
+**Patch.** With `GREENKUBE_API_URL` and a `GREENKUBE_API_KEY` (`read` scope; never passed on the command line):
+
+```bash
+cd my-gitops-repo
+greenkube plan apply-patch pln-0123abcd --push   # branch greenkube/plan/<hash> on the plan's base revision
+# open the PR from that branch; GreenKube links it by the branch name
+greenkube plan report-delivery pln-0123abcd --pr-url https://github.com/acme/gitops/pull/42   # optional link-back
+```
+
+`apply-patch` refuses a dirty working tree or an existing branch, creates the branch on the plan's base revision and
+runs `git am --3way`; the commit keeps the `GreenKube-Plan: <plan id>` trailer. A pull request opened from another
+branch is linked automatically too: at the PR poll interval the controller lists the open pull requests targeting
+the base branch of each approved `patch` plan (50 most recent per repository and branch), reads their descriptions
+and, for at most 10 requests per pass, their commit messages, and records a request whose description or commits
+carry the `GreenKube-Plan` trailer (or whose description carries the GreenKube footer) through the same
+verification as a report. The verification accepts the trailer in the description or in any commit message of the
+request (first page of its commits), so a request whose only link is the commit trailer kept by `git am` is linked
+too. A request that does not verify is not retried until its head changes. The link-back (the
+**I opened PR** field of the plan dialog, or `report-delivery`) works for any request. The patch is served only when the stored diff
+reproduces the original file blobs exactly; otherwise the API answers `409 patch_unavailable`.
+
+**CI.** Create an API key with only `read` and `plans:deliver`. The example GitHub Actions workflow
+[`docs/examples/github-actions-greenkube-delivery.yaml`](examples/github-actions-greenkube-delivery.yaml) polls the
+approved plans, applies each patch on its plan branch, opens the PR with the workflow's `GITHUB_TOKEN` and reports
+`{pr_url, head_sha}`. The same calls work from GitLab CI.
+
+**Verification.** A delivery report is accepted only when the provider (read access) confirms it: the request
+belongs to the plan's repository (its URL is the one the provider returns), targets the plan's base branch, comes from
+the plan branch (in `patch` mode, or carries the trailer), is open or merged, has `head_sha` as its head, and that head
+holds exactly the planned file changes compared with the plan's base revision (or with the request's base commit when
+the planned files are unchanged there). Otherwise the API answers `409 delivery_not_verified` with the reason and
+the plan stays approved. The pre-apply workload baseline is captured when the report is accepted. Reporting the same
+request again returns `200` with `created: false`; another request for the same plan is `409 delivery_conflict`.
+
+## Auto-approval
+
+```yaml
+automation:
+  autoApprove:
+    enabled: true
+    maxRisk: low
+    minConfidence: 0.8
+    contested: false
+    increases: false
+```
+
+Off by default. When enabled, **Open PR** (`POST /api/v1/automation/plans`) approves the fresh preview in the same
+request, so eligible plans skip the extra click; the change is still a pull request reviewed in Git. The approval goes
+through the normal path (`pauseDelivery`, binding, policy and digest checks) with the actor `autoapprove:<requester>`.
+A preview is auto-approved only when:
+
+- the requester holds the `approve` scope (an API key with only `write` never triggers it);
+- it is not a rollback;
+- every recommendation of the plan is active, at or below `maxRisk` and at or above `minConfidence`;
+- no recommendation has a contested consensus (`consensus.contested` or the `consensus_contested` warning): a hard
+  stop, whatever the settings (`contested` accepts only `false`);
+- every decrease of a request is backed by GreenKube's own usage evidence or by at least two independent consensus
+  votes;
+- no recommendation is a memory decrease whose OOM history could not be read (risk factor or eligibility warning
+  `oom_history_unknown`): a person opens that pull request after checking restarts and OOM kills;
+- no recommendation raises a request, unless `increases: true`: an increase is a reliability fix that costs money,
+  so a person approves it by default (roadmap H1); an increase is also approved automatically only when GreenKube's
+  own analyzer sized it.
+
+Otherwise the plan waits for the click and the response lists `auto_approve_blockers`: `approve_scope_missing`,
+`rollback_plan`, `not_active`, `recommendation_missing`, `risk_above_auto_approve`, `confidence_below_auto_approve`,
+`consensus_contested`, `oom_history_unknown`, `decrease_without_native_evidence`, `increase_requires_approval`,
+`increase_without_native_evidence`, the approval's error code (for example `delivery_paused`), or
+`auto_approve_failed` when the approval failed unexpectedly (the preview is kept).
+
+## Create and validate a pull request
+
+After configuring a Git provider, repository allowlist, and secure renderer boundary:
+
+1. Check the setup checklist (`/setup`, or `GET /api/v1/setup/status`): delivery must be active.
+2. In **Automation & GitOps**, confirm the target workload has a current, resolved binding to a repository allowed by the selected provider.
+3. In **Recommendations**, choose a CPU or memory rightsizing recommendation that offers **Open PR**. Cards that cannot become a pull request list their blockers and how to fix them (the recommendation's `eligibility`); cards still collecting evidence show "Collecting evidence — eligible in ~31h". Review its **Evidence** before opening the PR.
+4. Select **Open PR**. The dialog previews every policy check, source and rendered diff, validation result, and digest inline; one more click (**Approve and open PR**, or **Approve and get the patch** / **Approve for CI delivery** in the other [delivery modes](#delivery-modes)) submits that exact digest. With [auto-approval](#auto-approval), eligible previews are approved without that click.
+5. Follow the queued operation in the plan dialog, then use the **Pull requests** tab and **View PR** to review the provider PR. A PR does not change the cluster until a reviewer merges it and the GitOps controller syncs the merged revision.
+
+### Pull-request eligibility and observability coverage
+
+Automation does not create a PR for every visible recommendation. By default, each recommendation in a plan must have at least **36 samples**, **50% evidence coverage** (`automation.policy.minCoverage: 0.5`), **60% confidence** (`automation.policy.minConfidence: 0.6`), and risk at or below `automation.policy.maxRiskLevel: medium`. A plan that groups multiple recommendations must satisfy the configured gates for the affected recommendations. Other checks include a resolved GitOps binding, a supported CPU/memory rightsizing action, no conflicting workload evidence, and the per-workload open-PR and cooldown limits.
+
+Evidence coverage is the share of expected CPU or memory observation points present in the recommendation's observation window, sampled at the configured Prometheus query step. It is not the GitOps binding coverage displayed on the **Automation & GitOps** page; that separate ratio reports resolved workloads among discovered workloads.
+
+Inspect the recommendation's **Evidence** panel and its blockers, or read its `eligibility` through the API: `can_open_pr`, then each blocker's `code`, `message` and `fix` ([eligibility codes](reference/eligibility-codes.md)). Eligibility runs the same policy evaluator as plan creation, read-only. After opening the API port-forward and exporting the key as described in the [installation guide](installation.md#optional-ingress-and-tls), run:
+
+```bash
+REC_ID=123 # replace with the recommendation ID shown in GreenKube
+curl -fsS -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
+  "http://localhost:8000/api/v1/recommendations/${REC_ID}" |
+  jq '{id, confidence, risk_level, evidence: {sample_count: .evidence.sample_count, coverage_ratio: .evidence.coverage_ratio}, eligibility}'
+```
+
+Evidence gates are relative to the history that exists (F7): `minCoverage` is evaluated against the data
+available since install (the first collected sample), capped at the lookback, so a one-day-old install that
+collected every step is not held back by a 7-day window; the observed value is reported as
+`coverage_since_install` in the `sample_count_coverage` check. While evidence is still being collected, the
+`warming_up` blocker gives an estimate in `eligible_at` (`first sample + minSamples query steps`) (on `/api/v1` and `/api/v2` recommendations, shown as "Collecting evidence — eligible in ~31h"). **Open PR** runs every gate and returns the plan or a typed rejection; it does not open a PR. The former `GET /recommendations/{id}/apply-pr/eligibility` endpoint was removed: read the recommendation's `eligibility` field. If a gate rejects a plan at preview time, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
+
+## Signed webhooks (optional)
 
 Polling works without webhooks. Webhooks reduce latency for merge/close events:
 
@@ -114,25 +385,244 @@ A single-provider installation may instead use the top-level `automation.webhook
 
 Only `POST /api/v1/webhooks/<provider_id>` is exempt from the GreenKube bearer key. The request still must carry the provider-native signature/token. Provider schemes do not include signed timestamps, so delivery IDs are deduplicated and provider state is re-fetched before lifecycle changes.
 
+## Supported action kinds
+
+What a pull request can change is defined by a registry of action kinds (see [Architecture: action framework](architecture.md#action-framework)). Each kind defines its operations, the resources it touches, its invariants, its pre-apply baseline, how apply detection reads it, its rollback and its PR section. A recommendation becomes a PR only when a registered kind can express it.
+
+| Kind | Operation | What it changes | Renderers | Rollback | Apply detection |
+|---|---|---|---|---|---|
+| `container_resources` | `set_container_resources` | CPU/memory requests (decreases and reliability increases) and limits (set, raise, remove the CPU limit) of named containers and native sidecars of a `Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, Argo `Rollout`, `ReplicaSet`, `ReplicationController` or `Pod` | Raw, Kustomize, Helm values and Flux HelmRelease post-renderer (requests and limit values; no limit removal or sidecars) | Restores the recorded pre-apply requests (request-only changes) | Live per-container request within tolerance of the planned value |
+| `delete_resource` | `delete_resource` | Removes an orphaned `LoadBalancer` Service or `PersistentVolume` from Git (see [Deleting orphaned resources](#deleting-orphaned-resources)) | Raw, Kustomize | None: a revert recreates the manifest, not the data or the address | The resource is absent from the cluster |
+
+### Container resources v2: increases, limits, sidecars (H1)
+
+- **Increases.** A request increase (p99 close to the request, OOM kills, a working set near the memory limit) opens
+  a pull request like a decrease. It is a reliability fix: the PR carries the `reliability` label, shows the change
+  as a projected **cost** (never as a saving) and the risk it reduces, and it is never auto-approved unless
+  `automation.autoApprove.increases` is `true`. Sizing keeps the rules of [How GreenKube sizes
+  increases](recommendation.md#how-greenkube-sizes-increases) (per-replica p99 bounded by the pod, warm-up excluded,
+  one step capped at `rightsizingMaxIncreaseFactor`). Those bounds belong to GreenKube's own analyzer, so an increase
+  becomes a pull request only when the consensus chose GreenKube's value (`source` or `consensus.chosen_from`) backed
+  by usage samples. Since the consensus always takes GreenKube's measured value, a record whose value came from VPA,
+  Goldilocks or a pushed signal (stored before that rule) stays advisory.
+- **Limits.** The limit advice of the rightsizing rules (`config.recommendations.limitsPolicy`) travels with the
+  request change as `evidence.limit_changes`:
+  - an increase raises a CPU limit below the new request or throttled, and a memory limit below the request or
+    110% of the observed maximum; it never lowers a limit;
+  - the kernel OOM-kills at the memory **limit**, so an OOM-driven memory increase (OOM kills or OOM restarts in
+    the window), or one whose new request reaches or exceeds the memory limit, also raises the limit above the new
+    request: `max(limit × the request's factor, 110% of the observed maximum)`, bounded by
+    `rightsizingMaxIncreaseFactor` × the old limit, and always at least 10% above the new request (reason
+    `oom_headroom` or `request_reaches_limit`). Example: request = limit = 24Mi, OOM-killed, becomes request 48Mi and
+    limit 53Mi. A non-OOM increase that stays well below the limit leaves it alone. When the limit cannot be raised
+    (under `memory_equals_request` the limit must equal the request), the recommendation says so and stays advisory:
+    the action builder refuses an OOM-driven increase that does not lift the limit above the new request, since its
+    pull request could not stop the kills (see [OOM kills and the memory
+    limit](recommendation.md#oom-kills-and-the-memory-limit));
+  - `remove_cpu` removes the CPU limit (raw manifests: the key is deleted; Kustomize: a `cpu: null` strategic-merge
+    deletion in the managed patch);
+  - `memory_equals_request` sets the memory limit to the request (decreases) or raises it to at least 110% of the
+    observed maximum (increases);
+  - with the default `keep`, a decrease never touches limits.
+  A memory limit is never removed. A request above an unchanged limit fails closed (the action is not built, and
+  planning rejects any rendered `request > limit`).
+- **Native sidecars and init containers.** Scans read the pod specs and record where each container lives:
+  a native sidecar (init container with `restartPolicy: Always`) is addressed in `initContainers`. Helm planners map
+  `spec.containers` only and refuse sidecar edits with an explanation.
+- **Workload kinds.** `CronJob` (through `spec.jobTemplate`), `Job` and Argo `Rollout` (`argoproj.io/v1alpha1`,
+  inline `spec.template`; a Rollout with `workloadRef` fails closed) are addressable targets. Recommendations reach
+  them once the owner and GitOps binding of the workload are resolved.
+- **Rollback.** Request-only changes (containers and native sidecars) roll back automatically; a change that edits
+  limits is reverted by reverting its pull request, and the PR says so.
+- **Measurement.** A memory increase is measured on reliability: the OOM-kill rate of that container after the
+  rollout (OOM restarts, in the unit of the scan's evidence) is compared with the rate the recommendation observed
+  before it, and those OOM restarts no longer fail the restart gate; other containers, CPU-only increases and
+  memory increases that kept or lowered a known memory limit (they cannot cure kills that happen at the limit)
+  keep the strict "any OOM kill fails" gate (see [Savings measurement: reliability
+  increases](methodology/savings-measurement.md#reliability-increases-h1)).
+
+Every other recommendation type remains visible but shows "Manual change required" and cannot open a PR. Every plan, whatever its kind, is render-validated the same way: the rendered resources after the edit must differ from the rendered resources before it by exactly the kind's expected change (the fields it sets, plus the resources it creates or deletes), and the kind's invariants must hold (for container resources, every request stays within its limit). Anything else fails closed.
+
+## Deleting orphaned resources
+
+Orphaned `LoadBalancer` Services (`ORPHANED_LOAD_BALANCER`) and `PersistentVolume`s (`ORPHANED_PERSISTENT_VOLUME`)
+can become a deletion pull request (roadmap H6). Auto-approval never approves one (`deletion_requires_review`).
+
+**Evidence first.** A deletion action is only built for a recommendation that passed the deletion evidence model
+(selector-less, owned and gateway/mesh/ingress Services are never reported; EndpointSlices, route references and the
+`DELETION_MIN_UNUSED_DAYS` persistence are required; `greenkube.io/ignore`/`greenkube.io/keep` opt out). Planning
+checks the manifest in Git again (an opted-out resource, a Service that is not a `LoadBalancer` or an infrastructure
+namespace is refused), and the plan worker reads the live object before any Git write: a resource already gone fails
+the plan with `no_effective_change`; an opted-out one, a `PersistentVolume` that is `Bound` again or a Service that is
+no longer of type `LoadBalancer` fails it. It then runs the collectors' **full orphan check** again
+(`deletion_target_in_use`): for a LoadBalancer Service its endpoints (Endpoints and EndpointSlices), pods and workload
+templates matching its selector, Gateway, Ingress and Gateway API route references, owner references and gateway or
+mesh labels; for a volume its phase, claim, StatefulSet and snapshot dependencies. A dependency that cannot be read
+(RBAC, timeout) is never read as unused: the operation is retried and no branch is created.
+
+**Open deletion pull requests are re-checked.** Every 5 minutes the automation controller (step `deletion_recheck`)
+runs the same full check for each `pr_open` deletion plan (20 per pass, rotating). When the resource is in use again,
+for example a LoadBalancer that gained an `HTTPRoute` reference or endpoints, GreenKube posts a comment on the pull
+request (marker `<!-- greenkube:deletion-recheck -->`, "do not merge", with the reason), closes the pull request when
+the Git provider adapter can close one (none of the built-in adapters does yet: close it by hand), marks the plan
+`stale` (`deletion_target_in_use`), resets the action status and retires the recommendation (`stale`, audit event
+`retired`). In `patch` and `ci` delivery modes the token is read-only, so only the plan and the recommendation change.
+A re-check that cannot read the cluster leaves the pull request as it is, logs a warning and is repeated on the next
+pass.
+
+**Where the resource lives in Git.** Discovery persists the Argo CD `status.resources` and Flux `status.inventory`
+entries of the kinds registered action kinds target (table `resource_bindings`, migration 0087) with the managing
+controller's resolved Git location (from its workload bindings) and whether it prunes. A resource listed by no
+controller (`resource_binding_missing`), by several (`ambiguous_binding`), by a controller without a resolved source
+(`binding_unresolved`) or refreshed more than `automation.bindingTtl` ago (`binding_stale`) cannot become a pull
+request. A cluster-scoped binding is stored with the empty namespace; its plan source uses the reserved namespace
+`_cluster`, which no real namespace can match.
+At delivery, the plan worker reads the binding again and marks the plan `stale` when it moved, is no longer resolved,
+is older than `automation.bindingTtl`, or when the controller stopped pruning since approval; without a binding reader
+the delivery is retried, never skipped.
+A controller that deploys to another cluster never binds a resource of this cluster (`destination_remote`, see
+[Destination cluster](#destination-cluster)): its inventory entries only make a same-named local resource ambiguous.
+
+**The edit.**
+
+| Layout | What the pull request removes |
+|---|---|
+| Raw | The whole file when it holds only the resource; otherwise its document of a multi-document file, or its item of a `kind: List`. |
+| Kustomize | The file and its `resources:` entry when the file holds only the resource; otherwise its document. A file listed by several Kustomizations, a shared base, and a generated or renamed resource are refused. |
+| Helm | Unsupported: a chart-rendered resource can only be removed through a values toggle. |
+
+The rendered result must differ from the rendered source by exactly the deleted resource (generic expected-delta
+validation).
+
+**Gates and warnings.**
+
+- Argo CD `syncPolicy.automated.prune` or Flux `spec.prune` disabled: the plan and the eligibility carry
+  `deletion_prune_disabled`, since removing the manifest will not delete the live object.
+- A `PersistentVolume` with `reclaimPolicy: Retain` (or none): the plan carries `persistent_volume_retained`; the
+  cloud disk must be released by hand to stop its cost.
+- Deletions are `medium` (LoadBalancer) or `high` (volume) risk, so `automation.policy.maxRiskLevel` decides whether
+  they can be planned (`policy_risk_exceeded` otherwise).
+- A deletion is **never auto-approved** (`deletion_requires_review` in `auto_approve_blockers`); eligibility shows
+  `deletion_reviewed_in_pr`.
+
+**Applied and measured.** Apply detection marks the recommendation applied once its plan synced and the resource is
+absent (a read error is never taken for absence); a resource deleted by hand while no plan is in flight is detected the
+same way (`detected`). The change is measured by `ResourceDeletionStrategy`: the realized saving is the rate the
+resource was charged before the change (its trusted cost in the baseline window, otherwise the allocated rate frozen
+with the recommendation: the OpenCost per-asset cost or the configured rate), `not_realized` if the resource is still
+observed after the change. The strategy only claims a saving for a change whose absence was read from the cluster
+(rollout completion source `resource_absent`); any other deletion change is `inconclusive`.
+
+## Manual mode
+
+Clusters without GitOps (or resources outside it) use the manual mode (roadmap H9). The recommendation detail page
+shows **Apply manually**, and every active card on the recommendations page links to it:
+
+- `GET /api/v1/recommendations/{id}/manual` (`read`) returns the steps: for a typed change, a `kubectl patch` built
+  from the same primitives a pull request would write (strategic merge for pod-template workloads), a server-side dry
+  run and `kubectl rollout status`; for an orphaned LoadBalancer or volume, `kubectl delete` with a dry run first; for
+  other kinds, an advisory note. It also returns the patch, a readable diff and notes (irreversible deletion, retained
+  disks, a GitOps controller reverting a manual patch).
+- `POST /api/v1/recommendations/{id}/manual/applied` (`write`, "Mark as applied") records an active recommendation as
+  applied by hand with a change id: the change-measurement pipeline records the change and measures it like a merged
+  pull request (application method `manual`). A recommendation with an open pull request is applied by its merge
+  (`409`), and so is one whose plan is approved or being delivered. For a deletion, GreenKube first reads the
+  resource: it is marked applied only once the cluster answers that it is absent (`409` while it still exists, `503`
+  when it cannot be read), so no saving is claimed for a resource that is still there.
+
+GreenKube never runs these commands: Git, or the operator, stays the only write path.
+
 ## Supported source layouts
 
-Only CPU and memory rightsizing recommendations currently have GitOps action planners. Other recommendation types remain visible but show "Manual change required" and cannot open a PR.
+CPU and memory rightsizing recommendations (the `container_resources` kind) and orphaned LoadBalancer and volume deletions (`delete_resource`, raw and Kustomize only) have GitOps action planners. Other recommendation types remain visible but show "Manual change required" and cannot open a PR.
 
 | Source | Supported | Notes |
 |---|---|---|
 | Argo CD raw YAML | Yes | Uses the Application's resource inventory and a raw manifest planner. |
 | Argo CD Kustomize | Yes | Plans the overlay and render-validates the result. |
-| Argo CD Helm with Git-managed values files | Yes | Infers a unique values file/container mapping when possible; otherwise offers a server-validated one-time mapping. |
+| Argo CD Helm with a local chart and Git-managed values files | Yes | The chart must live in the same repository and revision as the values. Infers a unique values file/container mapping when possible; otherwise offers a server-validated one-time mapping. Several containers of one workload are planned in one edit. |
+| Argo CD multi-source Helm: remote chart (Helm repository or OCI registry) + `$values` Git source | Yes | The edit lands in the last values file of the `$values` source. The exact chart version Argo CD deployed is pre-fetched, digest-verified and rendered offline ([Helm support](#helm-support)). |
+| Argo CD Helm with a remote chart and no Git-managed values file | No | Nothing in Git to edit (`remote-chart-values-not-in-git`); fails closed. |
+| Argo CD Helm with a chart in another Git repository | No | The chart is not in the snapshot; fails closed. |
 | Argo CD Helm with inline `valuesObject` / `parameters` | No | Fails closed; move values to a Git-managed values file. |
-| Argo CD multi-source Helm | Yes | Values must resolve to a Git-managed source; source indices are handled server-side. |
-| Flux Kustomization (raw/Kustomize) | Yes | Uses the Flux inventory and exact source revision. |
+| Argo CD multi-source Helm with a local chart | Yes | Source indices are handled server-side. |
+| Argo CD multi-source: a Helm chart plus a `path` source of plain manifests (HTTPRoutes, ConfigMaps) | Yes | Both sources are candidate owners. A workload carrying Helm ownership metadata (`app.kubernetes.io/managed-by: Helm`, `heritage: Helm`, `helm.sh/chart` or a matching `meta.helm.sh/release-name`) binds to the chart (and its `$values` source); so does every workload when the `greenkube.cloud/helm-values-mapping` annotation names the chart or its values source by `source_index`. Without that evidence, or against a Kustomize or plugin `path` source, the workload stays `ambiguous`. With the labels alone, the plan fails closed if the manifests directory declares a resource of the workload's kind and name, or is in another repository or revision than the values. |
+| Flux Kustomization (raw/Kustomize) | Yes | Uses the Flux inventory and exact source revision. The overlay is rendered as Flux builds it: `spec.targetNamespace`, `namePrefix` and `nameSuffix` are applied to the root Kustomization for the render only (see below). |
 | Flux HelmRelease with local same-revision Git chart | Yes | Renders `valuesFiles`, `valuesFrom`, and inline values, then applies the managed post-renderer edit. |
 | Flux HelmRelease `chartRef` to a Git-backed HelmChart | Yes | The HelmChart must exist in the same immutable snapshot. |
-| Flux HelmRelease with remote HelmRepository/OCI chart | No | The chart artifact is not in the snapshot; fails closed. |
+| Flux HelmRelease with a HelmRepository chart (HTTP or `type: oci`), or `chartRef` to an OCIRepository | Yes | The deployed chart version (and, for an OCIRepository, its digest) is pre-fetched, verified and rendered offline; the managed post-renderer patch is written to the Git-owned HelmRelease. Chart `valuesFiles` of a remote chart fail closed (`remote-chart-values-files`). |
 | Flux `valuesFrom` that is runtime-only, cross-repository, cross-revision, or uses `targetPath` | No | Fails closed with a typed reason. |
 | Manual binding resolution | Yes | An operator can select one server-provided candidate for an ambiguous/unresolved binding. |
+| Argo CD Application without a reported source type | No | When `status.sourceType` is missing (a ComparisonError) and the spec names no renderer (`helm`, `kustomize`, `directory`, `chart`), the binding stays unresolved (`source_type_unknown`) instead of being read as raw manifests; it resolves once Argo CD reports the type again. |
+| Argo CD Application or Flux object deploying to another cluster | No | Blocked (`destination_remote`), see below. |
+
+### Destination cluster
+
+GreenKube only changes workloads and resources of the cluster it runs in. An Argo CD Application binds only when its
+`spec.destination` is this cluster: `server: https://kubernetes.default.svc` (or `name: in-cluster`), or one of the
+server URLs or cluster names listed in `automation.localClusterAliases` (`GITOPS_LOCAL_CLUSTER_ALIASES`) when Argo CD
+registers this cluster under another address. A Flux Kustomization or HelmRelease with `spec.kubeConfig` applies to
+another cluster. Their workload candidates are `blocked` with the reason `destination_remote` and the destination as
+evidence, and their inventory never resolves a resource binding, deletions included. A hub cluster running Argo CD for
+spoke clusters therefore never opens a pull request for a spoke workload that happens to share a namespace and name
+with a local one; install GreenKube in each spoke instead.
+
+### Helm support
+
+| Chart | Rendered from | Values edit | Container mapping |
+|---|---|---|---|
+| Local chart (same repository and revision) | The repository snapshot | Last Git-managed values file (Argo CD) or managed post-renderer (Flux) | Explicit mapping, else render probe of the values file |
+| HTTP Helm repository (`https://.../index.yaml`) | Pre-fetched by the controller, verified against the `digest` of `index.yaml` | Same | Configured mapping, built-in registry, then render probe |
+| OCI registry (`oci://` or Argo CD's scheme-less form) | Pre-fetched anonymously, verified against the manifest digest (`Docker-Content-Digest`) and the chart layer digest; a Flux OCIRepository also pins the digest it deployed | Same | Same |
+| Bucket, private registry needing credentials, chart version range without a deployed version | Not rendered | | Fails closed with a reason code |
+| Chart read from another Git repository than its values (Argo CD `path:` chart, values from a `$ref` source in another repository) | Not rendered | | Bound to the values repository, `blocked` with `cross-repository-git-chart` |
+
+**Remote charts.** The renderer sandbox has no network, so the controller fetches the remote chart: exactly the version the controller deployed (Argo CD `status.sync.revisions`, Flux `status.history[0].chartVersion`; a range such as `18.3.*` alone is never rendered). The archive must match the digest its repository publishes, is unpacked in memory (bounded; no links, no paths outside the chart), and is staged into the render workspace for the duration of the plan. Remote dependencies must be vendored in the chart archive (`charts/`, packaged `.tgz` dependencies are unpacked); nothing is fetched at render time. Because packaged charts commonly define helpers that use `lookup` or random functions without calling them, a remote chart is rendered twice instead of being scanned statically: differing output fails closed as `nondeterministic-chart-render`. The plan carries the provenance (`remote Helm chart <reference> rendered from sha256:...`) in its validation warnings and in the PR body.
+
+The controller only contacts hosts named by the discovered chart source, and never loopback, link-local or metadata addresses. `automation.helm.remoteCharts.allowedHosts` narrows that to a list (`host`, `host:port`, `*.domain`; Docker Hub also needs `auth.docker.io` and `*.docker.com`; plain-HTTP repositories must always be listed). Registry bearer tokens are anonymous and never follow a redirect to another host. `automation.helm.remoteCharts.enabled=false` makes every remote chart fail closed (`remote-charts-disabled`).
+
+| Reason | Meaning | Plan status |
+|---|---|---|
+| `chart-version-unresolved` | No exact deployed chart version is known | Unsupported source |
+| `chart-host-not-allowed` | Host outside the allowlist, plain HTTP, or an internal address | Unsupported source |
+| `chart-registry-auth-required` | The registry refuses anonymous pulls | Unsupported source |
+| `remote-charts-disabled` | `automation.helm.remoteCharts.enabled=false` | Unsupported source |
+| `chart-digest-mismatch`, `chart-digest-unavailable` | The archive does not match its published or deployed digest, or none is published | Render validation failed |
+| `chart-not-found`, `chart-archive-invalid`, `chart-size-limit` | The chart could not be fetched or unpacked safely | Render validation failed |
+| `nondeterministic-chart-render` | Two renders of the same inputs differ | Render validation failed |
+
+**Values-path mapping.** For each container of the plan, GreenKube finds where the chart reads its `resources`, in this order, and keeps a candidate only when editing it changes exactly that container in the render:
+
+1. the explicit mapping of the Application (`greenkube.cloud/helm-values-mapping` annotation) for its container;
+2. `automation.helm.chartMappings` entries matching the chart (name or `<repository>/<name>`, globs allowed), its version and the container; a matching but wrong entry fails closed rather than falling through;
+3. the built-in registry: Bitnami charts (`resources`, `<container>.resources`, `primary`/`master`/`controller`/`server.resources`, `metrics.resources`), ingress-nginx, cert-manager, podinfo, grafana, bjw-s app-template and stakater application;
+4. a render probe of every `resources` path of the Git values file and of the chart's default values; exactly one must match, otherwise the plan is `needs_chart_mapping`.
+
+For a remote chart the edit may create the values path in the Git file. When `resources` is missing or empty there, it is first seeded with the container's currently rendered resources, so a chart that falls back to a preset when `resources` is empty (Bitnami `resourcesPreset`) keeps its limits:
+
+```yaml
+# environments/prod/nginx.yaml after a plan for containers nginx and metrics
+replicaCount: 2
+metrics:
+  enabled: true
+  resources:
+    requests: {cpu: 20m, ephemeral-storage: 50Mi, memory: 128Mi}
+    limits: {cpu: 150m, ephemeral-storage: 2Gi, memory: 192Mi}
+resources:
+  requests: {cpu: 50m, ephemeral-storage: 50Mi, memory: 64Mi}
+  limits: {cpu: 150m, ephemeral-storage: 2Gi, memory: 192Mi}
+```
 
 When discovery cannot choose a single owner, the binding is `ambiguous`, `unresolved`, or `blocked` and plans fail closed. The **Automation & GitOps** page lists actionable bindings and their safe candidate provenance. Manual resolutions are generation-bound, expire at `automation.bindingTtl` (default 30 minutes), and are written to the audit trail.
+
+### Flux Kustomizations
+
+Flux writes `spec.targetNamespace` (and `spec.namePrefix`/`spec.nameSuffix`) into the root Kustomization before `kustomize build`, so the deployed workload rarely has the namespace written in the manifests. GreenKube plans these overlays as follows:
+
+- It renders the overlay with the same overrides, for validation only (they are never written to Git), and requires exactly one rendered workload with the live identity. `targetNamespace` must equal the workload's namespace.
+- Kustomize applies an overlay's patches before its own namespace and name transformers, so the patch selector names the workload as it enters the overlay: GreenKube renders the overlay once more without `namespace`, `namePrefix` and `nameSuffix` and requires exactly one match. A namespace-less manifest is selected as namespace `default`, which is how Kustomize matches it.
+- It fails closed when the result is ambiguous or cannot be reproduced: `namePrefix` or `nameSuffix` set both on the Flux Kustomization and in the overlay; Flux `spec.patches`, `spec.images` or `spec.components` (applied after GreenKube's patch); `spec.postBuild` substitution variables in the workload's name, namespace, container names or container resources (values from `substituteFrom` are not visible to GreenKube; other fields are substituted the same way before and after the patch and are not a blocker); a namespace-less workload without `targetNamespace`.
+- Kustomize rollback renders the overlay the same way.
 
 ## Plan lifecycle
 
@@ -141,15 +631,20 @@ A plan request accepts recommendation IDs only. Repository URLs, file paths, pro
 1. GreenKube builds a typed, container-targeted action from the recommendation evidence. Recommendations without a safe per-container target remain non-actionable.
 2. The server resolves the workload binding, snapshots the immutable provider revision, and renders the before/after state.
 3. Raw YAML/JSON, Kustomize, and the supported Helm layouts are validated. Any unrelated rendered change fails the plan.
-4. A successful preview contains a `sha256:` digest, changed files, source and rendered diffs, validation state, and an expiry.
-5. Approval must present that exact digest. A changed source or stale digest returns `409` and requires a new preview.
-6. The durable worker revalidates the source, creates one atomic multi-file commit on a deterministic branch, and opens or adopts a matching PR. Repeated requests reuse the open PR instead of creating duplicates.
-7. After merge, linked recommendation actions enter `sync_pending` and the plan moves to `merged`. The controller observes the exact Argo CD/Flux source revision and readiness; a confirmed plan moves to `synced`, while a timeout moves it to `sync_failed`. A plan never jumps directly to `applied`.
-8. Apply detection requires a synced plan and an exact per-container request match. Verification then uses the normal post-apply health and savings gates.
+4. A successful preview contains a `sha256:` digest, changed files, source and rendered diffs, the renderer's warnings (credentials redacted), validation state, and an expiry. Previewing the same workload again supersedes its previous `draft`/`validated` plan instead of returning `409`. Closing a preview calls `DELETE /api/v1/automation/plans/{plan_id}`, which marks it `superseded`.
+5. Approval must present that exact digest. Unrelated commits on the target branch do not stale a plan: when every file the plan touches **and every render input** is unchanged between the planned base revision and the current head, the plan is committed on the moved head. The render inputs are recorded with the plan (`validation.render_inputs`, bound by the digest): every file the render read with its Git blob ID (the Kustomization files, resources and patch files of the overlay and its bases, the Helm values files, the files of a repository chart, the Flux `chart.spec.valuesFiles` and the Git manifests of `valuesFrom` ConfigMaps and Secrets, the HelmRelease manifest, the manifests of a raw directory), plus the directories where an added file changes the render (`validation.render_scopes`: a raw manifest directory, a repository chart, which also holds its `file://` dependencies and schema references since the renderer refuses `..`). Approval and the worker compare them with a tree comparison of the base and the moved head; a change to a base, a patch, a values file, `Chart.yaml` or a template the plan does not edit makes the plan `stale` and needs a new preview. A plan created before render inputs were recorded is `stale` on any moved head. That head is recorded as `committed_on_revision`, next to the planned `base_revision`, and the pull-request body lists both. Rollback plans follow the same rule; their identity stays derived from the planned base revision. A change to a touched file or a stale digest returns `409` and requires a new preview.
+6. The durable worker revalidates the source, creates one atomic multi-file commit on a deterministic branch, and opens or adopts a matching PR. Repeated requests reuse the open PR instead of creating duplicates. When a worker reclaims an operation whose previous worker lost its lease, it first adopts an open PR on the plan's deterministic branch (`pr_open`), before any staleness check. Opening a PR costs a bounded number of provider calls that does not depend on repository size (see [Provider API cost](#provider-api-cost)).
+7. After merge, linked recommendation actions enter `sync_pending` and the plan moves to `merged`. GreenKube records the commit that landed on the base branch: the merge commit, or for GitLab merges without one the squash commit, or the merge request head for fast-forward projects (the plan's audit reason is `pull_request_merged`, `pull_request_merged_squash_commit` or `pull_request_merged_fast_forward_head`). A PR closed without merging moves the plan to `closed`; GitHub's leftover test-merge SHA is ignored.
+8. The controller observes the Argo CD/Flux source revision and readiness. The plan moves to `synced` when the healthy controller runs the landed commit (`sync_confirmed`), or a later commit that contains it and still carries the planned values, for example after another PR or an image write-back landed first (`sync_confirmed_descendant`). For a later commit GreenKube asks the provider two questions, each cached per commit:
+   - Does the observed commit contain the landed commit? This uses the provider's compare or merge-base API.
+   - Does it still carry the planned file changes? GreenKube reads the blob IDs of the planned paths at the observed commit. When a later commit edited a planned file, it reads that file at the observed and base commits and checks structurally that every value the plan set is still set and every value it removed is still absent. Unrelated edits in the same file, such as an image tag, are accepted. Containers and other named list items are matched by name.
 
-Plan statuses: `draft`, `validated`, `approved`, `applying`, `pr_open`, `merged`, `synced`, `applied`, `sync_failed`, `closed`, `stale`, `failed`, `needs_mapping`, `ambiguous`, `rejected`, `superseded`.
+   A plan whose planned values were reverted, overwritten or deleted by a later commit stays pending with `planned_change_not_present` and is never confirmed. Other pending reasons are `revision_behind_merge` (the controller still runs an older commit), `revision_not_descendant` (a diverged commit), `ancestry_unavailable` and `planned_change_unverified` (the provider cannot answer yet). After the timeout the plan moves to `sync_failed`, which does not block new plans for the workload. A plan that failed only for the timeout is re-checked later and recovers if the controller reaches a confirming revision; once a later commit is seen to have reverted or overwritten it, its records keep `planned_change_not_present` and are no longer re-checked. A plan never jumps directly to `applied`.
+9. Apply detection requires a synced plan and an exact per-container request match on the live workload. Verification then uses the normal post-apply health and savings gates.
 
-Plan operations are durable and idempotent: `queued`, `running`, `retrying`, `succeeded`, `failed`, `cancelled`. Poll an operation through `GET /api/v1/automation/operations/{operation_id}`.
+Plan statuses: `draft`, `validated`, `approved`, `applying`, `pr_open`, `merged`, `synced`, `applied`, `sync_failed`, `closed`, `stale`, `failed`, `needs_mapping`, `ambiguous`, `rejected`, `superseded`, `cancelled` (cancelled by a user before it applied). A plan's `status_reason` carries the reason code of its last status change (`cancelled_by_user`, `plan_expired`, `source_changed`...); it is empty for plans whose status has not changed since migration 0220.
+
+Plan operations are durable and idempotent: `queued`, `running`, `retrying`, `succeeded`, `failed`, `cancelled`. Follow an operation through `GET /api/v1/automation/plans/{plan_id}` (`operation_id`, `operation_status`); the former `GET /api/v1/automation/operations/{operation_id}` route was removed.
 
 ## Approval and policy
 
@@ -168,7 +663,19 @@ automation:
     changeFreezeWindows: []
 ```
 
-Discovery also supplies live workload labels, rollout state, controller suspend/health, and HPA/PDB evidence. A configured freeze label blocks only matching workloads. When rollout, controller-health, or HPA/PDB evidence cannot be collected, the gate fails closed instead of guessing.
+Discovery also supplies live workload labels, rollout state, controller suspend/health, and HPA, VPA and PDB evidence. A configured freeze label blocks only matching workloads.
+
+- **HPA.** An HPA blocks only the resource it scales on. A CPU-utilization target blocks CPU changes; a memory change on the same workload passes with a warning. A `ContainerResource` metric blocks only its own container. A plan that adds an HPA conflicts with an existing one.
+- **VPA.** A VPA that targets the workload in `Auto`, `Recreate`, `InPlaceOrRecreate` or `InPlace` mode rewrites requests itself, so it blocks the plan. `Initial` mode passes with a warning; `Off` passes.
+- **PDB.** A PDB that blocks the rolling restart rejects the plan.
+- **Controller health.** A suspended or unhealthy owning controller (`controller_unhealthy`) rejects the plan, with one exception: a workload that is OOM-killed or CPU-starved makes its own Argo CD Application `Degraded` or `Progressing`, and blocking the fix would keep it broken. An increase-only reliability plan (every linked recommendation raises a CPU or memory request, and its limit changes only raise a limit or remove a CPU limit) passes the gate when GreenKube reads the Application's live status and finds that the only unhealthy resource is the plan's target workload, with no `*Error` condition (sync, comparison or spec errors) and no failed sync operation. The check's `message` explains the decision. A suspended controller, a Flux controller, another unhealthy resource, a sync error, or an unreadable Application still blocks.
+
+`automation.policy.missingEvidence` sets what these live gates do when discovery cannot collect their evidence:
+
+- `fail` rejects the plan with `policy_evidence_missing`.
+- `warn` allows it and adds a warning to `policy_result.warnings`.
+
+The default is `fail`, in the chart and in Python (an unset `missingEvidence` in `GITOPS_POLICY_JSON` fails closed too).
 
 ## Pull-request options
 
@@ -176,18 +683,174 @@ Discovery also supplies live workload labels, rollout state, controller suspend/
 automation:
   pullRequests:
     draft: false
-    labels:
-      - greenkube
-      - sustainability
+    labels: []
     reviewers: []
     teamReviewers: []
 ```
 
+- `labels` are added to every PR on top of the derived labels below. Labels no longer have to exist beforehand: GitHub and GitLab create missing labels implicitly, and GreenKube creates them through the Gitea label API.
+- `reviewers` and `teamReviewers` are always requested; they are also the fallback when a repository has no CODEOWNERS entry for the touched paths.
 - GitHub supports draft PRs, labels, reviewers, and team reviewers.
 - GitLab supports draft MRs, labels, and numeric reviewer IDs; team reviewers are not supported.
 - Gitea supports labels and reviewers; draft PRs and team reviewers are not supported.
 
 Provider capabilities are checked before a branch or commit is created. Missing capabilities surface as a typed `provider_capability_missing`-style error.
+
+## Pull-request content
+
+The PR is where most reviewers meet GreenKube, so it is written to be decided on in 30 seconds. Configure it under `automation.pr`:
+
+```yaml
+config:
+  externalUrl: https://greenkube.example.com # deep links; empty means no links
+automation:
+  pr:
+    titlePrefix: greenkube
+    template: '' # empty uses the built-in template
+    defaultLabels: true
+    draftHighRisk: true
+    codeowners: true
+    commitStatus: true
+    lifecycleComments: true
+    lifecycleLookbackDays: 30
+```
+
+The deep links open the [recommendation detail, change and ledger pages](ui.md#pull-request-deep-links) of the UI.
+
+**Title.** `greenkube: rightsize payments/api (cpu 500m→200m, mem 1Gi→512Mi) · −$412/yr · −18 kgCO₂e/yr`. The verb follows the action (`rightsize`, `raise resources of`, `autoscale`, `delete`, or `revert …` for rollbacks). Titles are at most 72 characters: the resource details, then the CO₂e figure, are dropped before the title is cut, and the full summary is always in the body. `titlePrefix` sets the conventional-commit prefix; an empty prefix drops it.
+
+**Body.** The built-in template renders these sections:
+
+1. **Summary**: one sentence and a totals table per month and per year, for cost and CO₂e. The values are *projected* by the Impact Model, with the realization factor; they are never mixed with measured savings.
+2. **Changes**: per container, only the resources that change, as current → proposed with the delta.
+3. **Why**: per recommendation, the finding, the consensus line (sources and proposed value), the evidence (window, samples, coverage, p95, p99, max, restarts and OOM events) and a link to the recommendation.
+4. **Risk & what to watch**: the risk level and factors, headroom over p95 and max, and the signals to watch for 24 hours. An *Autoscalers and disruption budgets* list explains the HPA, VPA and PDB interactions: the plan's policy checks (`hpa_interaction`, `vpa_interaction`, `pdb_interaction`, with the autoscalers they found, or "not checked" when the evidence was missing), the policy warnings about them, the risk factors `hpa_scales_on_resource`, `hpa_present`, `vpa_conflicting_writer` and `pdb_blocks_disruption`, and, for a plan that adds an HPA, how the new autoscaler interacts with requests, other autoscalers and PDBs. When the policy result has no HPA, VPA or PDB evidence, the list says so.
+5. **Assumptions**: unit prices and their source, observed cost sources, carbon intensity and its source, the CO₂e basis (what the projection counts), PUE, realization factor, carbon price and Impact Model version. The intensity is the projection window's average; its source lists the intensity sources the Impact Model recorded and, when it records none (Impact Model 1.1), states how the value was derived: the stored grid intensity of the observed samples, or the node profile's intensity where a sample has none.
+6. **Rollback**: revert the PR, or the GreenKube rollback pull request from the change page. Layouts without automated rollback say so.
+7. **Verification plan**: when measurement starts and ends, the strategy, and where results are posted.
+8. Plan provenance and collapsible source and rendered diffs.
+9. A machine-readable footer on the body's last line: `<!-- greenkube:v1 {"plan_id":…,"recommendation_ids":[…],"revision":…,"change_set_id":…,"digest":…} -->`. Readers (`greenkube.automation.pr_content.parse_footer`) trust only the footer that ends the body, so a look-alike inside a diff, a recommendation reason or a custom template is ignored. Text appended after the footer by a manual edit makes the footer unreadable rather than replacing it.
+
+The body is at most 60,000 characters. When it would be longer, diffs are truncated first, then dropped; sections 1–7 and the footer are always kept. The sections share the space the template's own text leaves (each at most 6,000 characters; short sections keep their full text), so a long custom template shortens sections instead of cutting them off. Blank lines are collapsed only where an empty section leaves a gap; diffs are shown exactly. A recommendation whose Impact Model projection mixes currencies is left out of the cost totals and the title, with a note.
+
+**Template.** `automation.pr.template` (`GITOPS_PR_TEMPLATE`) replaces the built-in layout. It is Markdown with Jinja2-style placeholders: the sections `{{ summary }}`, `{{ changes }}`, `{{ why }}`, `{{ risk }}`, `{{ assumptions }}`, `{{ rollback }}`, `{{ verification }}`, `{{ provenance }}`, `{{ diffs }}`, and the values `{{ title }}`, `{{ plan_id }}`, `{{ digest }}`, `{{ workload }}`, `{{ namespace }}`, `{{ repository }}`, `{{ branch }}`, `{{ recommendation_ids }}`, `{{ risk_level }}`, `{{ plan_url }}`. Templates are logic-free: no loops, filters or code, and rendered values are never expanded again. An unknown placeholder or an unterminated `{{` fails at startup instead of leaking into PRs. The `greenkube:v1` footer is always appended, whatever the template.
+
+```yaml
+automation:
+  pr:
+    template: |
+      {{ summary }}
+
+      Owner checklist: confirm the change window with the on-call team.
+
+      {{ changes }}
+
+      {{ risk }}
+
+      {{ rollback }}
+
+      {{ verification }}
+
+      {{ diffs }}
+```
+
+**Commit.** The commit GreenKube creates in the GitOps repository uses the PR title as its subject and carries `GreenKube-Plan:` and `GreenKube-Recommendations:` trailers (plus `GreenKube-Rollback-Of:` for rollbacks), so the history of the GitOps repository points back to the plan.
+
+**Deep links.** With `config.externalUrl` (`GREENKUBE_EXTERNAL_URL`) set, PRs, commit statuses and status comments link to `/recommendations/{id}`, `/changes/{plan_id}` and `/ledger?change=…`. Without it they carry no links.
+
+### Labels, drafts and reviewers
+
+- **Labels** (`defaultLabels`): `greenkube`, `optimization/<capability>` (for example `optimization/cpu-rightsizing`), `risk/<level>`, and `reliability` when the plan raises a resource. Missing labels are created where the provider allows it (see above).
+- **Drafts** (`draftHighRisk`): a plan whose riskiest recommendation is `high` opens as a draft PR on GitHub, a `Draft:` merge request on GitLab, and with a `WIP:` title on Gitea. If the provider refuses the draft (for example a GitHub plan without draft PRs), GreenKube opens the PR ready for review instead of failing.
+- **CODEOWNERS** (`codeowners`): GreenKube reads `CODEOWNERS` at the plan's base revision from the provider's documented locations (GitHub: `.github/`, root, `docs/`; GitLab: root, `docs/`, `.gitlab/`; Gitea: root, `docs/`, `.gitea/`). GitHub and GitLab syntax are supported, including GitLab sections and default owners, and so are Gitea's regular-expression rules. The owners of the touched paths are requested as reviewers: `@user` as a user, `@org/team` as a team of the repository's organization (GitHub). E-mail owners and malformed lines are ignored, and so are Gitea rules that a backtracking engine could take exponential time on (a repeated group that itself repeats or alternates, lookarounds, rules over 512 characters). GitHub is never asked to review its own PR author, and when GitHub refuses a batch of reviewers (one unknown or non-collaborator login fails the whole request), each reviewer is requested alone so the valid ones are still asked. GitLab username-to-ID lookups are cached for an hour. Configured `reviewers` and `teamReviewers` are requested as well.
+
+Labels, reviewers and the validation status are added after the PR is open and recorded. A provider refusal is logged and never fails or retries the plan operation.
+
+**Degraded features.** Labels and reviewers, the validation status, the status comment and CODEOWNERS reads are
+best effort. When the provider refuses one of them with `403` (for example a fine-grained GitHub token without the
+Issues permission that labels and comments need), the provider stays `verified`: the refused feature is recorded as a
+degraded feature note instead (`degraded_features`, for example `{"pull_request_metadata": "permission_denied"}`, per
+provider in `GET /api/v1/automation/status`, table `gitops_provider_feature_notes`) and cleared after the next
+successful call of that feature. A `401`, or a `403` on a required call (reading the repository, committing, opening
+the PR), still marks the provider in error.
+
+## Lifecycle feedback on the PR
+
+**Validation status** (`commitStatus`). GreenKube sets the commit status `greenkube/validation` on the PR head: `success` when the rendered diff validated and policy allowed the plan, `failure` otherwise. The description says which (for example `render diff valid; policy passed with 1 warning(s)`), and the status links to the change page when `externalUrl` is set.
+
+**Status comment** (`lifecycleComments`). After the merge, GreenKube keeps one comment on the PR up to date with a timeline:
+
+| Step | Shows |
+|---|---|
+| Merged | The landed commit and time. |
+| Synced | The controller (Argo CD Application or Flux object) and the revision it runs, or the sync failure. |
+| Applied | When the rollout completed. |
+| Measuring | The measurement end (ETA). |
+| Outcome | `realized` with the measured annual savings and their 90% confidence interval, or `not_realized`, `inconclusive`, `contaminated`, or rollback review; with a link to the ledger. |
+
+The comment is posted once and then edited, never duplicated: it starts with the marker `<!-- greenkube:lifecycle v1 -->`, and GreenKube edits the marked comment that its own identity wrote. That identity is the token's user (`GET /user`) or, when the token may not read its own profile, the author of the PR, which GreenKube opened. A marked comment written by anyone else is never adopted or edited, so nobody can have GreenKube's status written into a comment they control, and a human comment is never overwritten. If the token changes to another user, the new user posts one new status comment and keeps it up to date. A body identical to the one last published costs no provider call. The sync step is posted as soon as the sync observer records it; applied, measuring and outcome are refreshed by the leader controller every 5 minutes for PRs merged within `lifecycleLookbackDays` (at most 25 comment writes per cycle). Outcomes come from change measurement; with change measurement off, from the interim verifier.
+
+**Newer advice available** (E7). A recommendation never changes under an open plan: a scan that computes different advice queues it as the next revision, and the plan keeps the revision it pinned. The status comment then says "Newer advice available" with the new values, after the merge and also **before** it: the leader controller checks each open plan PR for queued advice at most every 15 minutes (on the same cycle and the same 25-writes cap) and posts the status comment only when there is newer advice, so open PRs without news get no comment. Close the PR and open a new preview to apply the newer advice.
+
+**Read-only credentials.** With the `patch` or `ci` [delivery mode](#delivery-modes) the token in the cluster is
+read-only, so GreenKube writes nothing to the provider: no status comment (on any plan) while that mode is
+configured, and never on a plan that was approved for `patch` or `ci` delivery. Lifecycle tracking (merge, sync,
+apply, measurement) is unchanged and visible in the UI.
+
+Comments and statuses need a token that can write PR comments and commit statuses (GitHub: `Pull requests` and `Commit statuses` write; GitLab: `api`; Gitea: `write:repository` and `write:issue`, plus `read:user` so GreenKube can read its own identity; without it, the PR author is used).
+
+## Provider API cost
+
+Opening a PR never lists or downloads the whole repository. The worker compares the plan branch with the plan's immutable base commit and reads only the planned paths:
+
+| Provider | Branch-state check | Commit |
+|---|---|---|
+| GitHub | One recursive tree read per ref (`GET /git/trees/{ref}?recursive=1`); the base tree is cached for the operation and blob IDs are compared. | Git Data API: one tree (new file contents inline) → one commit → one fast-forward-only ref update. |
+| GitLab | One direct compare (`GET /repository/compare?straight=true`) plus the blob IDs of the planned paths. | One native multi-action commit pinned to `start_sha`. |
+| Gitea | One commit read with its affected files (`GET /commits?sha=…&files=true`) plus the blob IDs of the planned paths; other branch shapes fall back to a paginated tree comparison. | One `POST /contents` on a throwaway branch, then a compare-and-swap branch update. |
+
+A typical plan opens its PR in about 12–14 provider calls, whatever the repository size (a 5,000-file repository is covered by the test suite). Every plan operation also runs under a provider call budget of 200 HTTP requests, retries included: an operation that would exceed it stops before the next request and fails with `provider-call-budget-exceeded`, so a pathological repository cannot exhaust the provider rate limit. Sync observation has its own smaller budgets: 10 requests per ancestry check (`sync_ancestry`) and 20 per planned-change check (`sync_planned_change`, at most three reads per planned file). Calls are exported as `greenkube_git_provider_requests_total`, `greenkube_git_provider_operation_calls` and `greenkube_git_provider_budget_exhausted_total`.
+
+The plan branch is created at the exact commit the plan was validated on (its base revision, or the verified moved head recorded as `committed_on_revision`), never at the branch's current head: a commit landing between validation and branch creation cannot leak into the pull request. Gitea creates it with `old_ref_name`; a Gitea release that ignores that field (it branches from the default branch instead) is detected from the created branch head, the branch is removed again and the operation fails closed.
+
+When GitLab reports `compare_timeout` for the direct compare, the worker falls back to comparing two full repository trees. GitLab pages that tree listing 100 entries at a time, so on repositories with more than about 10,000 files the fallback exceeds the 200-request budget and the operation fails closed with `provider-call-budget-exceeded` instead of consuming the rate limit.
+
+## Resilience and troubleshooting
+
+### Provider rate limits
+
+A rate-limited provider response is transient, never an authorization failure:
+
+- **GitHub**: `429`, or `403` with `x-ratelimit-remaining: 0` (primary limit) or a "secondary rate limit" message;
+- **GitLab**: `429` with `RateLimit-Reset`/`Retry-After`;
+- **Gitea** (and proxies in front of any provider): `429` with `Retry-After` or `X-RateLimit-Reset`.
+
+GreenKube reads the reset time from `Retry-After` (seconds or HTTP date), `X-RateLimit-Reset` or `RateLimit-Reset` (epoch seconds), plus one second; without one it waits 60 seconds, and never more than an hour. A wait of up to 2 seconds is retried inside the request (repository archive downloads included); a longer one, or a `403` secondary limit that announces no reset time (fast retries extend that penalty), ends the request with a typed `provider-rate-limited` error. A plan operation is then rescheduled at the reset time without consuming one of its attempts, the plan keeps its status, and the provider is never marked `permission_denied` (the preflight reports `provider-rate-limited`). Every rate-limited response increments `greenkube_git_provider_rate_limited_total{provider}`; the `GreenKubeGitProviderRateLimited` alert (group `greenkube.loop`) fires when a provider keeps rate-limiting for more than 30 minutes. Lower the request volume (a GitHub App has a higher quota than a personal token) or raise the provider quota.
+
+### A repository removed from the allowlist (detached pull requests)
+
+When a repository leaves the provider allowlist (or the provider credentials stop authorizing it), PR polling, plan branch cleanup and the lifecycle comment can no longer reach its pull requests. They no longer retry those records on every tick: each plan pull-request record keeps a capped exponential backoff (10 s, then doubling up to 1 hour), stored with the record (`provider_retry_failures`, `provider_retry_at`, `provider_detached_reason`).
+
+- **Repository no longer allowlisted** (`ProviderAuthorizationError`, `repository-not-allowed`): the records are marked detached (`provider_detached_reason = repository_not_allowed`). The controller logs one warning naming the repository, the provider and the record ids, and emits the audit event `pull_request_records_detached` on the `greenkube.audit` logger. Polling then stops; a detached record is rechecked only at the backoff cadence (at most hourly) and without a new warning.
+- **Credentials refused** (HTTP `401`/`403` that is not a rate limit) or provider removed or disabled: the same backoff, with one warning per backoff step. The records are not detached.
+- **Rate limit**: unchanged (see [Provider rate limits](#provider-rate-limits)). The record waits until the provider's reset time, and the backoff step does not grow.
+- Other transient failures (`5xx`, timeouts) are still retried on the next cycle.
+
+To resume, add the repository (or a matching pattern) back to the provider allowlist, through `gitops.providers[].repositories` or the discovered-repository allowlist. Adding a pattern makes the detached records of that provider due at once. The next poll reattaches them, logs `... are reattached` and emits `pull_request_records_reattached`. After fixing credentials, the records resume at their next backoff step (within an hour). If a repository was removed on purpose, close its open plan PRs on the provider: the detached records then stay idle.
+
+### A plan stuck in `applying`
+
+The worker writes a `pending` pull-request record before it pushes the branch. When the operation then exhausts its retries (for example the worker crashed after opening the PR and its last lease expired), the controller's operation reconciler checks the deterministic plan branch on the provider:
+
+- an open pull request (or one merged or closed meanwhile) whose head holds exactly the planned files is adopted: its records become `open` with the PR number and the plan moves to `pr_open` (audit reason `pull_request_adopted`); the usual lifecycle then records the merge or close;
+- otherwise the pending records move to `error` with the reason, the plan moves to `failed` (`operation_retry_exhausted`) and its recommendations can be planned again;
+- a transient provider error, or a failure to read the provider configuration, leaves everything unchanged until the next sweep; a provider that is gone (removed, disabled or misconfigured) fails the plan (`delivery_recovery_provider_unavailable`) and the record names the branch to check for an untracked PR.
+
+An operator or admin can also abandon a stuck plan: `POST /api/v1/automation/plans/{plan_id}/abandon` with an optional `{"reason": "..."}` (`approve` scope). It cancels the plan's operation, closes its pending records and fails the plan with the audit reason `abandoned_by_operator`, recorded with the caller (the reason is written to the closed records and the controller log). It is refused (`409`) unless the plan is `applying`, while a worker holds a live lease on the operation, when a pull request was already recorded for the plan, and when the deterministic plan branch holds an open pull request that was never recorded (the refusal names the branch and the PR): close that PR on the provider instead, or let the reconciler adopt it. It is also refused while the provider cannot be asked (transient error); a provider that is gone does not block it.
+
+### One plan per workload
+
+Plan creation and approval are atomic per workload. The busy check (another plan of the workload is `applying`, `pr_open`, `merged` or `synced`) runs again in the same transaction as the insert of a new plan and as the approval transition, under a per-workload lock (a PostgreSQL advisory transaction lock; SQLite transactions are serialized). Two concurrent previews for one workload yield one plan; the other request returns `409 workload_plan_already_exists` and can be retried. Approving a plan while another plan of the workload is approved or delivering returns the same error; a rollback plan may be created and approved while its original plan is still `synced` (rollback creation runs the same atomic check and returns `409 rollback_not_ready` on a conflict).
 
 ## Rollback
 
@@ -196,7 +859,7 @@ A synced plan whose recommendations remain in `rollback_review` can produce a va
 - The API re-reads the original plan's base revision through the authorized provider and rejects files that changed after the forward plan.
 - The rollback preview uses the same digest approval and worker queue.
 - A recommendation becomes `reverted` only after the rollback plan is `synced`, a post-baseline workload generation is observed, and live per-container requests match the original pre-apply baseline.
-- RAW rollback is built in. Kustomize rollback requires an explicitly configured exact-target rollback adapter. The supported Argo CD `HELM_VALUES` subset and Flux `HELM_RELEASE` subset restore the same Git-managed inputs as their forward plans.
+- RAW and Kustomize rollback are built in. Kustomize rollback renders the overlay in the same renderer sandbox as forward planning and rejects any change outside the exact target. The supported Argo CD `HELM_VALUES` subset and Flux `HELM_RELEASE` subset restore the same Git-managed inputs as their forward plans.
 - Unsupported layouts fail closed rather than producing a partial rollback.
 
 The **Recommendations** page exposes rollback preview from the Pull requests tab when the original plan qualifies.
@@ -215,15 +878,26 @@ The **Recommendations** page exposes rollback preview from the Pull requests tab
 
 The default snapshot limits are 100 MiB compressed, 500 MiB extracted, 20,000 files, and 2 MiB per file.
 
-## Worker modes
+## Where automation runs
+
+All automation runs in the controller process (roadmap M8, F8). The API only handles requests: it previews and approves plans, and it writes provider webhooks to a durable outbox. It runs no worker and no expiry sweep, so API replicas are safe to scale. See [Process topology](architecture.md#process-topology).
+
+The controller runs two leader-gated loops:
+
+- `plan-executor` claims and executes queued plan operations (at most 10 per 5-second tick).
+- `automation-controller` runs one tick every 5 seconds under a single database lease. The tick drains the webhook outbox, polls open pull requests every `automation.prPollIntervalSeconds`, then cleans up branches, reconciles exhausted operations, expires plans (every 60 s), re-checks open deletion pull requests (every 5 minutes, [Deleting orphaned resources](#deleting-orphaned-resources)) and runs retention (daily).
 
 | Mode | When | Behaviour |
 |---|---|---|
-| `inline` | Default for `standalone` when automation is enabled. | The API process starts the worker loop. |
-| `worker` | Default for `production` when automation is enabled. | A dedicated single-replica Deployment executes operations. Its authenticated metrics listener uses `automation.workerMetricsPort` (default 8001). |
-| `disabled` | Automation off. | No discovery, planning, or worker execution. |
+| `inline` | Default for `standalone` when automation is enabled. | Only the controller executes plan operations. |
+| `worker` | Default for `production` when automation is enabled. | The controller executes operations, and dedicated worker pods execute them too (`production.components.automation.replicas`, or the standalone `automation-worker`). Workers do nothing else. Operation leases make any number of executors safe. The workers' authenticated metrics listener uses `automation.workerMetricsPort` (default 8001). |
+| `disabled` | Automation off. | No plan execution, webhook outbox or PR polling. Plan expiry and retention still run while Git providers are configured. |
 
-Do not run inline and worker mode against the same database. Database leases prevent duplicate execution, but only one mode should be configured.
+Loops are supervised by the controller's loop registry:
+
+- A tick that raises or times out is logged with an error code, counted in `greenkube_loop_runs_total{outcome="failure"|"timeout"}`, and retried with exponential backoff. The other loops keep running.
+- A loop task that crashes is restarted.
+- The controller serves `/readyz` and `/loops` on its metrics port, and the `greenkube_loop_*` metrics (see [Observability](observability-slos.md#controller-loops)). `GET /api/v1/automation/status` reports executor health through the worker heartbeats that every executor writes to the database.
 
 ## Intervals and operations
 
@@ -235,24 +909,36 @@ Do not run inline and worker mode against the same database. Database leases pre
 | `automation.syncPollIntervalSeconds` | `30` | Controller sync observation interval (10–86400). |
 | `automation.syncTimeoutSeconds` | `1800` | Time before an unsynced merged plan becomes `sync_failed` (60–86400). |
 
-A periodic reconciler fails an `applying` plan when its operation is terminal and no PR exists. A daily retention job removes rendered file contents and terminal operation/webhook rows older than 90 days while retaining plan metadata, PR records, and recommendation audit events.
+The automation controller loop fails an `applying` plan when its operation is terminal and no PR exists. Its expiry step reads only the plans whose TTL elapsed, in bounded batches. It runs once per cluster, on the controller that holds the Lease, instead of in every API replica.
+
+A daily retention job removes rendered file contents and terminal operation/webhook rows older than 90 days:
+
+- A pruned plan keeps a compact `file_plan_summary`: paths, original blob SHAs, content digests, diff statistics, validation and digest. `GET /api/v1/automation/plans/{plan_id}` and the workload's policy history keep working. A pruned plan can no longer be rolled back automatically, because its file contents are gone; the rollback preview explains this, and a new preview with the desired resources replaces it.
+- Plan metadata, PR records and recommendation audit events (`recommendation_events`) are never deleted.
+- Webhook deliveries for pull requests that GreenKube does not track are stored as `ignored` and answered with `202`. They are never retried, and retention prunes them.
 
 ## Observability
 
-- `GET /api/v1/automation/status` reports worker heartbeat age, queue depth, plan backlog, discovery freshness, renderer configuration, and provider preflight/capability state.
+- `GET /api/v1/automation/status` reports executor heartbeat age (`worker.inline_loop` is always `null` since the API runs no loop), the controller loop state that each controller replica persists every 30 s (`controller`: `healthy`, `leader`, and per replica its `loops` snapshot with last success, consecutive failures and last error code; see [Observability](observability-slos.md#controller-loops)), queue depth, plan backlog, discovery freshness, renderer configuration, and provider preflight/capability state. `token_configured` is `true` only when an enabled provider's credential Secret key resolves to a non-empty value; each provider also reports its own `token_configured`. A provider's `status` is `unverified` until a real call: any successful authenticated call through the provider registry sets `verified` (with `last_checked_at`): a repository archive fetch for a plan preview, pull-request polling, branch cleanup, or the plan executor opening or adopting a pull request. A call the provider refuses sets `error` with `last_error_code` `auth_failed` (HTTP 401) or `permission_denied` (403); transient errors (rate limits, including GitHub's `403` with an exhausted quota or a secondary rate limit, and 5xx) and other errors leave the state unchanged. An unchanged state is rewritten at most every 5 minutes per provider. Changing a provider's endpoint or credential reference resets it to `unverified`; other configuration changes keep it.
 - `GET /api/v1/automation/pull-requests` lists safe pending/open PR metadata.
-- `GET /prometheus/metrics` exposes control-loop metrics. In production worker mode, a separate Service/ServiceMonitor scrapes the worker's process-local registry.
-- Optional `monitoring.prometheusRule.enabled` installs alerts for stuck operations/plans, sync failures, webhook lag, and stale worker heartbeats.
+- `GET /prometheus/metrics` on the controller metrics port exposes the automation loop, PR polling and plan-execution metrics. In production worker mode, a separate Service/ServiceMonitor scrapes the dedicated executors' process-local registry.
+- Optional `monitoring.prometheusRule.enabled` installs alerts for stuck operations/plans, sync failures, webhook lag, stale worker heartbeats, and controller loops (`GreenKubeControllerLoopFailing`, `GreenKubeAutomationLoopStale`, `GreenKubeNoActiveController`; `monitoring.prometheusRule.controllerAlerts`).
 
 SLOs and example alert rules are documented in [Observability and SLOs](observability-slos.md). The full metric inventory is in [Prometheus and Grafana](prometheus-grafana.md).
 
 ## Limitations
 
-- Only CPU and memory rightsizing recommendations have GitOps planners.
-- Remote Helm/Kustomize artifacts, Argo CD inline Helm values, Flux `valuesFrom.targetPath`, cross-repository/revision values, chart dependencies, and unmanaged post-renderers fail closed.
+- Only CPU and memory rightsizing recommendations and orphaned LoadBalancer/PersistentVolume deletions have GitOps planners; a deletion has no automated rollback.
+- A resource's Git location comes from its controller's resolved workload bindings. An Argo CD Application or Flux Kustomization that manages only PersistentVolumes or Services, and no workload, leaves them unresolved (`binding_unresolved`), so their deletions stay manual.
+- Resource bindings are replaced on every discovery refresh: when one controller API fails during a refresh, its resources temporarily report `resource_binding_missing` until the next successful refresh.
+- The `greenkube.io/source` annotation binding for unmanaged resources is not implemented; manual mode (snippets and "Mark as applied") covers them.
+- Remote Kustomize artifacts, Argo CD inline Helm values, Flux `valuesFrom.targetPath`, cross-repository/revision values, dependencies of local charts, remote charts that need registry credentials or whose dependencies are not vendored, chart `valuesFiles` of remote Flux charts, and unmanaged post-renderers fail closed. Remote Helm charts from HTTP repositories and OCI registries are supported ([Helm support](#helm-support)); Flux remote charts are edited through the managed post-renderer, not `spec.values`.
 - Argo CD Applications that are not stored in Git have no PR target.
 - Provider archive downloads must be available at the resolved full commit SHA. GreenKube does not fall back to a mutable branch or per-file reads.
-- Gitea does not support draft PRs or team reviewers; GitLab does not support team reviewers. Configure only supported options.
-- Minikube does not enforce NetworkPolicy. Do not enable in-cluster rendering there unless you have validated an equivalent boundary.
+- Descendant sync confirmation needs a provider ancestry API: GitHub compare, GitLab merge base, or a Gitea release that serves `GET /repos/{owner}/{repo}/compare/{basehead}`. Without it, a controller that already runs a later commit stays pending (`ancestry_unavailable`) until the sync timeout.
+- The planned-change check for a later commit compares only the files the plan edited, parsed as YAML or JSON. A later commit that overrides the planned values from another file (for example a second Helm values file) is not detected at sync time; apply detection then never matches the live workload and the plan stays `synced`. Files that no longer parse, or whose base content no longer matches the plan, never confirm a later commit.
+- Gitea does not support draft PRs or team reviewers; GitLab does not support team reviewers. Configure only supported options. High-risk plans on Gitea are marked with a `WIP:` title instead of a draft.
+- CODEOWNERS team owners are requested only on GitHub; on GitLab and Gitea only user owners become reviewers (GitLab resolves usernames to numeric user IDs through its user API).
+- If the CNI does not enforce NetworkPolicy, Kustomize and Helm plans carry the `renderer_egress_unenforced` warning until the egress boundary is enforced (a NetworkPolicy-enforcing CNI or `renderer.egressFirewall.enabled`). Raw-manifest plans never call the renderer.
 
 See the [API reference](api.md) for plan, GitOps, and webhook endpoints.

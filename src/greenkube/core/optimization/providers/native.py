@@ -35,10 +35,16 @@ class NativeSource(RecommendationSource):
 
     async def collect(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
+        # A failed analyzer makes the result partial: the engine must not let
+        # the missing recommendations go stale (E8, fail closed).
+        self.last_collect_complete = True
         for analyzer in self.analyzers:
             analyzer_name = analyzer.__class__.__name__
             try:
                 recs.extend(analyzer.analyze(context))
+                if not analyzer.scan_complete():
+                    self.last_collect_complete = False
             except Exception:
+                self.last_collect_complete = False
                 logger.exception("Native analyzer '%s' failed; continuing with remaining analyzers.", analyzer_name)
         return recs

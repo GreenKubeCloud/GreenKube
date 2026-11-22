@@ -23,6 +23,7 @@ BRANCH_CLEANUP_PLAN_STATUSES = (
     "ambiguous",
     "rejected",
     "superseded",
+    "cancelled",
 )
 
 
@@ -123,6 +124,17 @@ class PullRequestRepository(ABC):
         safely and are marked as orphaned rather than treated as open PRs.
         """
 
+    async def list_feedback_pull_requests(
+        self,
+        *,
+        merged_since: datetime,
+        limit: int,
+        after_id: int | None = None,
+    ) -> List[PullRequestRecord]:
+        """Returns plan PRs merged since ``merged_since`` whose status comment may change (J5)."""
+        self.validate_poll_page(limit, after_id)
+        raise NotImplementedError("lifecycle feedback listing is not supported by this repository")
+
     async def list_branch_cleanup_candidates(
         self,
         *,
@@ -143,6 +155,33 @@ class PullRequestRepository(ABC):
     ) -> None:
         """Persist successful deletion or absence for one deterministic plan branch."""
         raise NotImplementedError("branch cleanup completion persistence is not supported by this repository")
+
+    async def set_provider_retry_state(
+        self,
+        pr_ids: Sequence[int],
+        *,
+        failures: int,
+        retry_at: datetime | None,
+        detached_reason: str | None,
+    ) -> None:
+        """Persist the provider backoff state of records (0, None, None clears it).
+
+        Does not touch ``updated_at``: the backoff is bookkeeping, not a lifecycle change.
+        """
+        raise NotImplementedError("provider backoff persistence is not supported by this repository")
+
+    @staticmethod
+    def validate_provider_retry_state(
+        pr_ids: Sequence[int], failures: int, retry_at: datetime | None
+    ) -> tuple[int, ...]:
+        ids = tuple(dict.fromkeys(pr_ids))
+        if any(type(pr_id) is not int or pr_id <= 0 for pr_id in ids):
+            raise ValueError("pr_ids must be positive integers.")
+        if type(failures) is not int or failures < 0:
+            raise ValueError("failures must be a non-negative integer.")
+        if retry_at is not None and (not isinstance(retry_at, datetime) or retry_at.tzinfo is None):
+            raise ValueError("retry_at must be a timezone-aware datetime.")
+        return ids
 
     @staticmethod
     def validate_poll_page(limit: int, after_id: int | None) -> None:

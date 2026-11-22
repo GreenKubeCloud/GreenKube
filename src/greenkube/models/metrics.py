@@ -6,11 +6,12 @@ single source of truth for our data structures, ensuring type safety and
 consistency across all modules (collectors, calculators, reporters).
 """
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from greenkube.gitops.contracts import ActionPlanV3
 from greenkube.models.evidence import RecommendationEvidence
@@ -33,6 +34,10 @@ class EnergyMetric(BaseModel):
     region: Optional[str] = Field(None, description="The cloud region of the node.")
     is_estimated: bool = Field(False, description="Whether the metric relies on estimated values.")
     estimation_reasons: List[str] = Field(default_factory=list, description="Reasons for estimation.")
+    power_source: Optional[str] = Field(
+        None,
+        description="Provenance of the node power profile (see greenkube.models.provenance.PowerSource).",
+    )
 
 
 class CostMetric(BaseModel):
@@ -46,10 +51,27 @@ class CostMetric(BaseModel):
     cpu_cost: float = Field(..., description="The calculated cost of CPU usage for the pod.")
     ram_cost: float = Field(..., description="The calculated cost of RAM usage for the pod.")
     total_cost: float = Field(..., description="The total cost for the pod (CPU + RAM + other costs).")
+    storage_cost: float = Field(0.0, description="Persistent-volume cost of the pod over the window.")
+    network_cost: float = Field(0.0, description="Network egress cost of the pod over the window.")
+    lb_cost: float = Field(0.0, description="LoadBalancer cost allocated to the pod over the window.")
+    gpu_cost: float = Field(0.0, description="GPU cost of the pod over the window.")
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="The timestamp of the cost calculation.",
     )
+    window_start: Optional[datetime] = Field(None, description="Inclusive start of the allocation window.")
+    window_end: Optional[datetime] = Field(None, description="Exclusive end of the allocation window.")
+    minutes: Optional[float] = Field(
+        None,
+        description="Minutes the pod ran inside the allocation window, as reported by the cost source.",
+    )
+    running_start: Optional[datetime] = Field(
+        None, description="First time the pod ran inside the allocation window (OpenCost ``start``)."
+    )
+    running_end: Optional[datetime] = Field(
+        None, description="Last time the pod ran inside the allocation window (OpenCost ``end``)."
+    )
+    source: str = Field("opencost", description="Cost provenance (greenkube.models.provenance.CostSource).")
 
 
 class CarbonEmissionMetric(BaseModel):
@@ -77,25 +99,56 @@ class PodMetric(BaseModel):
     container_name: str = Field(..., description="The name of the container within the pod.")
     cpu_request: int = Field(..., description="CPU request in millicores.")
     memory_request: int = Field(..., description="Memory request in bytes.")
-    ephemeral_storage_request: int = Field(0, description="Ephemeral storage request in bytes.")
+    cpu_limit: Optional[int] = Field(None, description="CPU limit in millicores; None when unlimited.")
+    memory_limit: Optional[int] = Field(None, description="Memory limit in bytes; None when unlimited.")
+    gpu_request: int = Field(
+        0,
+        description="GPUs requested (nvidia.com/gpu, amd.com/gpu, gpu.intel.com/*; the limit when no request), NRG-13.",
+    )
+    kind: str = Field(
+        "container",
+        description=(
+            "Container kind: 'container' (spec.containers), 'sidecar' (native sidecar: init container with "
+            "restartPolicy Always) or 'init' (classic init container, excluded from steady-state sums)."
+        ),
+    )
     owner_kind: Optional[str] = Field(None, description="Owner resource kind (Deployment, StatefulSet, etc.).")
     owner_name: Optional[str] = Field(None, description="Owner resource name.")
+    pod_uid: Optional[str] = Field(
+        None, description="Kubernetes pod UID (metadata.uid); a new UID under the same name is a recreated pod."
+    )
 
 
 class RecommendationType(str, Enum):
     """Enumeration of possible recommendation types."""
 
-    ZOMBIE_POD = "ZOMBIE_POD"
     RIGHTSIZING_CPU = "RIGHTSIZING_CPU"
     RIGHTSIZING_MEMORY = "RIGHTSIZING_MEMORY"
+    ORPHANED_PERSISTENT_VOLUME = "ORPHANED_PERSISTENT_VOLUME"
+    ORPHANED_LOAD_BALANCER = "ORPHANED_LOAD_BALANCER"
+    # Retired in 0.4 with the native advisory analyzers: nothing produces them. They stay
+    # so stored rows (stale, reason type_removed, migration 0300) still load.
+    ZOMBIE_POD = "ZOMBIE_POD"
     AUTOSCALING_CANDIDATE = "AUTOSCALING_CANDIDATE"
     OFF_PEAK_SCALING = "OFF_PEAK_SCALING"
     IDLE_NAMESPACE = "IDLE_NAMESPACE"
     CARBON_AWARE_SCHEDULING = "CARBON_AWARE_SCHEDULING"
     OVERPROVISIONED_NODE = "OVERPROVISIONED_NODE"
     UNDERUTILIZED_NODE = "UNDERUTILIZED_NODE"
-    ORPHANED_PERSISTENT_VOLUME = "ORPHANED_PERSISTENT_VOLUME"
-    ORPHANED_LOAD_BALANCER = "ORPHANED_LOAD_BALANCER"
+
+
+#: Types no analyzer or source produces any more (retired with reason ``type_removed``).
+RETIRED_RECOMMENDATION_TYPES: frozenset["RecommendationType"] = frozenset(
+    {
+        RecommendationType.ZOMBIE_POD,
+        RecommendationType.AUTOSCALING_CANDIDATE,
+        RecommendationType.OFF_PEAK_SCALING,
+        RecommendationType.IDLE_NAMESPACE,
+        RecommendationType.CARBON_AWARE_SCHEDULING,
+        RecommendationType.OVERPROVISIONED_NODE,
+        RecommendationType.UNDERUTILIZED_NODE,
+    }
+)
 
 
 class RecommendationSource(str, Enum):
@@ -103,7 +156,33 @@ class RecommendationSource(str, Enum):
 
     GREENKUBE = "greenkube"
     VPA = "vpa"
-    KARPENTER = "karpenter"
+
+
+#: Source ids a recommendation may carry besides the built-in ones (``krr``, ``acme.krr``, ``push:ci``).
+_SOURCE_ID = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$")
+
+
+def coerce_recommendation_source(value: Any) -> Any:
+    """A built-in source as :class:`RecommendationSource`, another valid source id as text.
+
+    Signal-only sources (third-party connectors, pushed signals) become
+    recommendations through consensus (roadmap E6) and keep their own id;
+    anything else falls back to ``greenkube``.
+    """
+    if isinstance(value, RecommendationSource):
+        return value
+    text = str(getattr(value, "value", value) or "").strip()
+    try:
+        return RecommendationSource(text)
+    except ValueError:
+        pass
+    lowered = text.lower()
+    return lowered if _SOURCE_ID.match(lowered) else RecommendationSource.GREENKUBE
+
+
+def source_text(value: Any) -> str:
+    """The text of a recommendation source (enum or plain id)."""
+    return str(getattr(value, "value", value) or "")
 
 
 class RecommendationCapability(str, Enum):
@@ -111,30 +190,32 @@ class RecommendationCapability(str, Enum):
 
     CPU_RIGHTSIZING = "cpu_rightsizing"
     MEMORY_RIGHTSIZING = "memory_rightsizing"
+    STORAGE_CLEANUP = "storage_cleanup"
+    LB_CLEANUP = "lb_cleanup"
+    # Capabilities of the types retired in 0.4: stored rows still load.
     AUTOSCALING = "autoscaling"
     OFF_PEAK = "off_peak"
     CARBON_AWARE = "carbon_aware"
     ZOMBIE_CLEANUP = "zombie_cleanup"
     NAMESPACE_CLEANUP = "namespace_cleanup"
     NODE_OPTIMIZATION = "node_optimization"
-    STORAGE_CLEANUP = "storage_cleanup"
-    LB_CLEANUP = "lb_cleanup"
     NODE_POOL = "node_pool"
 
 
 #: Maps each recommendation type to the capability it owns.
 RECOMMENDATION_TYPE_CAPABILITY: dict["RecommendationType", RecommendationCapability] = {
-    RecommendationType.ZOMBIE_POD: RecommendationCapability.ZOMBIE_CLEANUP,
     RecommendationType.RIGHTSIZING_CPU: RecommendationCapability.CPU_RIGHTSIZING,
     RecommendationType.RIGHTSIZING_MEMORY: RecommendationCapability.MEMORY_RIGHTSIZING,
+    RecommendationType.ORPHANED_PERSISTENT_VOLUME: RecommendationCapability.STORAGE_CLEANUP,
+    RecommendationType.ORPHANED_LOAD_BALANCER: RecommendationCapability.LB_CLEANUP,
+    # Retired types (stored rows only).
+    RecommendationType.ZOMBIE_POD: RecommendationCapability.ZOMBIE_CLEANUP,
     RecommendationType.AUTOSCALING_CANDIDATE: RecommendationCapability.AUTOSCALING,
     RecommendationType.OFF_PEAK_SCALING: RecommendationCapability.OFF_PEAK,
     RecommendationType.IDLE_NAMESPACE: RecommendationCapability.NAMESPACE_CLEANUP,
     RecommendationType.CARBON_AWARE_SCHEDULING: RecommendationCapability.CARBON_AWARE,
     RecommendationType.OVERPROVISIONED_NODE: RecommendationCapability.NODE_OPTIMIZATION,
     RecommendationType.UNDERUTILIZED_NODE: RecommendationCapability.NODE_OPTIMIZATION,
-    RecommendationType.ORPHANED_PERSISTENT_VOLUME: RecommendationCapability.STORAGE_CLEANUP,
-    RecommendationType.ORPHANED_LOAD_BALANCER: RecommendationCapability.LB_CLEANUP,
 }
 
 
@@ -154,12 +235,10 @@ class RecommendationStatus(str, Enum):
     PR_OPEN = "pr_open"
     VERIFYING = "verifying"
     VERIFIED = "verified"
+    REGRESSED = "regressed"
     ROLLBACK_REVIEW = "rollback_review"
     REVERTED = "reverted"
     FAILED = "failed"
-    PLAN_CREATED = "plan_created"
-    PLAN_STATUS_CHANGED = "plan_status_changed"
-    PLAN_ACTION_STATUS_CHANGED = "plan_action_status_changed"
 
 
 class ApplicationMethod(str, Enum):
@@ -189,14 +268,25 @@ class RecommendationEventType(str, Enum):
     IGNORED = "ignored"
     UNIGNORED = "unignored"
     EXPIRED = "expired"
+    STALE = "stale"
     PR_OPENED = "pr_opened"
+    PR_CLOSED = "pr_closed"
     PR_MERGED = "pr_merged"
     APPLIED = "applied"
     VERIFICATION_STARTED = "verification_started"
     VERIFIED = "verified"
+    NOT_REALIZED = "not_realized"
+    INCONCLUSIVE = "inconclusive"
+    REMEASURE_REQUESTED = "remeasure_requested"
+    ROLLBACK_DISMISSED = "rollback_dismissed"
+    REGRESSED = "regressed"
     ROLLBACK_REVIEW = "rollback_review"
     REVERTED = "reverted"
     FAILED = "failed"
+    #: A recommendation withdrawn because its evidence no longer holds (migration 0063).
+    RETIRED = "retired"
+    #: The advice of an ignored recommendation changed materially in a later scan (REC-06).
+    CHANGED_WHILE_IGNORED = "changed_while_ignored"
 
 
 class RiskLevel(str, Enum):
@@ -311,13 +401,17 @@ class Recommendation(BaseModel):
     cron_schedule: Optional[str] = Field(None, description="Suggested cron schedule for off-peak scaling.")
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
     # Source and provenance
-    source: RecommendationSource = Field(
-        RecommendationSource.GREENKUBE, description="Connector that produced this recommendation."
+    source: Union[RecommendationSource, str] = Field(
+        RecommendationSource.GREENKUBE,
+        description=(
+            "Source whose proposal the consensus chose: a built-in source (greenkube, vpa, karpenter) or the "
+            "source id of a signal-only source (krr, push:<client>)."
+        ),
     )
     source_ref: Optional[str] = Field(None, description="Connector-specific reference (e.g. '<namespace>/<vpa-name>').")
     sources: List[str] = Field(
         default_factory=list,
-        description="All sources that observed this issue (provenance, highest priority first).",
+        description="All sources that support this recommendation (the chosen source first).",
     )
     superseded_by: Optional[str] = Field(
         None, description="Source that won arbitration for this capability, when it differs from source."
@@ -335,8 +429,12 @@ class Recommendation(BaseModel):
     risk_factors: List[str] = Field(default_factory=list, description="Explainable risk contributors.")
     confidence: Optional[float] = Field(None, description="Confidence in the recommendation, 0.0 to 1.0.")
     effort: Optional[EffortLevel] = Field(None, description="Implementation effort: low, medium or high.")
-    ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
-    ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    ranking_score: Optional[float] = Field(
+        None, description="Expected value (EV) in currency per year; the default ranking key (roadmap I1)."
+    )
+    ranking_factors: dict = Field(
+        default_factory=dict, description="EV breakdown in currency per year; the factors sum to ranking_score."
+    )
     action: Optional[ActionPlanV3] = Field(None, description="Typed container-aware action for GitOps planning.")
     patch: Optional[RecommendationPatchV2] = Field(
         None, description="Deprecated compatibility patch view over action; retained for legacy consumers."
@@ -344,6 +442,54 @@ class Recommendation(BaseModel):
     expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
     reversible: Optional[bool] = Field(None, description="Whether the change has a clean reverse.")
     requires_restart: Optional[bool] = Field(None, description="Whether applying the change restarts workloads.")
+    impact: Optional[dict] = Field(
+        None,
+        description="Projected Impact Model delta (ImpactDelta); a projection, never a measured value.",
+    )
+    value: Optional[dict] = Field(
+        None,
+        description=(
+            "Risk-adjusted expected value (ValueScore, roadmap I1): value_annual, p_success, incident_cost, "
+            "effort_cost, ev and currency, with their components. A projection, never a measured value."
+        ),
+    )
+    pending_revision: Optional[dict] = Field(
+        None,
+        description=(
+            "A lower request proposal waiting for confirmation before it becomes a new revision (IMP-13): "
+            "{value, scans}, the latest proposed request and the number of consecutive scans that proposed it."
+        ),
+    )
+    eligibility: Optional[dict] = Field(
+        None,
+        description=(
+            "Delivery eligibility computed when the recommendation is read (roadmap F10): can_open_pr, "
+            "delivery_modes, blockers [{code, message, fix}] and warnings. Never persisted."
+        ),
+    )
+    # Recommendation v2 (roadmap E4, E6)
+    fingerprint_v4: Optional[str] = Field(
+        None, description="Cluster-qualified identity: sha256(cluster_uid, target.key(), capability, kind)."
+    )
+    target: Optional[dict] = Field(None, description="Canonical TargetRef of the recommendation (v2).")
+    proposal: Optional[dict] = Field(None, description="Consolidated typed proposal (v2); the flat fields mirror it.")
+    consensus: Optional[dict] = Field(
+        None, description="How the consolidated proposal was chosen across sources (policy, agreement, spread)."
+    )
+    floor_reason: Optional[str] = Field(
+        None,
+        exclude=True,
+        description=(
+            "Why a native request increase is a lower bound of the consensus (``oom_kills``): no external "
+            "source may bring the consolidated value below it, under any policy. Set by the analyzer, read by "
+            "the consensus (which records it in ``consensus.floor``); never serialized or persisted."
+        ),
+    )
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _coerce_source(cls, value: Any) -> Any:
+        return coerce_recommendation_source(value)
 
     @model_validator(mode="after")
     def _derive_capability(self) -> "Recommendation":
@@ -354,6 +500,14 @@ class Recommendation(BaseModel):
         elif self.action is not None and self.patch is not None and self.patch.action != self.action:
             self.patch = self.patch.model_copy(update={"action": self.action})
         return self
+
+
+#: Shown next to a 0 billable projection on fixed nodes (IMP-03).
+FIXED_NODES_NOTE = "fixed nodes: frees capacity, bill unchanged until nodes are removed"
+#: Shown instead of a billable projection made before the cluster was observed (IMP-12).
+UNOBSERVED_NOTE = "billable saving unknown: cluster not observed yet"
+#: ``impact.assumptions.realization_factor_source`` of such a projection (greenkube.impact.realization).
+UNOBSERVED_REALIZATION_SOURCE = "realization_context:unobserved"
 
 
 class RecommendationRecord(BaseModel):
@@ -383,9 +537,22 @@ class RecommendationRecord(BaseModel):
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
     identity_version: int = Field(3, description="Identity algorithm version.")
     fingerprint: Optional[str] = Field(None, description="Stable v2 recommendation identity fingerprint.")
+    # Recommendation v2 (roadmap E4, E6, E7)
+    fingerprint_v4: Optional[str] = Field(
+        None, description="Cluster-qualified identity: sha256(cluster_uid, target.key(), capability, kind)."
+    )
+    revision: int = Field(
+        1, ge=1, description="Revision of the consolidated proposal; increases when the proposal changes (E7)."
+    )
+    target: Optional[dict] = Field(None, description="Canonical TargetRef of the recommendation (v2).")
+    proposal: Optional[dict] = Field(None, description="Consolidated typed proposal (v2); the flat fields mirror it.")
+    consensus: Optional[dict] = Field(
+        None, description="How the consolidated proposal was chosen across sources (policy, agreement, spread)."
+    )
     # Source and provenance
-    source: RecommendationSource = Field(
-        RecommendationSource.GREENKUBE, description="Connector that produced this recommendation."
+    source: Union[RecommendationSource, str] = Field(
+        RecommendationSource.GREENKUBE,
+        description="Source whose proposal the consensus chose (built-in source or signal-only source id).",
     )
     source_ref: Optional[str] = Field(None, description="Connector-specific reference.")
     sources: List[str] = Field(default_factory=list, description="All sources that observed this issue.")
@@ -401,8 +568,12 @@ class RecommendationRecord(BaseModel):
     risk_factors: List[str] = Field(default_factory=list, description="Explainable risk contributors.")
     confidence: Optional[float] = Field(None, description="Confidence in the recommendation, 0.0 to 1.0.")
     effort: Optional[EffortLevel] = Field(None, description="Implementation effort: low, medium or high.")
-    ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
-    ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    ranking_score: Optional[float] = Field(
+        None, description="Expected value (EV) in currency per year; the default ranking key (roadmap I1)."
+    )
+    ranking_factors: dict = Field(
+        default_factory=dict, description="EV breakdown in currency per year; the factors sum to ranking_score."
+    )
     action: Optional[ActionPlanV3] = Field(None, description="Typed container-aware action for GitOps planning.")
     patch: Optional[RecommendationPatchV2] = Field(
         None, description="Deprecated compatibility patch view over action; retained for legacy consumers."
@@ -410,6 +581,31 @@ class RecommendationRecord(BaseModel):
     expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
     reversible: Optional[bool] = Field(None, description="Whether the change has a clean reverse.")
     requires_restart: Optional[bool] = Field(None, description="Whether applying the change restarts workloads.")
+    impact: Optional[dict] = Field(
+        None,
+        description="Projected Impact Model delta (ImpactDelta); a projection, never a measured value.",
+    )
+    value: Optional[dict] = Field(
+        None,
+        description=(
+            "Risk-adjusted expected value (ValueScore, roadmap I1): value_annual, p_success, incident_cost, "
+            "effort_cost, ev and currency, with their components. A projection, never a measured value."
+        ),
+    )
+    pending_revision: Optional[dict] = Field(
+        None,
+        description=(
+            "A lower request proposal waiting for confirmation before it becomes a new revision (IMP-13): "
+            "{value, scans}, the latest proposed request and the number of consecutive scans that proposed it."
+        ),
+    )
+    eligibility: Optional[dict] = Field(
+        None,
+        description=(
+            "Delivery eligibility computed when the recommendation is read (roadmap F10): can_open_pr, "
+            "delivery_modes, blockers [{code, message, fix}] and warnings. Never persisted."
+        ),
+    )
     # Applied lifecycle fields
     applied_at: Optional[datetime] = Field(None, description="When the recommendation was applied.")
     actual_cpu_request_millicores: Optional[int] = Field(
@@ -425,6 +621,24 @@ class RecommendationRecord(BaseModel):
     # Ignore lifecycle fields
     ignored_at: Optional[datetime] = Field(None, description="When the recommendation was ignored.")
     ignored_reason: Optional[str] = Field(None, description="Reason for ignoring the recommendation.")
+    changed_since_ignored: Optional[dict] = Field(
+        None,
+        description=(
+            "On an ignored recommendation: the latest advice a scan produced for it that differs materially "
+            "from the ignored proposal (REC-06), from its changed_while_ignored event. Never persisted."
+        ),
+    )
+    # Link to the applied change this advice follows (REC-01)
+    previous_recommendation_id: Optional[int] = Field(
+        None,
+        description=(
+            "The applied recommendation of the same target and type this advice follows, when it was "
+            "inserted after that change (for example an OOM-driven increase after a decrease)."
+        ),
+    )
+    previous_change_id: Optional[str] = Field(
+        None, description="The recorded change (change_id) of previous_recommendation_id, when one is recorded."
+    )
     # Apply / verification lifecycle fields (Phase 3)
     application_method: Optional[str] = Field(
         None, description="How the change landed: manual, detected, pr_merge, webhook, polling."
@@ -446,6 +660,95 @@ class RecommendationRecord(BaseModel):
         description="When the recommendation was generated.",
     )
     updated_at: Optional[datetime] = Field(None, description="When the recommendation was last updated.")
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Projected released capacity (WP-08.1), derived from impact.capacity_released when read, never "
+            "persisted: annual core-hours, GiB-hours, replica-hours and node-hours (period 'year'), the "
+            "instantaneous (current - proposed request) x replicas in cores and GiB, storage GiB and LoadBalancer "
+            "count for deletions, with units. Never money and never added to cost savings; negative values are "
+            "increases."
+        )
+    )
+    @property
+    def released_capacity(self) -> Optional[dict]:
+        """Projected released capacity of this recommendation (``None`` without a projection)."""
+        from greenkube.impact.capacity import projected_capacity
+
+        return projected_capacity(self)
+
+    def _impact_number(self, key: str) -> Optional[float]:
+        impact = self.impact if isinstance(self.impact, dict) else None
+        value = impact.get(key) if impact is not None else None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value) if value == value and abs(value) != float("inf") else None
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Projected allocated annual cost saving (IMP-03): what the workload stops being charged under "
+            "chargeback/showback (label 'allocated: capacity released'). Shown whatever the realization factor."
+        )
+    )
+    @property
+    def projected_allocated_cost_annual(self) -> Optional[float]:
+        """``impact.allocated_cost_annual`` (``None`` without a projection)."""
+        return self._impact_number("allocated_cost_annual")
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Projected allocated annual CO2e saving in grams (IMP-03), before the realization factor."
+    )
+    @property
+    def projected_allocated_co2e_annual_g(self) -> Optional[float]:
+        """``impact.co2e_allocated_annual_g`` (``None`` without a projection)."""
+        return self._impact_number("co2e_allocated_annual_g")
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Projected billable annual cost saving (IMP-03): allocated x realization factor, the part expected to "
+            "leave the bill; read it with impact.realization_factor and its reasons."
+        )
+    )
+    @property
+    def projected_billable_cost_annual(self) -> Optional[float]:
+        """``impact.expected_billable_cost_annual``; ``None`` without a projection or before the cluster was observed.
+
+        ``-0.0`` reads as 0. A projection made with the unobserved factor 1.0
+        (IMP-12) has an unknown billable saving: ``None``, never the allocated value.
+        """
+        if self._unobserved_realization():
+            return None
+        value = self._impact_number("expected_billable_cost_annual")
+        return value + 0.0 if value is not None else None
+
+    def _unobserved_realization(self) -> bool:
+        impact = self.impact if isinstance(self.impact, dict) else {}
+        assumptions = impact.get("assumptions") if isinstance(impact.get("assumptions"), dict) else {}
+        return assumptions.get("realization_factor_source") == UNOBSERVED_REALIZATION_SOURCE
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Why the billable projection is lower than the allocated one, for the UI and the pull request "
+            "(IMP-03): 'fixed nodes: frees capacity, bill unchanged until nodes are removed' when the realization "
+            "factor is 0 and the allocated saving is not; 'billable saving unknown: cluster not observed yet' when "
+            "the projection was made before the cluster's autoscalers were observed (IMP-12)."
+        )
+    )
+    @property
+    def projection_note(self) -> Optional[str]:
+        """Fixed-nodes or not-observed note explaining the billable projection."""
+        if self._unobserved_realization():
+            return UNOBSERVED_NOTE
+        factor = self._impact_number("realization_factor")
+        allocated = self._impact_number("allocated_cost_annual")
+        if factor == 0.0 and allocated is not None and allocated > 0:
+            return FIXED_NODES_NOTE
+        return None
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _coerce_source(cls, value: Any) -> Any:
+        return coerce_recommendation_source(value)
 
     @model_validator(mode="after")
     def _derive_capability(self) -> "RecommendationRecord":
@@ -503,6 +806,10 @@ class RecommendationRecord(BaseModel):
             recommended_memory_request_bytes=rec.recommended_memory_request_bytes,
             cron_schedule=rec.cron_schedule,
             target_node=rec.target_node,
+            fingerprint_v4=rec.fingerprint_v4,
+            target=dict(rec.target) if rec.target is not None else None,
+            proposal=dict(rec.proposal) if rec.proposal is not None else None,
+            consensus=dict(rec.consensus) if rec.consensus is not None else None,
             source=rec.source,
             source_ref=rec.source_ref,
             sources=list(rec.sources),
@@ -522,6 +829,9 @@ class RecommendationRecord(BaseModel):
             expires_at=rec.expires_at,
             reversible=rec.reversible,
             requires_restart=rec.requires_restart,
+            impact=dict(rec.impact) if rec.impact is not None else None,
+            value=dict(rec.value) if rec.value is not None else None,
+            pending_revision=dict(rec.pending_revision) if rec.pending_revision is not None else None,
             created_at=created_at or datetime.now(timezone.utc),
         )
 
@@ -536,10 +846,18 @@ class ApplyRecommendationRequest(BaseModel):
         None, description="Actual memory value applied (may differ from recommended)."
     )
     carbon_saved_co2e_grams: Optional[float] = Field(
-        None, description="Actual CO2e savings realised (computed server-side if omitted)."
+        None,
+        description=(
+            "User-declared annual CO2e savings (finite, at most 10x the projection, recorded as "
+            "user_declared and never as measured). Computed server-side if omitted."
+        ),
     )
     cost_saved: Optional[float] = Field(
-        None, description="Actual cost savings realised (computed server-side if omitted)."
+        None,
+        description=(
+            "User-declared annual cost savings (finite, at most 10x the projection, recorded as "
+            "user_declared and never as measured). Computed server-side if omitted."
+        ),
     )
     application_method: Optional[str] = Field(
         None, description="How the change landed: manual, detected, pr_merge, webhook, polling."
@@ -603,30 +921,13 @@ class PullRequestRecord(BaseModel):
         None, description="When synchronization last observed the pull request."
     )
     sync_error_code: Optional[str] = Field(None, description="Latest synchronization error code.")
-
-
-class ApplyPrRequest(BaseModel):
-    """Request body for opening a pull request that applies a recommendation."""
-
-    base_branch: Optional[str] = Field(None, description="Override the discovery base branch.")
-    dry_run: bool = Field(False, description="When true, return the patch preview without touching Git.")
-
-
-class ApplyPrResponse(BaseModel):
-    """Result of an apply-pr request (dry run preview or opened pull request)."""
-
-    status: str = Field(..., description="dry_run, pr_open or error.")
-    policy_result: dict[str, Any] = Field(default_factory=dict)
-    provider: Optional[str] = Field(None, description="Git provider used.")
-    repo: Optional[str] = Field(None, description="Repository in owner/name form.")
-    base_branch: Optional[str] = Field(None, description="Target branch of the pull request.")
-    head_branch: Optional[str] = Field(None, description="Branch created by the bot.")
-    path: Optional[str] = Field(None, description="Manifest path that would be (or was) patched.")
-    patch: Optional[RecommendationPatchV2 | dict] = Field(None, description="Machine-readable action plan.")
-    diff: Optional[str] = Field(None, description="Unified diff preview.")
-    pr_url: Optional[str] = Field(None, description="Opened pull request URL.")
-    message: Optional[str] = Field(None, description="Human-readable outcome or error message.")
-    pull_request: Optional[PullRequestRecord] = Field(None, description="Persisted pull request attempt.")
+    provider_retry_failures: int = Field(0, description="Consecutive provider authorization failures (backoff step).")
+    provider_retry_at: Optional[datetime] = Field(
+        None, description="Provider calls for this record are deferred until this time (backoff or rate limit)."
+    )
+    provider_detached_reason: Optional[str] = Field(
+        None, description="Why the record is detached from provider polling, e.g. repository_not_allowed."
+    )
 
 
 class IgnoreRecommendationRequest(BaseModel):
@@ -674,9 +975,15 @@ class TopRecommendation(BaseModel):
     risk_level: Optional[str] = Field(None, description="Reliability risk: low, medium or high.")
     confidence: Optional[float] = Field(None, description="Confidence in the recommendation, 0.0 to 1.0.")
     effort: Optional[str] = Field(None, description="Implementation effort: low, medium or high.")
-    ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
-    ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    ranking_score: Optional[float] = Field(
+        None, description="Expected value (EV) in currency per year; the default ranking key (roadmap I1)."
+    )
+    ranking_factors: dict = Field(
+        default_factory=dict, description="EV breakdown in currency per year; the factors sum to ranking_score."
+    )
     expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
+    value: Optional[dict] = Field(None, description="Risk-adjusted expected value (ValueScore, roadmap I1).")
+    eligibility: Optional[dict] = Field(None, description="Delivery eligibility (roadmap F10).")
 
 
 class MetricsSummaryRow(BaseModel):
@@ -721,6 +1028,19 @@ class MetricsSummaryRow(BaseModel):
         None,
         description="Timestamp of the last refresh.",
     )
+    # Node idle share of a cluster-wide window and the cluster totals (WP-05.3, NRG-02, migration 0250):
+    # null on namespace rows, without idle rows, or when the window holds pod rows before idle_data_since.
+    idle_co2e_grams: Optional[float] = Field(None, description="Scope 2 CO₂e of the node idle share.")
+    idle_embodied_co2e_grams: Optional[float] = Field(None, description="Scope 3 CO₂e of the node idle share.")
+    idle_cost: Optional[float] = Field(None, description="Modeled cost of the node idle share.")
+    idle_energy_joules: Optional[float] = Field(None, description="Energy of the node idle share in Joules.")
+    cluster_total_co2e_grams: Optional[float] = Field(None, description="Scope 2 CO₂e: allocated + idle share.")
+    cluster_total_embodied_co2e_grams: Optional[float] = Field(
+        None, description="Scope 3 CO₂e: allocated + idle share."
+    )
+    cluster_total_cost: Optional[float] = Field(None, description="Cost: allocated + idle share.")
+    cluster_total_energy_joules: Optional[float] = Field(None, description="Energy in Joules: allocated + idle.")
+    idle_data_since: Optional[datetime] = Field(None, description="First instant covered by stored idle rows.")
 
 
 class TimeseriesCachePoint(BaseModel):
@@ -768,6 +1088,47 @@ class CombinedMetric(BaseModel):
 
     # From CostMetric
     total_cost: float = 0.0
+    # Cost components (A4). ``total_cost`` is their sum plus any GPU, shared or
+    # external cost reported by the cost source. ``None`` on legacy rows.
+    cost_cpu: Optional[float] = Field(None, description="CPU share of total_cost.")
+    cost_ram: Optional[float] = Field(None, description="RAM share of total_cost.")
+    cost_storage: Optional[float] = Field(None, description="Persistent-volume share of total_cost.")
+    cost_network: Optional[float] = Field(None, description="Network share of total_cost.")
+    cost_lb: Optional[float] = Field(None, description="LoadBalancer share of total_cost.")
+    # Per-dimension provenance (A11); see greenkube.models.provenance.
+    cost_source: Optional[str] = Field(None, description="Provenance of the cost figures.")
+    usage_source: Optional[str] = Field(None, description="Provenance of the CPU/memory usage figures.")
+    power_source: Optional[str] = Field(None, description="Provenance of the node power profile.")
+    intensity_source: Optional[str] = Field(None, description="Provenance of the grid carbon intensity.")
+    node_source: Optional[str] = Field(
+        None,
+        description=(
+            "Where the node attributes (zone, provider, PUE, instance type) of the sample came from: "
+            "snapshot (node history valid at the sample time), current_api or unknown (WP-01.1)."
+        ),
+    )
+    metadata_source: Optional[str] = Field(
+        None,
+        description=(
+            "Where the pod requests, owner and container list of the sample came from: k8s_snapshot "
+            "(pod history or the live pod list), kube_state_metrics, stored_row, repaired or repaired_partial "
+            "(filled from another row of the same pod by migration 0270) or missing (WP-01.1)."
+        ),
+    )
+    embodied_source: Optional[str] = Field(
+        None,
+        description=(
+            "Where the node embodied emissions came from: boavizta, configured, fallback_per_vcpu or "
+            "fallback_default (NRG-01). NULL on rows written before 0180 (flat fallback)."
+        ),
+    )
+    gpu_source: Optional[str] = Field(
+        None,
+        description=(
+            "Where the GPU power of the row's node came from: dcgm, gpu_tdp_estimate or unmeasured (NRG-13). "
+            "NULL when no GPU was detected on the node, and on rows written before 0182."
+        ),
+    )
 
     # From CarbonEmissionMetric
     co2e_grams: float = Field(
@@ -788,8 +1149,20 @@ class CombinedMetric(BaseModel):
     # From PodMetric (Note: This may be an aggregation of containers)
     cpu_request: int = 0  # in millicores
     memory_request: int = 0  # in bytes
+    # Container limits (A7); only set on container rows.
+    cpu_limit: Optional[int] = Field(None, description="Container CPU limit in millicores (None = unlimited).")
+    memory_limit: Optional[int] = Field(None, description="Container memory limit in bytes (None = unlimited).")
     # Actual usage metrics (from Prometheus)
     sample_count: int = Field(1, description="Number of raw samples represented by this metric point.")
+    # Hourly rollup rows only (ROL-03, MEA-05, migration 0172); None on raw rows and older rollups.
+    first_sample_at: Optional[datetime] = Field(None, description="Hourly row: first raw sample of the hour.")
+    last_sample_at: Optional[datetime] = Field(None, description="Hourly row: last raw sample of the hour.")
+    trusted_cost: Optional[float] = Field(None, description="Hourly row: cost of the raw samples with trusted cost.")
+    trusted_cost_cpu: Optional[float] = Field(None, description="Hourly row: CPU cost of the trusted samples.")
+    trusted_cost_ram: Optional[float] = Field(None, description="Hourly row: RAM cost of the trusted samples.")
+    trusted_cost_seconds: Optional[float] = Field(
+        None, description="Hourly row: pod-seconds covered by the samples with trusted cost."
+    )
     cpu_usage_millicores: Optional[int] = Field(None, description="Actual CPU usage in millicores.")
     cpu_usage_max_millicores: Optional[int] = Field(
         None,
@@ -800,17 +1173,6 @@ class CombinedMetric(BaseModel):
         None,
         description="Maximum memory working set in bytes represented by this metric point.",
     )
-    # Network I/O metrics (from Prometheus)
-    network_receive_bytes: Optional[float] = Field(None, description="Network bytes received per second (rate).")
-    network_transmit_bytes: Optional[float] = Field(None, description="Network bytes transmitted per second (rate).")
-    # Disk I/O metrics (from Prometheus)
-    disk_read_bytes: Optional[float] = Field(None, description="Disk bytes read per second (rate).")
-    disk_write_bytes: Optional[float] = Field(None, description="Disk bytes written per second (rate).")
-    # Storage metrics
-    storage_request_bytes: Optional[int] = Field(None, description="PVC storage requested in bytes.")
-    storage_usage_bytes: Optional[int] = Field(None, description="Actual PVC storage usage in bytes.")
-    ephemeral_storage_request_bytes: Optional[int] = Field(None, description="Ephemeral storage requested in bytes.")
-    ephemeral_storage_usage_bytes: Optional[int] = Field(None, description="Actual ephemeral storage usage in bytes.")
     # GPU metrics
     gpu_usage_millicores: Optional[int] = Field(None, description="GPU usage in millicores (from DCGM/nvidia-smi).")
     # Stability metrics
@@ -836,7 +1198,13 @@ class CombinedMetric(BaseModel):
     node_instance_type: Optional[str] = None
     node_zone: Optional[str] = Field(None, description="Cloud provider zone")
     emaps_zone: Optional[str] = Field(None, description="Electricity Maps zone")
-    is_estimated: Optional[bool] = Field(False, description="Whether the metric relies on estimated values.")
+    is_estimated: Optional[bool] = Field(
+        False,
+        description=(
+            "Deprecated coarse flag kept for API v1 compatibility; use the per-dimension provenance fields "
+            "(cost_source, usage_source, power_source, intensity_source) to decide what to trust."
+        ),
+    )
     estimation_reasons: List[str] = Field(default_factory=list, description="Reasons for estimation.")
     embodied_co2e_grams: Optional[float] = Field(
         0.0,
@@ -855,6 +1223,17 @@ class CombinedMetric(BaseModel):
     # Calculation methodology version — allows detecting stale data after algorithm changes
     calculation_version: Optional[str] = Field(
         None, description="Version of the calculation algorithm that produced this metric."
+    )
+    model_version: Optional[str] = Field(
+        None,
+        description=(
+            "Impact Model version (greenkube.impact.IMPACT_MODEL_VERSION) that allocated the energy, CO2e and "
+            "modeled cost of this row; None for rows written before the model allocated stored rows (B2, B8)."
+        ),
+    )
+    gpu_power_watts: Optional[float] = Field(
+        None,
+        description="Average GPU power attributed to the pod by DCGM over the row's interval, in W (B5).",
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

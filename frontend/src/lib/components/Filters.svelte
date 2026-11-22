@@ -1,7 +1,10 @@
 <script>
-	import { selectedNamespace, selectedTimeRange, timeRanges } from '$lib/stores.js';
-	import { getNamespaces } from '$lib/api.js';
+	import { selectedNamespace, selectedTimeRange, timeRanges } from '#lib/stores.js';
+	import { getNamespaces } from '#lib/api.js';
 	import { onMount } from 'svelte';
+
+	/** Hide the period on pages that do not read a time window (the Overview, K7). */
+	export let showTimeRange = true;
 
 	let namespaces = [];
 
@@ -16,6 +19,7 @@
 
 <div class="flex items-center gap-3 flex-wrap">
 	<!-- Time Range -->
+	{#if showTimeRange}
 	<div class="flex items-center gap-2">
 		<label for="time-range" class="text-xs text-dark-400 font-medium uppercase tracking-wider whitespace-nowrap">
 			Period
@@ -31,6 +35,7 @@
 			{/each}
 		</select>
 	</div>
+	{/if}
 
 	<!-- Namespace -->
 	<div class="flex items-center gap-2">

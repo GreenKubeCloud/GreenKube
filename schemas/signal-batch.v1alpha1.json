@@ -1,0 +1,678 @@
+{
+  "$defs": {
+    "AdvisoryProposal": {
+      "additionalProperties": false,
+      "description": "Advice that cannot become a pull request.",
+      "properties": {
+        "kind": {
+          "const": "advisory",
+          "default": "advisory",
+          "title": "Kind",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "title": "AdvisoryProposal",
+      "type": "object"
+    },
+    "AlgorithmInfo": {
+      "additionalProperties": false,
+      "description": "How the source computed its proposal (``vpa-recommender``, ``greenkube.rightsizing_cpu``...).",
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeWindow"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "AlgorithmInfo",
+      "type": "object"
+    },
+    "Capability": {
+      "description": "Optimization domain of a signal (v2). One consolidated recommendation per target and capability.",
+      "enum": [
+        "container_requests",
+        "container_limits",
+        "replicas",
+        "horizontal_autoscaling",
+        "schedule",
+        "cleanup",
+        "node_pool",
+        "placement",
+        "hygiene"
+      ],
+      "title": "Capability",
+      "type": "string"
+    },
+    "ContainerResourcesProposal": {
+      "additionalProperties": false,
+      "description": "Change container requests (or limits) from ``current`` to ``proposed``.",
+      "properties": {
+        "container": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container"
+        },
+        "current": {
+          "$ref": "#/$defs/ResourceSpec",
+          "default": {
+            "cpu_limit_m": null,
+            "cpu_request_m": null,
+            "memory_limit_bytes": null,
+            "memory_request_bytes": null
+          }
+        },
+        "direction": {
+          "default": "unchanged",
+          "enum": [
+            "decrease",
+            "increase",
+            "mixed",
+            "unchanged"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "kind": {
+          "const": "container_resources",
+          "default": "container_resources",
+          "title": "Kind",
+          "type": "string"
+        },
+        "proposed": {
+          "$ref": "#/$defs/ResourceSpec",
+          "default": {
+            "cpu_limit_m": null,
+            "cpu_request_m": null,
+            "memory_limit_bytes": null,
+            "memory_request_bytes": null
+          }
+        }
+      },
+      "title": "ContainerResourcesProposal",
+      "type": "object"
+    },
+    "DeletionProposal": {
+      "additionalProperties": false,
+      "description": "Delete the target. Never automated in this release (FAIL CLOSED): review only.",
+      "properties": {
+        "kind": {
+          "const": "deletion",
+          "default": "deletion",
+          "title": "Kind",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "title": "DeletionProposal",
+      "type": "object"
+    },
+    "HpaProposal": {
+      "additionalProperties": false,
+      "description": "Add or tune horizontal autoscaling. Unknown bounds stay None: a source never invents them.",
+      "properties": {
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "kind": {
+          "const": "hpa",
+          "default": "hpa",
+          "title": "Kind",
+          "type": "string"
+        },
+        "max_replicas": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Replicas"
+        },
+        "min_replicas": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Replicas"
+        },
+        "target_cpu_utilization": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Cpu Utilization"
+        }
+      },
+      "title": "HpaProposal",
+      "type": "object"
+    },
+    "NodePoolProposal": {
+      "additionalProperties": false,
+      "description": "JSON merge patch on a NodePool spec.",
+      "properties": {
+        "kind": {
+          "const": "node_pool",
+          "default": "node_pool",
+          "title": "Kind",
+          "type": "string"
+        },
+        "patch": {
+          "additionalProperties": true,
+          "title": "Patch",
+          "type": "object"
+        }
+      },
+      "title": "NodePoolProposal",
+      "type": "object"
+    },
+    "PushSignal": {
+      "additionalProperties": false,
+      "description": "One pushed signal (``signal.v1alpha1``): a SourceSignal without its server-computed fields.",
+      "properties": {
+        "algorithm": {
+          "$ref": "#/$defs/AlgorithmInfo"
+        },
+        "capability": {
+          "$ref": "#/$defs/Capability"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "engine_family": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Engine Family"
+        },
+        "evidence": {
+          "$ref": "#/$defs/SignalEvidence",
+          "default": {
+            "data": {},
+            "details": "",
+            "summary": ""
+          }
+        },
+        "kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "observed_window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeWindow"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "proposal": {
+          "discriminator": {
+            "mapping": {
+              "advisory": "#/$defs/AdvisoryProposal",
+              "container_resources": "#/$defs/ContainerResourcesProposal",
+              "deletion": "#/$defs/DeletionProposal",
+              "hpa": "#/$defs/HpaProposal",
+              "node_pool": "#/$defs/NodePoolProposal",
+              "replicas": "#/$defs/ReplicasProposal",
+              "schedule": "#/$defs/ScheduleProposal"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ContainerResourcesProposal"
+            },
+            {
+              "$ref": "#/$defs/ReplicasProposal"
+            },
+            {
+              "$ref": "#/$defs/HpaProposal"
+            },
+            {
+              "$ref": "#/$defs/ScheduleProposal"
+            },
+            {
+              "$ref": "#/$defs/DeletionProposal"
+            },
+            {
+              "$ref": "#/$defs/NodePoolProposal"
+            },
+            {
+              "$ref": "#/$defs/AdvisoryProposal"
+            }
+          ],
+          "title": "Proposal"
+        },
+        "raw": {
+          "additionalProperties": true,
+          "title": "Raw",
+          "type": "object"
+        },
+        "source_estimate": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Estimate"
+        },
+        "source_ref": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Ref"
+        },
+        "source_version": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Version"
+        },
+        "target": {
+          "$ref": "#/$defs/PushTarget"
+        }
+      },
+      "required": [
+        "target",
+        "capability",
+        "kind",
+        "proposal",
+        "algorithm"
+      ],
+      "title": "GreenKube signal v1alpha1",
+      "type": "object"
+    },
+    "PushTarget": {
+      "additionalProperties": false,
+      "description": "Object the signal is about. ``cluster_uid`` defaults to this GreenKube's cluster.",
+      "properties": {
+        "api_version": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Version"
+        },
+        "cluster_uid": {
+          "anyOf": [
+            {
+              "maxLength": 253,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cluster Uid"
+        },
+        "container": {
+          "anyOf": [
+            {
+              "maxLength": 253,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container"
+        },
+        "kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 253,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "namespace": {
+          "anyOf": [
+            {
+              "maxLength": 253,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Namespace"
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
+      "title": "PushTarget",
+      "type": "object"
+    },
+    "ReplicasProposal": {
+      "additionalProperties": false,
+      "properties": {
+        "current": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current"
+        },
+        "kind": {
+          "const": "replicas",
+          "default": "replicas",
+          "title": "Kind",
+          "type": "string"
+        },
+        "proposed": {
+          "minimum": 0,
+          "title": "Proposed",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "proposed"
+      ],
+      "title": "ReplicasProposal",
+      "type": "object"
+    },
+    "ResourceSpec": {
+      "additionalProperties": false,
+      "description": "Container resources; None means unknown or unset.",
+      "properties": {
+        "cpu_limit_m": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu Limit M"
+        },
+        "cpu_request_m": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu Request M"
+        },
+        "memory_limit_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Limit Bytes"
+        },
+        "memory_request_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Request Bytes"
+        }
+      },
+      "title": "ResourceSpec",
+      "type": "object"
+    },
+    "ScheduleProposal": {
+      "additionalProperties": false,
+      "description": "Scale down during a recurring window (``sleep_at``/``wake_at`` are ``HH:MM``).",
+      "properties": {
+        "kind": {
+          "const": "schedule",
+          "default": "schedule",
+          "title": "Kind",
+          "type": "string"
+        },
+        "replicas_while_asleep": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Replicas While Asleep",
+          "type": "integer"
+        },
+        "sleep_at": {
+          "title": "Sleep At",
+          "type": "string"
+        },
+        "timezone": {
+          "default": "UTC",
+          "title": "Timezone",
+          "type": "string"
+        },
+        "wake_at": {
+          "title": "Wake At",
+          "type": "string"
+        },
+        "weekdays": {
+          "default": "*",
+          "title": "Weekdays",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sleep_at",
+        "wake_at"
+      ],
+      "title": "ScheduleProposal",
+      "type": "object"
+    },
+    "SignalEvidence": {
+      "additionalProperties": false,
+      "description": "Why the source proposes the change: a summary, its reasoning and structured data.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "details": {
+          "default": "",
+          "title": "Details",
+          "type": "string"
+        },
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "title": "SignalEvidence",
+      "type": "object"
+    },
+    "TimeWindow": {
+      "additionalProperties": false,
+      "description": "Half-open observation window ``[start, end)``.",
+      "properties": {
+        "end": {
+          "format": "date-time",
+          "title": "End",
+          "type": "string"
+        },
+        "start": {
+          "format": "date-time",
+          "title": "Start",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "title": "TimeWindow",
+      "type": "object"
+    }
+  },
+  "$id": "https://greenkube.io/schemas/signal-batch.v1alpha1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Body of POST /api/v1/signals: a batch of signals from one push client. complete=true replaces every signal the client pushed before.",
+  "properties": {
+    "complete": {
+      "title": "Complete",
+      "type": "boolean"
+    },
+    "signals": {
+      "items": {
+        "$ref": "#/$defs/PushSignal"
+      },
+      "maxItems": 5000,
+      "title": "Signals",
+      "type": "array"
+    },
+    "source_id": {
+      "pattern": "^push:[a-z0-9][a-z0-9_.-]{0,62}$",
+      "title": "Source Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "source_id",
+    "complete",
+    "signals"
+  ],
+  "title": "GreenKube signal batch v1alpha1",
+  "type": "object"
+}

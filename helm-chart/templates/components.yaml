@@ -1,0 +1,271 @@
+{{- /*
+One install topology (roadmap F11): the api, controller and optional worker
+Deployments share one container spec. The renderer has its own template
+(renderer.yaml) because it runs without Secrets or a service-account token.
+
+  api         stateless REST, UI, webhooks and authentication; no background job.
+              Ready once the controller has applied every migration.
+  controller  every leader-gated loop (Lease always on, extra replicas are hot
+              standbys); runs the database migrations at startup.
+  worker      optional dedicated plan executors (worker.replicas, default 0).
+*/ -}}
+{{- $root := . }}
+{{- $v := include "greenkube.values" $root | fromYaml }}
+{{- $metricsPort := int (include "greenkube.controllerMetricsPort" $root) }}
+{{- range $component := list "api" "controller" "worker" }}
+{{- $cfg := get $v $component }}
+{{- if or (ne $component "worker") (gt (int ($cfg.replicas | default 0)) 0) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "greenkube.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "greenkube.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  replicas: {{ $cfg.replicas | int }}
+  {{- with $cfg.strategy }}
+  # The controller (and the worker) default to Recreate: the new release migrates
+  # the schema at startup, so old and new code must never write side by side.
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+  template:
+    metadata:
+      labels:
+        {{- include "greenkube.podLabels" (dict "context" $root "cfg" $cfg "component" $component) | nindent 8 }}
+      annotations:
+        {{- $annotations := mergeOverwrite (deepCopy ($cfg.podAnnotations | default dict)) (dict "checksum/config" (include "greenkube.configChecksum" $root)) }}
+        {{- toYaml $annotations | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "greenkube.componentServiceAccountName" (dict "context" $root "component" $component) }}
+      {{- with include "greenkube.imagePullSecrets" $root }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with include "greenkube.podScheduling" (dict "context" $root "cfg" $cfg "component" $component "replicas" $cfg.replicas) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      # Every component reads the Kubernetes API (inventory, discovery, Lease).
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if include "greenkube.bundledPostgres" $root }}
+      # Wait for the bundled PostgreSQL so that a fresh install does not
+      # crash-loop while the database initializes.
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "greenkube.helperImage" $root.Values.initContainer.image | quote }}
+          imagePullPolicy: {{ $root.Values.initContainer.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml $root.Values.hooks.resources | nindent 12 }}
+          command:
+            - sh
+            - -c
+            # -w bounds each probe: without it a SYN dropped while the PostgreSQL
+            # pod is replaced (upgrade, node drain) waits for the kernel TCP
+            # timeout (minutes) instead of retrying every two seconds.
+            - >-
+              for attempt in $(seq 1 150); do
+                if nc -z -w 2 {{ include "greenkube.fullname" $root }}-postgres 5432; then exit 0; fi;
+                echo "waiting for postgres";
+                sleep 2;
+              done;
+              echo "PostgreSQL did not become ready for {{ $component }}" >&2;
+              exit 1
+      {{- end }}
+      containers:
+        - name: {{ $component }}
+          image: "{{ include "greenkube.image" $root }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
+          {{- if eq $component "api" }}
+          command: ["greenkube-api"]
+          {{- else if eq $component "controller" }}
+          command: ["greenkube"]
+          args: ["start"]
+          {{- else }}
+          command: ["python"]
+          args: ["-m", "greenkube.cli.automation_worker", "--queue", "plans"]
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "greenkube.configMapName" $root }}
+          env:
+            - name: GREENKUBE_COMPONENT
+              value: {{ $component | quote }}
+            # Only the controller migrates the database, under an advisory lock;
+            # the API reports not-ready until the schema is current (F11).
+            - name: DB_RUN_MIGRATIONS
+              value: {{ eq $component "controller" | quote }}
+            - name: DB_SCHEMA
+              value: {{ $root.Values.config.db.schema | quote }}
+            - name: DB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "greenkube.secretNameFor" (dict "context" $root "key" "DB_CONNECTION_STRING") }}
+                  key: DB_CONNECTION_STRING
+            {{- if and (eq $component "api") (has $root.Values.config.apiAuthMode (list "api_key" "session" "oidc" "proxy")) }}
+            - name: GREENKUBE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "greenkube.secretNameFor" (dict "context" $root "key" "GREENKUBE_API_KEY") }}
+                  key: GREENKUBE_API_KEY
+                  optional: true
+            {{- end }}
+            {{- if eq $component "controller" }}
+            - name: LEADER_ELECTION_ENABLED
+              value: "true"
+            - name: LEADER_ELECTION_LEASE_NAME
+              value: {{ include "greenkube.leaseName" $root | quote }}
+            - name: LEADER_ELECTION_LEASE_NAMESPACE
+              value: {{ $root.Release.Namespace | quote }}
+            {{- end }}
+            {{- if eq $component "worker" }}
+            - name: GREENKUBE_WORKER_METRICS_PORT
+              value: {{ include "greenkube.workerMetricsPort" $root | quote }}
+            {{- end }}
+            # The node name lets CLUSTER_NAME auto-detection fall back to it
+            # (e.g. "minikube" for local clusters).
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Release namespace, for the copy-paste fixes of the setup checklist (F1).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          {{- if eq $component "api" }}
+          ports:
+            - name: http-api
+              containerPort: {{ $v.api.port }}
+              protocol: TCP
+          # Give in-flight requests time to complete before SIGTERM reaches Uvicorn.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          {{- with $cfg.livenessProbe }}
+          {{- if .enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .path | default "/api/v1/health/heartbeat" }}
+              port: http-api
+            {{- include "greenkube.probeTimings" . | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with $cfg.readinessProbe }}
+          {{- if .enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .path | default "/api/v1/health" }}
+              port: http-api
+            {{- include "greenkube.probeTimings" . | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- else if eq $component "controller" }}
+          {{- if gt $metricsPort 0 }}
+          # /prometheus/metrics, plus /healthz (process) and /readyz (loop registry, M8).
+          ports:
+            - name: ctrl-metrics
+              containerPort: {{ $metricsPort }}
+              protocol: TCP
+          {{- end }}
+          {{- with $cfg.startupProbe }}
+          {{- if and .enabled (gt $metricsPort 0) }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: ctrl-metrics
+            periodSeconds: {{ .periodSeconds | default 10 }}
+            failureThreshold: {{ .failureThreshold | default 60 }}
+          {{- end }}
+          {{- end }}
+          {{- with $cfg.livenessProbe }}
+          {{- if .enabled }}
+          livenessProbe:
+            {{- if gt $metricsPort 0 }}
+            httpGet:
+              path: /healthz
+              port: ctrl-metrics
+            {{- else }}
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            {{- end }}
+            {{- include "greenkube.probeTimings" . | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with $cfg.readinessProbe }}
+          {{- if .enabled }}
+          readinessProbe:
+            {{- if gt $metricsPort 0 }}
+            httpGet:
+              path: /readyz
+              port: ctrl-metrics
+            {{- else }}
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            {{- end }}
+            {{- include "greenkube.probeTimings" . | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- else }}
+          ports:
+            - name: worker-metrics
+              containerPort: {{ include "greenkube.workerMetricsPort" $root }}
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- end }}
+          resources:
+            {{- toYaml $cfg.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "greenkube.applicationSecretVolumeMount" (dict "volumeName" "secrets") | nindent 12 }}
+            {{- include "greenkube.gitProviderVolumeMount" $root | nindent 12 }}
+            {{- if eq $component "api" }}
+            {{- include "greenkube.webhookSecretVolumeMount" $root | nindent 12 }}
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- include "greenkube.applicationSecretVolume" (dict "context" $root "component" $component "volumeName" "secrets") | nindent 8 }}
+        {{- include "greenkube.gitProviderVolume" $root | nindent 8 }}
+        {{- if eq $component "api" }}
+        {{- include "greenkube.webhookSecretVolume" $root | nindent 8 }}
+        {{- end }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ $root.Values.tmp.sizeLimit }}
+{{- end }}
+{{- end }}

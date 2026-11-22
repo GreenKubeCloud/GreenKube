@@ -50,6 +50,10 @@ CVE-2026-111943  # HIGH — crypto/x509 MITM (no outbound TLS in renderer sandbo
 CVE-2026-78667   # HIGH — net/http Range DoS (sandboxed renderer)
 CVE-2026-78669   # HIGH — HTTP/2 SETTINGS DoS (sandboxed renderer)
 CVE-2026-97031   # HIGH — crypto/tls ECH DoS (sandboxed renderer)
+# Helm v3.22.1 also bundles golang.org/x/net v0.60.0; fixed in x/net 0.62.0,
+# not yet released in Helm 3.x (v4.x is a major upgrade, not evaluated).
+# Impact: x/net/html DoS; Helm only parses local chart files in the sandbox.
+CVE-2026-78661   # HIGH — golang.org/x/net/html DoS (sandboxed renderer)
 
 # ─── Helm chart misconfigurations ─────────────────────────────────────────────
 # KSV-0109: ConfigMap stores secrets in key GREENKUBE_SECRET_NAME

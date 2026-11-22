@@ -14,12 +14,12 @@ from unittest.mock import AsyncMock
 import pytest
 from ruamel.yaml import YAML
 
-from greenkube.automation.git.base import GitFile, GitProvider
+from greenkube.automation.git.base import GitFile
+from greenkube.automation.plan_runtime import AuthorizedGitBlobResolver
 from greenkube.automation.plans import (
     AutomationPlanError,
     AutomationPlanService,
     GitBlobFile,
-    ProviderGitBlobResolver,
     _archive_contents,
 )
 from greenkube.gitops.contracts import (
@@ -39,7 +39,12 @@ from greenkube.gitops.contracts import (
     ValidationResult,
     WorkloadSource,
 )
-from greenkube.gitops.planning.helm import HelmValuesNeedsMappingError, HelmValuesPlanner
+from greenkube.gitops.planning.helm import (
+    FluxHelmReleasePlanError,
+    HelmValuesNeedsMappingError,
+    HelmValuesPlanError,
+    HelmValuesPlanner,
+)
 from greenkube.gitops.planning.kustomize import KustomizePlanError
 from greenkube.gitops.planning.raw_manifest import (
     RawManifestPlanner,
@@ -215,10 +220,6 @@ class MemoryPlanRepository(AutomationPlanRepository):
         self.plans[plan_id] = updated
         return updated
 
-    async def list_recommendation_ids_for_plan(self, plan_id: str) -> list[int]:
-        plan = self.plans.get(plan_id)
-        return list(plan.recommendation_ids) if plan is not None else []
-
     async def list_plans_for_recommendation(self, recommendation_id: int) -> list[Plan]:
         return [plan for plan in self.plans.values() if recommendation_id in plan.recommendation_ids]
 
@@ -238,18 +239,16 @@ class MemoryPlanRepository(AutomationPlanRepository):
     async def get_recommendation_action_status(self, recommendation_id: int) -> ActionStatus | None:
         return self.action_status.get(recommendation_id)
 
-    async def list_recommendations_by_action_status(self, status: ActionStatus) -> list[int]:
-        return [recommendation_id for recommendation_id, current in self.action_status.items() if current is status]
-
 
 class FakeGitBlobResolver:
-    def __init__(self, sha: str = GIT_BLOB_SHA) -> None:
+    def __init__(self, sha: str = GIT_BLOB_SHA, content: str = DEPLOYMENT) -> None:
         self.sha = sha
+        self.content = content
         self.lookups: list[tuple[str, str, str]] = []
 
     async def get_blob_file(self, source: WorkloadSource, path: str, revision: str) -> GitBlobFile | None:
         self.lookups.append((source.provider_id, path, revision))
-        return GitBlobFile(path=path, content=DEPLOYMENT, blob_sha=self.sha)
+        return GitBlobFile(path=path, content=self.content, blob_sha=self.sha)
 
 
 class FakePlanRevisionResolver:
@@ -522,6 +521,26 @@ async def test_closed_plan_can_be_replanned_at_the_same_revision(monkeypatch: py
     assert repository.plans[first.plan_id].status is PlanStatus.CLOSED
     assert repository.plans[second.plan_id] == second
     assert repository.action_status[42] is ActionStatus.PLAN_READY
+
+
+@pytest.mark.asyncio
+async def test_a_preview_planned_from_an_older_binding_is_replanned(monkeypatch: pytest.MonkeyPatch):
+    """e2e: the identical preview was returned with its old binding, so approval always answered source_changed."""
+    repository = MemoryPlanRepository()
+    action = _action()
+    service = _service(repository)
+    old_source = _source(evidence={"binding_generation": 14})
+    first = await service.create_plan(action, old_source, _archive_snapshot(monkeypatch, old_source))
+
+    same = await service.create_plan(action, old_source, _archive_snapshot(monkeypatch, old_source))
+    assert same.plan_id == first.plan_id
+
+    new_source = _source(evidence={"binding_generation": 15})
+    second = await service.create_plan(action, new_source, _archive_snapshot(monkeypatch, new_source))
+
+    assert second.plan_id == f"{first.plan_id}-attempt-2"
+    assert second.source.evidence["binding_generation"] == 15
+    assert repository.plans[first.plan_id].status is PlanStatus.STALE
 
 
 @pytest.mark.asyncio
@@ -872,24 +891,24 @@ async def test_create_plan_rejects_failed_validation_result(monkeypatch: pytest.
     assert repository.plans == {}
 
 
+def _blob_resolver(git_file: GitFile) -> AuthorizedGitBlobResolver:
+    provider = SimpleNamespace(name="gitlab", get_file=AsyncMock(return_value=git_file), close=AsyncMock())
+    provider_resolver = SimpleNamespace(
+        resolve=AsyncMock(return_value=SimpleNamespace(provider=provider, repository="repo"))
+    )
+    return AuthorizedGitBlobResolver(cast(Any, provider_resolver))
+
+
 @pytest.mark.asyncio
 async def test_gitlab_provider_resolver_uses_blob_id_not_last_commit_id():
-    provider = cast(
-        GitProvider,
-        SimpleNamespace(
-            name="gitlab",
-            repository=lambda *args, **kwargs: "repo",
-            get_file=AsyncMock(
-                return_value=GitFile(
-                    path="apps/payments/deployment.yaml",
-                    content=DEPLOYMENT,
-                    sha="last-commit-sha",
-                    blob_sha=GIT_BLOB_SHA,
-                )
-            ),
-        ),
+    resolver = _blob_resolver(
+        GitFile(
+            path="apps/payments/deployment.yaml",
+            content=DEPLOYMENT,
+            sha="last-commit-sha",
+            blob_sha=GIT_BLOB_SHA,
+        )
     )
-    resolver = ProviderGitBlobResolver({"gitlab-main": provider})
 
     resolved = await resolver.get_blob_file(
         _source(provider_id="gitlab-main", repo_url="https://gitlab.com/acme/gitops.git"),
@@ -903,21 +922,7 @@ async def test_gitlab_provider_resolver_uses_blob_id_not_last_commit_id():
 
 @pytest.mark.asyncio
 async def test_gitlab_provider_resolver_fails_closed_without_blob_id():
-    provider = cast(
-        GitProvider,
-        SimpleNamespace(
-            name="gitlab",
-            repository=lambda *args, **kwargs: "repo",
-            get_file=AsyncMock(
-                return_value=GitFile(
-                    path="apps/payments/deployment.yaml",
-                    content=DEPLOYMENT,
-                    sha="last-commit-sha",
-                )
-            ),
-        ),
-    )
-    resolver = ProviderGitBlobResolver({"gitlab-main": provider})
+    resolver = _blob_resolver(GitFile(path="apps/payments/deployment.yaml", content=DEPLOYMENT, sha="last-commit-sha"))
 
     with pytest.raises(AutomationPlanError) as error:
         await resolver.get_blob_file(
@@ -1044,6 +1049,85 @@ async def test_approval_accepts_unchanged_current_base_revision(monkeypatch: pyt
     assert revision_resolver.lookups == [source.id]
 
 
+class MovedTouchedFileResolver(FakeGitBlobResolver):
+    """The planned manifest itself changed at the moved branch head."""
+
+    async def get_blob_file(self, source: WorkloadSource, path: str, revision: str) -> GitBlobFile | None:
+        if revision == BASE_REVISION:
+            return await super().get_blob_file(source, path, revision)
+        self.lookups.append((source.provider_id, path, revision))
+        return GitBlobFile(path=path, content=DEPLOYMENT + "# edited\n", blob_sha="9" * 40)
+
+
+class ChangedPathsResolver(FakeGitBlobResolver):
+    """A blob resolver that also compares trees (the production resolver does)."""
+
+    def __init__(self, changed: list[str]) -> None:
+        super().__init__()
+        self.changed = changed
+        self.comparisons: list[tuple[str, str]] = []
+
+    async def changed_paths(self, source: WorkloadSource, base_revision: str, head_revision: str) -> list[str]:
+        self.comparisons.append((base_revision, head_revision))
+        return list(self.changed)
+
+
+@pytest.mark.asyncio
+async def test_approval_accepts_a_moved_head_when_touched_files_are_unchanged(monkeypatch: pytest.MonkeyPatch):
+    """D7 / BUG-49: an unrelated commit on the source branch must not stale an approval."""
+    repository = MemoryPlanRepository()
+    source = _source()
+    blob_resolver = ChangedPathsResolver(["apps/other/configmap.yaml"])
+    service = _service(repository, blob_resolver, revision_resolver=FakePlanRevisionResolver("c" * 40))
+    plan = await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
+    assert plan.digest is not None
+    assert plan.file_plan is not None and plan.file_plan.validation.render_inputs
+
+    approved = await service.approve_plan(plan.plan_id, plan.digest)
+
+    assert approved.status is PlanStatus.APPROVED
+    assert ("github-main", "apps/payments/deployment.yaml", "c" * 40) in blob_resolver.lookups
+    assert blob_resolver.comparisons == [(plan.file_plan.base_revision, "c" * 40)]
+
+
+@pytest.mark.asyncio
+async def test_approval_stales_a_moved_head_that_changes_a_render_input_the_plan_does_not_edit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Delivery safety (D7): a manifest added to the rendered directory changes the render."""
+    repository = MemoryPlanRepository()
+    source = _source()
+    service = _service(
+        repository,
+        ChangedPathsResolver(["apps/payments/extra-deployment.yaml"]),
+        revision_resolver=FakePlanRevisionResolver("c" * 40),
+    )
+    plan = await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
+    assert plan.digest is not None
+
+    with pytest.raises(AutomationPlanError) as error:
+        await service.approve_plan(plan.plan_id, plan.digest)
+
+    assert error.value.code.value == "plan_stale"
+    stale = await repository.get_plan(plan.plan_id)
+    assert stale is not None and stale.status is PlanStatus.STALE
+
+
+@pytest.mark.asyncio
+async def test_approval_without_a_tree_comparison_cannot_accept_a_moved_head_with_render_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Fail closed: an added file in a render scope is only visible in a tree comparison."""
+    repository = MemoryPlanRepository()
+    source = _source()
+    service = _service(repository, FakeGitBlobResolver(), revision_resolver=FakePlanRevisionResolver("c" * 40))
+    plan = await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
+    assert plan.digest is not None
+
+    with pytest.raises(AutomationPlanError):
+        await service.approve_plan(plan.plan_id, plan.digest)
+
+
 @pytest.mark.asyncio
 async def test_approval_marks_plan_stale_when_current_base_revision_moved(
     monkeypatch: pytest.MonkeyPatch,
@@ -1051,7 +1135,7 @@ async def test_approval_marks_plan_stale_when_current_base_revision_moved(
     repository = MemoryPlanRepository()
     source = _source()
     revision_resolver = FakePlanRevisionResolver("c" * 40)
-    service = _service(repository, revision_resolver=revision_resolver)
+    service = _service(repository, MovedTouchedFileResolver(), revision_resolver=revision_resolver)
     plan = await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
     assert plan.digest is not None
 
@@ -1187,3 +1271,62 @@ async def test_expire_due_plans_stales_expired_preview_and_clears_action_status(
     assert [item.plan_id for item in expired] == [plan.plan_id]
     assert expired[0].status is PlanStatus.STALE
     assert repository.action_status[42] is ActionStatus.NONE
+
+
+@pytest.mark.asyncio
+async def test_create_plan_fails_closed_when_the_manifest_already_declares_the_proposal(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A pull request that changes nothing is never planned (no_effective_change)."""
+    repository = MemoryPlanRepository()
+    already_applied = DEPLOYMENT.replace("cpu: 100m", "cpu: 300m").replace("memory: 128Mi", "memory: 256Mi")
+    resolver = FakeGitBlobResolver(content=already_applied)
+    source = _source()
+    service = _service(repository, resolver)
+
+    with pytest.raises(AutomationPlanError) as error:
+        await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source, already_applied))
+
+    assert error.value.code.value == "no_effective_change"
+    assert repository.plans == {}
+    assert repository.action_status == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("renderer", "planner_error"),
+    [
+        (
+            RendererKind.HELM_VALUES,
+            HelmValuesPlanError("the requested container resources are already present in the values file"),
+        ),
+        (
+            RendererKind.HELM_RELEASE,
+            FluxHelmReleasePlanError("the requested container resources are already present after post-rendering"),
+        ),
+        (
+            RendererKind.KUSTOMIZE,
+            KustomizePlanError("the requested container requests are already present in the rendered target"),
+        ),
+    ],
+)
+async def test_create_plan_maps_planner_no_op_errors_to_no_effective_change(
+    monkeypatch: pytest.MonkeyPatch, renderer: RendererKind, planner_error: Exception
+):
+    repository = MemoryPlanRepository()
+    source = _source(
+        renderer=renderer,
+        renderer_config={"overlay_path": "apps/payments"} if renderer is RendererKind.KUSTOMIZE else {},
+    )
+    planner = (
+        FakeKustomizePlanner(planner_error)
+        if isinstance(planner_error, KustomizePlanError)
+        else FakeHelmPlanner(renderer, planner_error)
+    )
+    service = AutomationPlanService(repository, planners={renderer: planner}, clock=lambda: NOW)
+
+    with pytest.raises(AutomationPlanError) as error:
+        await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
+
+    assert error.value.code.value == "no_effective_change"
+    assert repository.plans == {}

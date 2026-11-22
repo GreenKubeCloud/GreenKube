@@ -1,7 +1,7 @@
 # tests/core/test_native_analyzers.py
 """
 Comprehensive tests for the native recommendation analyzers.
-Tests cover all 11 recommendation types using TDD methodology.
+Tests cover rightsizing and the orphaned PersistentVolume and LoadBalancer types.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from greenkube.collectors.lb_collector import OrphanedLoadBalancer
 from greenkube.collectors.pv_collector import OrphanedPV
 from greenkube.models.metrics import CombinedMetric, RecommendationType
 
@@ -18,6 +19,26 @@ from .optimization.helpers import NativeRecommender  # pyrefly: ignore[missing-i
 # ---------------------------------------------------------------------------
 # Helpers to build test metrics
 # ---------------------------------------------------------------------------
+
+
+#: Deletion candidates need evidence and a first-seen time older than DELETION_MIN_UNUSED_DAYS.
+_EVIDENCE = ["selector app=x matches no pod in namespace legacy"]
+
+
+def _unused_since(days: float = 8.0) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def _lb(**kwargs) -> OrphanedLoadBalancer:
+    kwargs.setdefault("evidence", list(_EVIDENCE))
+    kwargs.setdefault("first_seen_at", _unused_since())
+    return OrphanedLoadBalancer(**kwargs)
+
+
+def _orphan_pv(**kwargs) -> OrphanedPV:
+    kwargs.setdefault("evidence", ["phase Released: its claim default/gone-claim was deleted"])
+    kwargs.setdefault("first_seen_at", _unused_since())
+    return OrphanedPV(**kwargs)
 
 
 def _ts(hour: int = 12, day: int = 1, month: int = 1, year: int = 2026) -> datetime:
@@ -44,10 +65,13 @@ def _make_metric(
     emaps_zone: str = "FR",
     owner_kind: str | None = None,
     owner_name: str | None = None,
+    container_name: str | None = None,
 ) -> CombinedMetric:
     """Create a CombinedMetric for testing."""
     return CombinedMetric(
+        restart_count=0,
         pod_name=pod_name,
+        container_name=container_name,
         namespace=namespace,
         cpu_request=cpu_request,
         memory_request=memory_request,
@@ -127,77 +151,6 @@ def _make_timeseries(
 def recommender():
     """Native analyzer test helper with default config thresholds."""
     return NativeRecommender()
-
-
-# ---------------------------------------------------------------------------
-# Test: ZOMBIE_POD
-# ---------------------------------------------------------------------------
-
-
-class TestZombiePod:
-    """Tests for zombie pod detection."""
-
-    def test_detects_zombie_pod(self, recommender):
-        """A pod with cost but near-zero energy should be flagged."""
-        metrics = [
-            _make_metric(
-                pod_name="zombie-pod",
-                total_cost=0.05,
-                joules=100.0,
-                co2e_grams=0.1,
-                cpu_usage_millicores=0,
-            )
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        zombie_recs = [r for r in recs if r.type == RecommendationType.ZOMBIE_POD]
-        assert len(zombie_recs) == 1
-        assert zombie_recs[0].pod_name == "zombie-pod"
-        assert zombie_recs[0].priority == "high"
-        assert zombie_recs[0].potential_savings_cost is not None
-        assert zombie_recs[0].potential_savings_cost > 0
-
-    def test_no_zombie_for_active_pod(self, recommender):
-        """An active pod should not be flagged as zombie."""
-        metrics = [
-            _make_metric(
-                pod_name="active-pod",
-                total_cost=0.05,
-                joules=50000.0,
-                cpu_usage_millicores=500,
-            )
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        zombie_recs = [r for r in recs if r.type == RecommendationType.ZOMBIE_POD]
-        assert len(zombie_recs) == 0
-
-    def test_no_zombie_for_free_pod(self, recommender):
-        """A pod with no cost should not be flagged even if energy is low."""
-        metrics = [
-            _make_metric(
-                pod_name="free-pod",
-                total_cost=0.0,
-                joules=10.0,
-            )
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        zombie_recs = [r for r in recs if r.type == RecommendationType.ZOMBIE_POD]
-        assert len(zombie_recs) == 0
-
-    def test_zombie_includes_savings(self, recommender):
-        """Zombie recommendation should estimate savings."""
-        metrics = [
-            _make_metric(
-                pod_name="zombie-pod",
-                total_cost=1.50,
-                joules=50.0,
-                co2e_grams=0.5,
-            )
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        zombie_recs = [r for r in recs if r.type == RecommendationType.ZOMBIE_POD]
-        assert len(zombie_recs) == 1
-        assert zombie_recs[0].potential_savings_cost == pytest.approx(1.50, abs=0.01)
-        assert zombie_recs[0].potential_savings_co2e_grams == pytest.approx(0.5, abs=0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -293,11 +246,12 @@ class TestRightsizingCPU:
         assert cpu_recs[0].recommended_cpu_request_millicores > 250
         assert cpu_recs[0].recommended_cpu_request_millicores < 1000
 
-    def test_no_cpu_rightsizing_when_peak_aware_target_would_increase_request(self, recommender):
-        """A peak-aware target above the current request is not an optimization."""
+    def test_peaks_above_the_request_recommend_a_cpu_increase(self, recommender):
+        """Per-step peaks above the request are a reliability problem (E9): recommend an increase."""
         metrics = [
             _make_metric(
                 pod_name="bursty-api",
+                container_name="api",
                 cpu_request=500,
                 cpu_usage_millicores=25,
                 cpu_usage_max_millicores=819,
@@ -309,7 +263,23 @@ class TestRightsizingCPU:
         recs = recommender.generate_recommendations(metrics)
         cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
 
-        assert cpu_recs == []
+        assert len(cpu_recs) == 1
+        rec = cpu_recs[0]
+        assert rec.current_cpu_request_millicores == 500
+        assert rec.recommended_cpu_request_millicores is not None
+        assert rec.recommended_cpu_request_millicores > 819
+        # An increase costs money: the Impact Model projects a negative saving.
+        assert rec.potential_savings_cost is not None and rec.potential_savings_cost < 0
+
+    def test_pod_level_usage_never_yields_a_cpu_increase(self, recommender):
+        """Usage known only for the whole pod cannot size one container (USER BUG 2)."""
+        metrics = [
+            _make_metric(pod_name="bursty-api", cpu_request=500, cpu_usage_millicores=25, cpu_usage_max_millicores=819)
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+
+        assert [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU] == []
 
     def test_no_cpu_rightsizing_when_minimum_floor_removes_savings(self, recommender):
         """Minimum CPU floors must not turn an equal request into a savings recommendation."""
@@ -366,8 +336,16 @@ class TestRightsizingCPU:
         cpu_rec = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU)
 
         assert cpu_rec.recommended_cpu_request_millicores == recommender.min_cpu_millicores
-        assert cpu_rec.potential_savings_cost == pytest.approx(90.0)
-        assert cpu_rec.potential_savings_co2e_grams == pytest.approx(90.0)
+        # The released reservation is current - floored target, observed for one
+        # 5-minute sample and annualized over that span. It is priced from the
+        # row's observed total (100 per 5 minutes), apportioned to CPU and RAM
+        # (0.1 core, 0.5 GiB reserved) with the OpenCost default rate weights.
+        released_core_hours = (100 - recommender.min_cpu_millicores) / 1000 * 8760
+        assert cpu_rec.impact["capacity_released"]["cpu_core_hours"] == pytest.approx(released_core_hours)
+        cpu_share = 0.1 * 0.031611 / (0.1 * 0.031611 + 0.5 * 0.004237)
+        released_ratio = (100 - recommender.min_cpu_millicores) / 100
+        assert cpu_rec.potential_savings_cost == pytest.approx(100.0 * 12 * 8760 * cpu_share * released_ratio)
+        assert cpu_rec.impact["cost_breakdown_annual"]["ram"] == 0.0
 
     def test_deployment_pods_are_grouped_as_one_workload(self, recommender):
         """Pod restarts for the same Deployment should produce one stable workload recommendation."""
@@ -480,12 +458,13 @@ class TestRightsizingMemory:
         assert mem_recs[0].recommended_memory_request_bytes > 250 * mib
         assert mem_recs[0].recommended_memory_request_bytes < 1000 * mib
 
-    def test_no_memory_rightsizing_when_peak_aware_target_would_increase_request(self, recommender):
-        """A peak-aware memory target above the current request is not an optimization."""
+    def test_peaks_above_the_request_recommend_a_memory_increase(self, recommender):
+        """A working-set peak above the request is a reliability problem (E9): recommend an increase."""
         mib = 1024 * 1024
         metrics = [
             _make_metric(
                 pod_name="bursty-cache",
+                container_name="cache",
                 memory_request=500 * mib,
                 memory_usage_bytes=25 * mib,
                 memory_usage_max_bytes=819 * mib,
@@ -498,7 +477,28 @@ class TestRightsizingMemory:
         recs = recommender.generate_recommendations(metrics)
         mem_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY]
 
-        assert mem_recs == []
+        assert len(mem_recs) == 1
+        rec = mem_recs[0]
+        assert rec.recommended_memory_request_bytes is not None
+        assert rec.recommended_memory_request_bytes >= 819 * mib * 1.1
+        assert rec.priority == "high"
+        assert rec.potential_savings_cost is not None and rec.potential_savings_cost < 0
+
+    def test_pod_level_usage_never_yields_a_memory_increase(self, recommender):
+        """Usage known only for the whole pod cannot size one container (USER BUG 2)."""
+        mib = 1024 * 1024
+        metrics = [
+            _make_metric(
+                pod_name="bursty-cache",
+                memory_request=500 * mib,
+                memory_usage_bytes=25 * mib,
+                memory_usage_max_bytes=819 * mib,
+            )
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+
+        assert [r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY] == []
 
     def test_memory_rightsizing_uses_latest_request_not_historical_maximum(self, recommender):
         """A workload already reduced during the lookback should use its current memory request."""
@@ -543,8 +543,19 @@ class TestRightsizingMemory:
         mem_rec = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY)
 
         assert mem_rec.recommended_memory_request_bytes == recommender.min_memory_bytes
-        assert mem_rec.potential_savings_cost == pytest.approx(50.0)
-        assert mem_rec.potential_savings_co2e_grams == pytest.approx(50.0)
+        released_gib_hours = (32 * mib - recommender.min_memory_bytes) / 1024**3 * 8760
+        assert mem_rec.impact["capacity_released"]["mem_gib_hours"] == pytest.approx(released_gib_hours)
+        # RAM share of the observed total (1 core and 32 MiB reserved).
+        ram_share = (32 / 1024 * 0.004237) / (1.0 * 0.031611 + 32 / 1024 * 0.004237)
+        released_ratio = (32 * mib - recommender.min_memory_bytes) / (32 * mib)
+        assert mem_rec.potential_savings_cost == pytest.approx(100.0 * 12 * 8760 * ram_share * released_ratio)
+        assert mem_rec.impact["cost_breakdown_annual"]["cpu"] == 0.0
+        # Memory power is allocated by memory reservation (roadmap B5): a memory
+        # cut releases memory power only, never idle CPU power or embodied.
+        co2e = mem_rec.impact["co2e_breakdown_annual_g"]
+        assert co2e["memory_operational"] > 0
+        assert co2e["idle_operational"] == co2e["embodied"] == 0.0
+        assert mem_rec.potential_savings_co2e_grams == pytest.approx(co2e["memory_operational"])
 
     def test_memory_savings_are_annualized_from_analysis_window(self, recommender):
         """Potential memory savings should be annual projections, not only lookback-window totals."""
@@ -579,322 +590,23 @@ class TestRightsizingMemory:
 
         recs = recommender.generate_recommendations(metrics, analysis_window_seconds=analysis_window_seconds)
         mem_rec = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY)
-        savings_ratio = 1 - (mem_rec.recommended_memory_request_bytes / mem_rec.current_memory_request_bytes)
+        released_gib = (mem_rec.current_memory_request_bytes - mem_rec.recommended_memory_request_bytes) / 1024**3
         annualization_factor = (365 * 24 * 60 * 60) / analysis_window_seconds
+        observed_hours = 2 * 300 / 3600
 
-        assert mem_rec.potential_savings_cost == pytest.approx(0.002 * annualization_factor * savings_ratio)
-        assert mem_rec.potential_savings_co2e_grams == pytest.approx(2.0 * annualization_factor * savings_ratio)
-
-
-# ---------------------------------------------------------------------------
-# Test: AUTOSCALING_CANDIDATE
-# ---------------------------------------------------------------------------
-
-
-class TestAutoscalingCandidate:
-    """Tests for autoscaling recommendation."""
-
-    def test_detects_spiky_workload(self, recommender):
-        """Pod with high usage variance should be flagged for autoscaling."""
-        # Create a spiky pattern: low for most, then high spikes
-        usages = [100] * 40 + [1800, 1900, 1800, 1900, 100, 100, 100, 100]
-        metrics = _make_timeseries(
-            pod_name="spiky-pod",
-            cpu_request=2000,
-            usages=usages,
+        expected_gib_hours = released_gib * observed_hours * annualization_factor
+        assert mem_rec.impact["capacity_released"]["mem_gib_hours"] == pytest.approx(expected_gib_hours)
+        # The RAM share of the observed total (1 core and 0.25 GiB reserved),
+        # times the released fraction of the request, annualized.
+        ram_share = (0.25 * 0.004237) / (1.0 * 0.031611 + 0.25 * 0.004237)
+        released_ratio = released_gib / 0.25
+        assert mem_rec.potential_savings_cost == pytest.approx(
+            2 * 0.001 * ram_share * released_ratio * annualization_factor
         )
-        recs = recommender.generate_recommendations(metrics)
-        auto_recs = [r for r in recs if r.type == RecommendationType.AUTOSCALING_CANDIDATE]
-        assert len(auto_recs) == 1
-        assert auto_recs[0].pod_name == "spiky-pod"
-
-    def test_no_autoscaling_for_steady_workload(self, recommender):
-        """Pod with consistent usage should NOT be flagged for autoscaling."""
-        usages = [800] * 48  # Steady
-        metrics = _make_timeseries(
-            pod_name="steady-pod",
-            cpu_request=1000,
-            usages=usages,
-        )
-        recs = recommender.generate_recommendations(metrics)
-        auto_recs = [r for r in recs if r.type == RecommendationType.AUTOSCALING_CANDIDATE]
-        assert len(auto_recs) == 0
-
-    def test_no_autoscaling_for_single_metric(self, recommender):
-        """With only one data point, no pattern detection possible."""
-        metrics = [
-            _make_metric(
-                pod_name="single-point",
-                cpu_request=2000,
-                cpu_usage_millicores=500,
-            )
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        auto_recs = [r for r in recs if r.type == RecommendationType.AUTOSCALING_CANDIDATE]
-        assert len(auto_recs) == 0
-
-
-# ---------------------------------------------------------------------------
-# Test: OFF_PEAK_SCALING
-# ---------------------------------------------------------------------------
-
-
-class TestOffPeakScaling:
-    """Tests for off-peak scaling recommendations."""
-
-    def test_detects_business_hours_pattern(self, recommender):
-        """Pod active 9-17 and idle overnight should get off-peak rec."""
-        # Simulate 24 hours, 1 metric per hour
-        usages = []
-        for h in range(24):
-            if 9 <= h < 17:
-                usages.append(800)  # Active during business hours
-            else:
-                usages.append(5)  # Near-idle overnight
-        metrics = _make_timeseries(
-            pod_name="business-app",
-            cpu_request=1000,
-            usages=usages,
-            interval_minutes=60,  # 1 per hour
-            start_hour=0,
-        )
-        recs = recommender.generate_recommendations(metrics)
-        offpeak_recs = [r for r in recs if r.type == RecommendationType.OFF_PEAK_SCALING]
-        assert len(offpeak_recs) == 1
-        assert offpeak_recs[0].pod_name == "business-app"
-        assert offpeak_recs[0].cron_schedule is not None
-
-    def test_no_offpeak_for_always_active(self, recommender):
-        """Pod that is always active should NOT get off-peak rec."""
-        usages = [700 + (i % 100) for i in range(24)]
-        metrics = _make_timeseries(
-            pod_name="always-active",
-            cpu_request=1000,
-            usages=usages,
-            interval_minutes=60,
-            start_hour=0,
-        )
-        recs = recommender.generate_recommendations(metrics)
-        offpeak_recs = [r for r in recs if r.type == RecommendationType.OFF_PEAK_SCALING]
-        assert len(offpeak_recs) == 0
-
-    def test_no_offpeak_for_short_idle(self, recommender):
-        """Pod idle for only 2 hours should NOT trigger (min is 4)."""
-        usages = [800] * 22 + [5, 5]  # Only 2 hours idle
-        metrics = _make_timeseries(
-            pod_name="short-idle",
-            cpu_request=1000,
-            usages=usages,
-            interval_minutes=60,
-            start_hour=0,
-        )
-        recs = recommender.generate_recommendations(metrics)
-        offpeak_recs = [r for r in recs if r.type == RecommendationType.OFF_PEAK_SCALING]
-        assert len(offpeak_recs) == 0
-
-
-# ---------------------------------------------------------------------------
-# Test: IDLE_NAMESPACE
-# ---------------------------------------------------------------------------
-
-
-class TestIdleNamespace:
-    """Tests for idle namespace detection."""
-
-    def test_detects_idle_namespace(self, recommender):
-        """Namespace with tiny energy and cost should be flagged."""
-        metrics = [
-            _make_metric(pod_name="pod-a", namespace="idle-ns", joules=100, total_cost=0.05, co2e_grams=0.01),
-            _make_metric(pod_name="pod-b", namespace="idle-ns", joules=200, total_cost=0.03, co2e_grams=0.01),
-            _make_metric(pod_name="active-pod", namespace="active-ns", joules=500000, total_cost=5.0, co2e_grams=50.0),
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
-        assert len(idle_recs) == 1
-        assert idle_recs[0].namespace == "idle-ns"
-
-    def test_no_idle_for_active_namespace(self, recommender):
-        """Active namespace should not be flagged."""
-        metrics = [
-            _make_metric(pod_name="pod-a", namespace="active-ns", joules=500000, total_cost=5.0),
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
-        assert len(idle_recs) == 0
-
-
-# ---------------------------------------------------------------------------
-# Test: CARBON_AWARE_SCHEDULING
-# ---------------------------------------------------------------------------
-
-
-class TestCarbonAwareScheduling:
-    """Tests for carbon-aware scheduling recommendations."""
-
-    def test_detects_high_carbon_workload(self, recommender):
-        """Pod running during high-carbon periods should be flagged."""
-        # Some pods run during high intensity, others during low
-        metrics = [
-            _make_metric(
-                pod_name="batch-job-1", namespace="batch", grid_intensity=300.0, emaps_zone="DE", timestamp=_ts(hour=14)
-            ),
-            _make_metric(
-                pod_name="batch-job-1", namespace="batch", grid_intensity=280.0, emaps_zone="DE", timestamp=_ts(hour=15)
-            ),
-            _make_metric(
-                pod_name="web-app", namespace="prod", grid_intensity=100.0, emaps_zone="DE", timestamp=_ts(hour=3)
-            ),
-            _make_metric(
-                pod_name="web-app", namespace="prod", grid_intensity=90.0, emaps_zone="DE", timestamp=_ts(hour=4)
-            ),
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        carbon_recs = [r for r in recs if r.type == RecommendationType.CARBON_AWARE_SCHEDULING]
-        # batch-job runs at high intensity (290 avg) vs zone avg (192.5) -> 290/192.5 = 1.51x > 1.5x
-        assert len(carbon_recs) >= 1
-        assert any(r.pod_name == "batch-job-1" for r in carbon_recs)
-
-    def test_no_carbon_aware_for_low_intensity(self, recommender):
-        """Pod running during low-carbon period should NOT be flagged."""
-        metrics = [
-            _make_metric(pod_name="green-job", grid_intensity=50.0, emaps_zone="FR"),
-            _make_metric(pod_name="green-job", grid_intensity=60.0, emaps_zone="FR"),
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        carbon_recs = [r for r in recs if r.type == RecommendationType.CARBON_AWARE_SCHEDULING]
-        assert len(carbon_recs) == 0
-
-
-# ---------------------------------------------------------------------------
-# Test: OVERPROVISIONED_NODE
-# ---------------------------------------------------------------------------
-
-
-class TestOverprovisionedNode:
-    """Tests for overprovisioned node detection."""
-
-    def test_detects_overprovisioned_node(self, recommender):
-        """Node with very low total pod usage should be flagged."""
-        node_infos = [MagicMock(name="big-node", cpu_capacity_cores=16.0)]
-        node_infos[0].name = "big-node"
-        metrics = [
-            _make_metric(pod_name="tiny-pod-1", node="big-node", cpu_usage_millicores=100),
-            _make_metric(pod_name="tiny-pod-2", node="big-node", cpu_usage_millicores=200),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
-        assert len(node_recs) == 1
-        assert node_recs[0].target_node == "big-node"
-
-    def test_no_overprovisioned_for_utilized_node(self, recommender):
-        """Node with good utilization should NOT be flagged."""
-        node_infos = [MagicMock(name="busy-node", cpu_capacity_cores=4.0)]
-        node_infos[0].name = "busy-node"
-        metrics = [
-            _make_metric(pod_name="pod-1", node="busy-node", cpu_usage_millicores=1500),
-            _make_metric(pod_name="pod-2", node="busy-node", cpu_usage_millicores=1500),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
-        assert len(node_recs) == 0
-
-    def test_multi_pod_utilization_is_summed_not_averaged(self, recommender):
-        """Multiple pods on the same node must be summed per timestamp, not averaged.
-
-        Regression test: 3 pods each using ~160-244m on a 4-core node
-        yields ~565m total = ~14% utilization, which is below the 20% threshold.
-        Previously, the per-pod average (188m / 4000m = 4.7%) was used instead,
-        reporting 0% utilization in the recommendation reason.
-        """
-        node_infos = [MagicMock(name="node-3a7e1d", cpu_capacity_cores=4.0)]
-        node_infos[0].name = "node-3a7e1d"
-        # Simulate k8s metrics: 3 pods on the same node at the same timestamp
-        t = _ts()
-        metrics = [
-            _make_metric(pod_name="pod-a", node="node-3a7e1d", cpu_usage_millicores=160, timestamp=t),
-            _make_metric(pod_name="pod-b", node="node-3a7e1d", cpu_usage_millicores=161, timestamp=t),
-            _make_metric(pod_name="pod-c", node="node-3a7e1d", cpu_usage_millicores=244, timestamp=t),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
-        # Total = 565m / 4000m = ~14% — still below threshold, recommendation is expected
-        assert len(node_recs) == 1
-        # The reported utilization must NOT be 0% — it must reflect the summed total (~14%)
-        # Use a word-boundary check: "(0%)" is what the old bug produced
-        assert "(0%)" not in node_recs[0].reason
-        assert "14%" in node_recs[0].reason
-
-    def test_no_overprovisioned_when_memory_is_high(self, recommender):
-        """Node with low CPU but high memory usage must NOT be flagged as overprovisioned."""
-        node_infos = [MagicMock()]
-        node_infos[0].name = "mem-heavy-node"
-        node_infos[0].cpu_capacity_cores = 16.0
-        node_infos[0].memory_capacity_bytes = 64 * 1024**3  # 64 GiB
-        # Low CPU: 300m / 16000m = ~2%
-        # High memory: 54 GiB / 64 GiB = ~84%
-        metrics = [
-            _make_metric(
-                pod_name="mem-pod",
-                node="mem-heavy-node",
-                cpu_usage_millicores=300,
-                memory_usage_bytes=54 * 1024**3,
-            ),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
-        assert len(node_recs) == 0, "Node with high memory usage must not be flagged as overprovisioned"
-
-    def test_overprovisioned_when_both_cpu_and_memory_are_low(self, recommender):
-        """Node with low CPU AND low memory must be flagged, with both metrics in the description."""
-        node_infos = [MagicMock()]
-        node_infos[0].name = "idle-node"
-        node_infos[0].cpu_capacity_cores = 16.0
-        node_infos[0].memory_capacity_bytes = 64 * 1024**3  # 64 GiB
-        # Low CPU: 200m / 16000m = ~1%
-        # Low memory: 2 GiB / 64 GiB = ~3%
-        metrics = [
-            _make_metric(
-                pod_name="tiny-pod",
-                node="idle-node",
-                cpu_usage_millicores=200,
-                memory_usage_bytes=2 * 1024**3,
-            ),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
-        assert len(node_recs) == 1
-        assert node_recs[0].target_node == "idle-node"
-        assert "memory" in node_recs[0].description.lower(), "Description must mention memory utilization"
-
-
-# ---------------------------------------------------------------------------
-# Test: UNDERUTILIZED_NODE
-# ---------------------------------------------------------------------------
-
-
-class TestUnderutilizedNode:
-    """Tests for underutilized node detection (few pods + low usage)."""
-
-    def test_detects_underutilized_node(self, recommender):
-        """Node with 1 pod and low usage should be flagged."""
-        node_infos = [MagicMock(name="lonely-node", cpu_capacity_cores=8.0)]
-        node_infos[0].name = "lonely-node"
-        metrics = [
-            _make_metric(pod_name="solo-pod", node="lonely-node", cpu_usage_millicores=100),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.UNDERUTILIZED_NODE]
-        assert len(node_recs) == 1
-        assert node_recs[0].target_node == "lonely-node"
-
-    def test_no_underutilized_for_busy_node(self, recommender):
-        """Node with many pods should NOT be flagged."""
-        node_infos = [MagicMock(name="busy-node", cpu_capacity_cores=8.0)]
-        node_infos[0].name = "busy-node"
-        metrics = [_make_metric(pod_name=f"pod-{i}", node="busy-node", cpu_usage_millicores=500) for i in range(5)]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.UNDERUTILIZED_NODE]
-        assert len(node_recs) == 0
+        # Memory power released by the cut (B5), annualized like the cost.
+        co2e = mem_rec.impact["co2e_breakdown_annual_g"]
+        assert mem_rec.potential_savings_co2e_grams == pytest.approx(co2e["memory_operational"])
+        assert co2e["memory_operational"] > 0
 
 
 # ---------------------------------------------------------------------------
@@ -910,35 +622,11 @@ class TestEdgeCases:
         recs = recommender.generate_recommendations([])
         assert recs == []
 
-    def test_all_types_can_coexist(self, recommender):
-        """Multiple recommendation types should be generated from mixed data."""
-        node_infos = [MagicMock(name="big-node", cpu_capacity_cores=32.0)]
-        node_infos[0].name = "big-node"
-
-        # Zombie pod
-        zombie = _make_metric(
-            pod_name="zombie", total_cost=0.5, joules=50, co2e_grams=0.1, cpu_usage_millicores=0, node="big-node"
-        )
-
-        # Oversized CPU pod (time-series of low usage)
-        oversized_ts = _make_timeseries(
-            pod_name="oversized",
-            cpu_request=4000,
-            usages=[200] * 24,
-            node="big-node",
-        )
-
-        all_metrics = [zombie] + oversized_ts
-        recs = recommender.generate_recommendations(all_metrics, node_infos=node_infos)
-        types_found = {r.type for r in recs}
-        assert RecommendationType.ZOMBIE_POD in types_found
-        assert RecommendationType.RIGHTSIZING_CPU in types_found
-
     def test_recommendations_have_required_fields(self, recommender):
         """All recommendations should have non-empty required fields."""
         metrics = [
             _make_metric(
-                pod_name="zombie",
+                pod_name="idle-pod",
                 total_cost=0.5,
                 joules=50.0,
                 co2e_grams=0.1,
@@ -1025,194 +713,6 @@ class TestMissingUsageData:
 
 
 # ---------------------------------------------------------------------------
-# Test: System namespace exclusion
-# ---------------------------------------------------------------------------
-
-
-class TestSystemNamespaceExclusion:
-    """Tests for system namespace exclusion in idle namespace detection."""
-
-    def test_kube_system_excluded_from_idle_detection_by_default(self, recommender):
-        """kube-system namespace must not be flagged as idle when recommend_system_namespaces=False (default)."""
-        assert not recommender.recommend_system_namespaces, "Default config must exclude system namespaces"
-
-        metrics = [
-            _make_metric(
-                pod_name="coredns",
-                namespace="kube-system",
-                joules=50,  # Very low — would normally trigger idle
-                total_cost=0.01,
-                co2e_grams=0.01,
-            )
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
-        assert len(idle_recs) == 0, "kube-system should be excluded from idle namespace detection"
-
-    def test_all_system_namespaces_excluded_by_default(self, recommender):
-        """All well-known system namespaces must not be flagged as idle by default."""
-        system_namespaces = [
-            "kube-system",
-            "kube-public",
-            "kube-node-lease",
-            "coredns",
-            "istio-system",
-            "kubernetes-dashboard",
-        ]
-        metrics = [
-            _make_metric(
-                pod_name=f"pod-{ns}",
-                namespace=ns,
-                joules=50,
-                total_cost=0.01,
-            )
-            for ns in system_namespaces
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
-        flagged_ns = {r.namespace for r in idle_recs}
-        overlap = flagged_ns & set(system_namespaces)
-        assert len(overlap) == 0, f"System namespaces should be excluded, but got: {overlap}"
-
-    def test_custom_namespace_still_flagged_as_idle(self, recommender):
-        """Non-system namespaces are still flagged as idle even when system exclusion is active."""
-        metrics = [
-            _make_metric(
-                pod_name="pod-a",
-                namespace="my-custom-ns",
-                joules=50,
-                total_cost=0.01,
-            )
-        ]
-        recs = recommender.generate_recommendations(metrics)
-        idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
-        assert len(idle_recs) == 1
-        assert idle_recs[0].namespace == "my-custom-ns"
-
-    def test_system_namespace_included_when_flag_enabled(self):
-        """When recommend_system_namespaces=True, system namespaces CAN be flagged."""
-        from greenkube.core.config import Config
-
-        cfg = Config()
-        cfg.RECOMMEND_SYSTEM_NAMESPACES = True
-        recommender_with_sys = NativeRecommender(config=cfg)
-
-        metrics = [
-            _make_metric(
-                pod_name="coredns",
-                namespace="kube-system",
-                joules=50,
-                total_cost=0.05,
-            )
-        ]
-        recs = recommender_with_sys.generate_recommendations(metrics)
-        idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
-        assert len(idle_recs) == 1
-        assert idle_recs[0].namespace == "kube-system"
-
-
-# ---------------------------------------------------------------------------
-# Test: Node overprovisioning - memory capacity edge cases
-# ---------------------------------------------------------------------------
-
-
-class TestNodeMemoryCapacityEdgeCases:
-    """Tests for node overprovisioning when memory capacity data is missing or ambiguous."""
-
-    def test_no_overprovisioned_when_only_memory_capacity_missing(self, recommender):
-        """When memory_capacity_bytes is not set on node_infos, overprovisioning check falls back to CPU only."""
-        node_infos = [MagicMock()]
-        node_infos[0].name = "cpu-only-node"
-        node_infos[0].cpu_capacity_cores = 16.0
-        # memory_capacity_bytes is an auto-created MagicMock attribute (not int/float)
-        # → the code's isinstance(..., (int, float)) check should exclude it
-
-        metrics = [
-            # Very low CPU: should trigger overprovisioning (no memory data to save it)
-            _make_metric(pod_name="pod-a", node="cpu-only-node", cpu_usage_millicores=50),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
-        # Without memory capacity, the check is CPU-only → should still flag if CPU is very low
-        assert len(node_recs) == 1
-
-    def test_overprovisioned_description_omits_memory_when_no_capacity(self, recommender):
-        """When memory capacity is unknown, the description must NOT mention memory utilization."""
-        node_infos = [MagicMock()]
-        node_infos[0].name = "no-mem-cap-node"
-        node_infos[0].cpu_capacity_cores = 16.0
-        # MagicMock auto-creates memory_capacity_bytes as a Mock — not int → excluded
-
-        metrics = [
-            _make_metric(pod_name="pod-a", node="no-mem-cap-node", cpu_usage_millicores=50),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
-        assert len(node_recs) == 1
-        # The description should NOT mention GiB memory figures since capacity is unknown
-        assert "GiB" not in node_recs[0].description
-
-    def test_overprovisioned_description_includes_memory_when_both_low(self, recommender):
-        """When both CPU and memory are low and memory capacity is known, description mentions memory."""
-        node_infos = [MagicMock()]
-        node_infos[0].name = "low-both-node"
-        node_infos[0].cpu_capacity_cores = 16.0
-        node_infos[0].memory_capacity_bytes = 64 * 1024**3  # 64 GiB
-
-        metrics = [
-            _make_metric(
-                pod_name="pod-a",
-                node="low-both-node",
-                cpu_usage_millicores=100,
-                memory_usage_bytes=1 * 1024**3,  # 1 GiB / 64 GiB = ~1.6%
-            ),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
-        assert len(node_recs) == 1
-        assert "memory" in node_recs[0].description.lower()
-
-
-# ---------------------------------------------------------------------------
-# Test: Underutilized node reason field
-# ---------------------------------------------------------------------------
-
-
-class TestUnderutilizedNodeReason:
-    """Tests for the reason field in UNDERUTILIZED_NODE recommendations."""
-
-    def test_underutilized_reason_mentions_pod_count(self, recommender):
-        """UNDERUTILIZED_NODE reason must mention the number of pods."""
-        node_infos = [MagicMock()]
-        node_infos[0].name = "lonely-node"
-        node_infos[0].cpu_capacity_cores = 8.0
-
-        metrics = [
-            _make_metric(pod_name="solo", node="lonely-node", cpu_usage_millicores=50),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.UNDERUTILIZED_NODE]
-
-        assert len(node_recs) == 1
-        assert "pod" in node_recs[0].reason.lower(), "Reason should mention pod count"
-
-    def test_underutilized_reason_mentions_utilization_percentage(self, recommender):
-        """UNDERUTILIZED_NODE reason must contain a CPU utilization percentage."""
-        node_infos = [MagicMock()]
-        node_infos[0].name = "idle-node"
-        node_infos[0].cpu_capacity_cores = 8.0
-
-        metrics = [
-            _make_metric(pod_name="solo", node="idle-node", cpu_usage_millicores=50),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.UNDERUTILIZED_NODE]
-
-        assert len(node_recs) == 1
-        assert "%" in node_recs[0].reason, "Reason should contain a utilization percentage"
-
-
-# ---------------------------------------------------------------------------
 # Test: ORPHANED_PERSISTENT_VOLUME
 # ---------------------------------------------------------------------------
 
@@ -1231,7 +731,7 @@ class TestOrphanedPersistentVolume:
     def test_detects_released_volume(self, recommender):
         """A released PV with a deleted claim should be flagged with estimated cost savings."""
         volumes = [
-            OrphanedPV(
+            _orphan_pv(
                 name="pvc-dead",
                 phase="Released",
                 capacity_bytes=100 * 1024**3,
@@ -1248,7 +748,8 @@ class TestOrphanedPersistentVolume:
         assert rec.scope == "cluster"
         assert rec.priority == "medium"
         assert "100.0GiB" in rec.description
-        assert "Released" in rec.reason
+        assert "appears unused" in rec.description
+        assert "Released" in rec.reason and "Evidence that it is unused" in rec.reason
         # 100 GiB at $0.10/GiB-month → $120/year in annualized cost savings
         assert rec.potential_savings_cost == pytest.approx(100 * 0.10 * 12)
         assert "120.00" in rec.description
@@ -1258,7 +759,7 @@ class TestOrphanedPersistentVolume:
     def test_no_cost_savings_when_capacity_unknown(self, recommender):
         """A PV with unknown capacity should not report fabricated cost savings."""
         volumes = [
-            OrphanedPV(
+            _orphan_pv(
                 name="pvc-no-cap",
                 phase="Released",
                 capacity_bytes=0,
@@ -1279,7 +780,7 @@ class TestOrphanedPersistentVolume:
         custom_recommender = NativeRecommender(config=cfg)
 
         volumes = [
-            OrphanedPV(
+            _orphan_pv(
                 name="pvc-pricey",
                 phase="Released",
                 capacity_bytes=10 * 1024**3,
@@ -1300,7 +801,7 @@ class TestOrphanedPersistentVolume:
     def test_prefers_real_opencost_cost_when_available(self, recommender):
         """A real OpenCost annual cost must take precedence over the capacity estimate."""
         volumes = [
-            OrphanedPV(
+            _orphan_pv(
                 name="pvc-real",
                 phase="Released",
                 capacity_bytes=100 * 1024**3,
@@ -1312,30 +813,31 @@ class TestOrphanedPersistentVolume:
         recs = self._pv_recs(recommender, volumes)
         assert len(recs) == 1
         assert recs[0].potential_savings_cost == pytest.approx(87.5)
-        assert "OpenCost-reported cost savings: $87.50/year" in recs[0].description
+        assert "OpenCost-reported cost savings: 87.50 USD/year" in recs[0].description
         assert "$0.10/GiB-month" not in recs[0].description
 
-    def test_detects_volume_with_missing_claim(self, recommender):
-        """A PV whose claim no longer exists should be flagged regardless of phase."""
+    def test_reason_lists_the_collector_evidence(self, recommender):
+        """The recommendation shows the evidence gathered by the collector and the unused duration."""
         volumes = [
-            OrphanedPV(
+            _orphan_pv(
                 name="pvc-stale",
-                phase="Bound",
+                phase="Released",
                 capacity_bytes=50 * 1024**3,
                 claim_namespace="prod",
                 claim_name="deleted-pvc",
+                evidence=["no PVC named prod/deleted-pvc exists"],
             )
         ]
         recs = self._pv_recs(recommender, volumes)
         assert len(recs) == 1
-        assert "prod/deleted-pvc" in recs[0].reason
-        assert "no longer exists" in recs[0].reason
+        assert "no PVC named prod/deleted-pvc exists" in recs[0].reason
+        assert "unused continuously since" in recs[0].reason
 
     def test_multiple_volumes_produce_separate_recommendations(self, recommender):
         """Each orphaned PV should produce its own recommendation."""
         volumes = [
-            OrphanedPV(name="pvc-a", phase="Released", capacity_bytes=10 * 1024**3),
-            OrphanedPV(name="pvc-b", phase="Released", capacity_bytes=20 * 1024**3),
+            _orphan_pv(name="pvc-a", phase="Released", capacity_bytes=10 * 1024**3),
+            _orphan_pv(name="pvc-b", phase="Released", capacity_bytes=20 * 1024**3),
         ]
         recs = self._pv_recs(recommender, volumes)
         assert len(recs) == 2
@@ -1355,6 +857,8 @@ class TestOrphanedPersistentVolume:
         mock_pv.claim_namespace = "default"
         mock_pv.claim_name = "gone"
         mock_pv.reclaim_policy = "Retain"
+        mock_pv.evidence = ["phase Released"]
+        mock_pv.first_seen_at = _unused_since()
         recs = self._pv_recs(recommender, [mock_pv])
         assert len(recs) == 1
         assert recs[0].pod_name == "pvc-mocked"
@@ -1378,10 +882,8 @@ class TestOrphanedLoadBalancer:
 
     def test_detects_orphaned_load_balancer(self, recommender):
         """A LoadBalancer Service with no endpoints should be flagged with estimated cost savings."""
-        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
-
         services = [
-            OrphanedLoadBalancer(
+            _lb(
                 name="dead-lb",
                 namespace="legacy",
                 endpoint_count=0,
@@ -1395,9 +897,10 @@ class TestOrphanedLoadBalancer:
         assert rec.namespace == "legacy"
         assert rec.scope == "cluster"
         assert rec.priority == "medium"
-        assert "no backing endpoints" in rec.description
+        assert "appears unused" in rec.description
         assert "1.2.3.4" in rec.description
-        assert "has 0 ready endpoints" in rec.reason
+        assert "selector app=x matches no pod" in rec.reason
+        assert 'greenkube.io/ignore="true"' in rec.reason
         # Flat estimate at $18.00/month → $216/year
         assert rec.potential_savings_cost == pytest.approx(216.0)
         assert "216.00" in rec.description
@@ -1411,10 +914,8 @@ class TestOrphanedLoadBalancer:
 
     def test_prefers_real_opencost_cost_when_available(self, recommender):
         """A real OpenCost annual cost must take precedence over the flat estimate."""
-        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
-
         services = [
-            OrphanedLoadBalancer(
+            _lb(
                 name="lb-real",
                 namespace="default",
                 endpoint_count=0,
@@ -1424,19 +925,18 @@ class TestOrphanedLoadBalancer:
         recs = self._lb_recs(recommender, services)
         assert len(recs) == 1
         assert recs[0].potential_savings_cost == pytest.approx(97.3)
-        assert "OpenCost-reported cost savings: $97.30/year" in recs[0].description
+        assert "OpenCost-reported cost savings: 97.30 USD/year" in recs[0].description
         assert "$18.00/month" not in recs[0].description
 
     def test_cost_savings_use_configured_lb_price(self):
         """The LoadBalancer price per month must be configurable."""
-        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
         from greenkube.core.config import Config
 
         cfg = Config()
         cfg.LOAD_BALANCER_COST_PER_MONTH = 25.0
         custom_recommender = NativeRecommender(config=cfg)
 
-        services = [OrphanedLoadBalancer(name="lb-pricey", namespace="default", endpoint_count=0)]
+        services = [_lb(name="lb-pricey", namespace="default", endpoint_count=0, external_ip="203.0.113.7")]
         metrics = [_make_metric(pod_name="unrelated-pod")]
         recs = [
             r
@@ -1449,11 +949,9 @@ class TestOrphanedLoadBalancer:
 
     def test_multiple_services_produce_separate_recommendations(self, recommender):
         """Each orphaned LoadBalancer should produce its own recommendation."""
-        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
-
         services = [
-            OrphanedLoadBalancer(name="lb-a", namespace="default", endpoint_count=0),
-            OrphanedLoadBalancer(name="lb-b", namespace="default", endpoint_count=0),
+            _lb(name="lb-a", namespace="default", endpoint_count=0),
+            _lb(name="lb-b", namespace="default", endpoint_count=0),
         ]
         recs = self._lb_recs(recommender, services)
         assert len(recs) == 2
@@ -1467,6 +965,17 @@ class TestOrphanedLoadBalancer:
         mock_lb.endpoint_count = 0
         mock_lb.external_ip = ""
         mock_lb.ports = "80/TCP"
+        mock_lb.evidence = list(_EVIDENCE)
+        mock_lb.first_seen_at = _unused_since()
         recs = self._lb_recs(recommender, [mock_lb])
         assert len(recs) == 1
         assert recs[0].pod_name == "lb-mocked"
+
+
+@pytest.fixture(autouse=True)
+def _no_decrease_coverage_gate(monkeypatch):
+    """These fixtures span hours, not weeks: disable the one-week coverage gate for
+    request decreases (E9), which tests/core/optimization/test_two_way_rightsizing.py covers."""
+    monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")
+    # Likewise for the deletion unused period (the persisted LB/PV ages still apply).
+    monkeypatch.setenv("DELETION_MIN_UNUSED_DAYS", "0")

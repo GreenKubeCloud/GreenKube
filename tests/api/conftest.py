@@ -88,6 +88,15 @@ def mock_k8s_namespaces():
         yield
 
 
+@pytest.fixture(autouse=True)
+def no_deletion_observation_minimum(monkeypatch):
+    """API fixtures span minutes: drop the unused-period minimum of deletions
+    (DELETION_MIN_UNUSED_DAYS), which tests/core/optimization/test_deletion_safety.py covers."""
+    from greenkube.core.config import get_config
+
+    monkeypatch.setattr(get_config(), "DELETION_MIN_UNUSED_DAYS", 0.0)
+
+
 @pytest.fixture
 def mock_carbon_repo():
     """Returns a mock CarbonIntensityRepository."""
@@ -101,6 +110,7 @@ def mock_combined_metrics_repo():
     repo = AsyncMock()
     repo.read_combined_metrics = AsyncMock(return_value=[])
     repo.write_combined_metrics = AsyncMock(return_value=0)
+    repo.read_latest_idle_gpu_sources = AsyncMock(return_value={})
 
     # aggregate_summary and aggregate_timeseries default to the base class
     # Python-side implementation which delegates to read_combined_metrics.
@@ -118,6 +128,20 @@ def mock_combined_metrics_repo():
 
     repo.aggregate_summary = _aggregate_summary
     repo.aggregate_timeseries = _aggregate_timeseries
+    # No node idle share unless a test sets one (NRG-02).
+    repo.aggregate_idle_summary = AsyncMock(return_value=None)
+    repo.aggregate_idle_timeseries = AsyncMock(return_value=[])
+    repo.idle_data_since = AsyncMock(return_value=None)
+
+    # The raw/hourly boundary of the base class (ROL-01).
+    async def _compression_boundary(raw_table):
+        return await _Base.compression_boundary(repo, raw_table)
+
+    async def _raw_hourly_split(start_time, end_time, raw_table):
+        return await _Base._raw_hourly_split(repo, start_time, end_time, raw_table)
+
+    repo.compression_boundary = _compression_boundary
+    repo._raw_hourly_split = _raw_hourly_split
 
     # Wire up read_combined_metrics_smart and read_hourly_metrics
     # so that tests mocking read_combined_metrics get correct behavior.
@@ -188,6 +212,9 @@ def mock_savings_repo():
     repo = AsyncMock()
     repo.get_cumulative_totals = AsyncMock(return_value={})
     repo.get_window_totals = AsyncMock(return_value={})
+    repo.get_accrual_breakdown = AsyncMock(return_value=[])
+    repo.get_lifetime_counters = AsyncMock(return_value=[])
+    repo.has_legacy_compressed_rows = AsyncMock(return_value=False)
     return repo
 
 
@@ -200,6 +227,11 @@ def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_re
     app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
     app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
     app.dependency_overrides[get_savings_ledger_repository] = lambda: mock_savings_repo
+    from greenkube.api.routers.recommendations import get_ledger_repo
+
+    ledger_repo = AsyncMock()
+    ledger_repo.get_identity = AsyncMock(return_value=None)
+    app.dependency_overrides[get_ledger_repo] = lambda: ledger_repo
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

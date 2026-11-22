@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -428,3 +428,31 @@ async def test_remote_delete_before_database_completion_is_idempotently_recovere
         ("delete", branch),
     ]
     assert repository.completed == {("plan-cleanup-1", "gitea-main", "acme/manifests", branch)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["patch", "ci"])
+async def test_branches_of_externally_delivered_plans_are_never_deleted(mode):
+    """F4: a person or a CI job owns the branch; GreenKube has no write credentials for it."""
+    plan = _plan()
+    cast(Any, plan).delivery_mode = mode
+    branch = plan_branch_name(plan)
+    provider = FakeProvider(branch)
+    runtime, repository = _runtime(plan, _records(plan), provider)
+
+    result = await runtime.cleanup_once()
+
+    assert result.deleted == 0
+    assert provider.calls == []
+    assert repository.completed == {("plan-cleanup-1", "gitea-main", "acme/manifests", branch)}
+    assert (await runtime.cleanup_once()).selected == 0
+
+
+def test_storage_branch_cleanup_statuses_match_the_runtime_terminal_statuses():
+    """The storage query selects the same terminal plans the runtime cleans up, ``cancelled`` included."""
+    from greenkube.automation import branch_cleanup_runtime
+    from greenkube.storage.base_pull_request_repository import BRANCH_CLEANUP_PLAN_STATUSES
+
+    expected = {status.value for status in branch_cleanup_runtime._TERMINAL_PLAN_STATUSES}
+    assert set(BRANCH_CLEANUP_PLAN_STATUSES) == expected
+    assert "cancelled" in BRANCH_CLEANUP_PLAN_STATUSES

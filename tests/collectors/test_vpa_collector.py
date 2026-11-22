@@ -70,6 +70,16 @@ class TestVPACollector:
         recs = await VPACollector().collect()
         assert len(recs) == 1
 
+    async def test_vpa_without_update_mode_is_active_not_off(self, mock_custom_api):
+        """The VPA API defaults updateMode to an active mode: an unset mode is never read as Off."""
+        item = _vpa_item()
+        item["spec"].pop("updatePolicy")
+        mock_custom_api.list_cluster_custom_object = AsyncMock(return_value={"items": [item]})
+
+        collector = VPACollector()
+        assert await collector.collect() == []
+        assert collector.skipped_by_mode == {"Auto (default)": 1}
+
     async def test_missing_crd_returns_empty(self, mock_custom_api):
         error = Exception("not found")
         error.status = 404  # type: ignore[attr-defined]

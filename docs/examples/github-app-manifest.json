@@ -1,0 +1,20 @@
+{
+  "name": "GreenKube",
+  "url": "https://greenkube.cloud",
+  "description": "Opens reviewed pull requests that rightsize Kubernetes workloads, then measures the savings.",
+  "public": false,
+  "redirect_url": "https://greenkube.example.com/setup",
+  "hook_attributes": {
+    "url": "https://greenkube.example.com/api/v1/webhooks/inferred-github.com",
+    "active": false
+  },
+  "default_permissions": {
+    "metadata": "read",
+    "contents": "write",
+    "pull_requests": "write",
+    "statuses": "write"
+  },
+  "default_events": [
+    "pull_request"
+  ]
+}

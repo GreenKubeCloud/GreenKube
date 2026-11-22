@@ -22,6 +22,7 @@ from greenkube.gitops.contracts import (
     WorkloadSource,
     binding_candidate_generation_token,
 )
+from greenkube.gitops.discovery.inventory import ResourceBinding, ResourceBindingIndex
 from greenkube.gitops.discovery.kubernetes import CapabilityAvailability, KubernetesDiscoveryResult
 from greenkube.storage.base_gitops_repository import (
     MAX_WORKLOAD_BINDING_CANDIDATES,
@@ -29,6 +30,7 @@ from greenkube.storage.base_gitops_repository import (
     WorkloadBindingCoverage,
     WorkloadBindingRepository,
 )
+from greenkube.utils.time import ensure_utc
 
 DEFAULT_DISCOVERY_INTERVAL_SECONDS = 300.0
 MIN_DISCOVERY_INTERVAL_SECONDS = 1.0
@@ -67,6 +69,19 @@ class _DiscoverySource(Protocol):
         namespace: str | None = None,
         resources: Iterable[Mapping[str, Any]] = (),
     ) -> KubernetesDiscoveryResult: ...
+
+
+class _ResourceBindingStore(Protocol):
+    async def replace_cluster(
+        self, cluster: str, bindings: Iterable[ResourceBinding], *, observed_at: datetime
+    ) -> int: ...
+
+
+def registered_resource_kinds() -> frozenset[tuple[str, str]]:
+    """``(group, kind)`` of the non-workload resources registered action kinds target (H0d)."""
+    from greenkube.automation.actions import ACTION_KINDS
+
+    return frozenset(kind for spec in ACTION_KINDS for kind in spec.resource_kinds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +136,8 @@ class DiscoveryRefreshResult:
     bindings: tuple[WorkloadBinding, ...]
     coverage: DiscoveryCoverage
     availability: Mapping[str, CapabilityAvailability]
+    #: Bindings of the non-workload resources registered action kinds target (H0d).
+    resource_bindings: tuple[ResourceBinding, ...] = ()
 
 
 class GitOpsDiscoveryService:
@@ -137,6 +154,8 @@ class GitOpsDiscoveryService:
         resolver: WorkloadBindingResolver | None = None,
         binding_ttl: timedelta = DEFAULT_BINDING_TTL,
         clock: Callable[[], datetime] | None = None,
+        resource_repository: _ResourceBindingStore | None = None,
+        resource_kinds: Callable[[], frozenset[tuple[str, str]]] = registered_resource_kinds,
     ) -> None:
         if not cluster.strip() or not provider_id.strip():
             raise ValueError("cluster and provider_id must not be blank")
@@ -150,6 +169,8 @@ class GitOpsDiscoveryService:
         self._binding_ttl = binding_ttl
         self._resolver = resolver or WorkloadBindingResolver(freshness_ttl=binding_ttl)
         self._clock = clock or _utc_now
+        self._resource_repository = resource_repository
+        self._resource_kinds = resource_kinds
 
     async def refresh(
         self,
@@ -163,7 +184,7 @@ class GitOpsDiscoveryService:
             namespace=self._namespace,
             resources=resources,
         )
-        refreshed_at = _as_utc(self._clock())
+        refreshed_at = ensure_utc(self._clock())
         current = group_workload_sources(discovery.candidates)
         if any(identity[0] != self._cluster for identity in current):
             raise ValueError("discovery returned a candidate for a different cluster")
@@ -248,12 +269,34 @@ class GitOpsDiscoveryService:
             )
         )
         bindings = tuple(persisted_bindings[identity] for identity in sorted(persisted_bindings))
+        resource_bindings = await self._refresh_resource_bindings(discovery, bindings, refreshed_at)
         return DiscoveryRefreshResult(
             refreshed_at=refreshed_at,
             bindings=bindings,
             coverage=coverage,
             availability=dict(discovery.availability),
+            resource_bindings=resource_bindings,
         )
+
+    async def _refresh_resource_bindings(
+        self,
+        discovery: KubernetesDiscoveryResult,
+        bindings: Iterable[WorkloadBinding],
+        refreshed_at: datetime,
+    ) -> tuple[ResourceBinding, ...]:
+        """Bind the inventoried resources action kinds target and persist them (H0d).
+
+        A controller's Git location comes from its resolved workload bindings; a resource
+        of a controller without one stays unresolved (``controller-source-unresolved``).
+        """
+        index = getattr(discovery, "resource_index", None)
+        if not isinstance(index, ResourceBindingIndex):
+            return ()
+        index.add_sources(binding.source for binding in bindings if binding.source is not None)
+        resource_bindings = tuple(index.bindings(self._resource_kinds()))
+        if self._resource_repository is not None:
+            await self._resource_repository.replace_cluster(self._cluster, resource_bindings, observed_at=refreshed_at)
+        return resource_bindings
 
     async def coverage(self) -> DiscoveryCoverage:
         """Return freshness-aware binding counts for the configured cluster."""
@@ -308,7 +351,7 @@ def _merge_candidates(
                     )
                 )
                 continue
-            if _as_utc(expires_at) <= now or now - _as_utc(candidate.observed_at) >= binding_ttl:
+            if ensure_utc(expires_at) <= now or now - ensure_utc(candidate.observed_at) >= binding_ttl:
                 if candidate.id not in current_ids:
                     historical.append(_mark_manual_resolution_stale(candidate, "manual-resolution-expired"))
                 manual_events.append(
@@ -336,8 +379,8 @@ def _merge_candidates(
             if selected is not None:
                 is_current = (
                     selected.status in {BindingStatus.RESOLVED, BindingStatus.AMBIGUOUS}
-                    and (selected.expires_at is None or _as_utc(selected.expires_at) > now)
-                    and now - _as_utc(selected.observed_at) < binding_ttl
+                    and (selected.expires_at is None or ensure_utc(selected.expires_at) > now)
+                    and now - ensure_utc(selected.observed_at) < binding_ttl
                     and isinstance(selected_generation, str)
                     and binding_candidate_generation_token(selected) == selected_generation
                 )
@@ -515,10 +558,6 @@ def _validate_interval(interval_seconds: float) -> None:
             "interval_seconds must be finite and between "
             f"{MIN_DISCOVERY_INTERVAL_SECONDS:g} and {MAX_DISCOVERY_INTERVAL_SECONDS:g}"
         )
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def _utc_now() -> datetime:

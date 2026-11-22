@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 import uvicorn
 
 from greenkube.core.config import get_config
+from greenkube.core.savings_attributor import accrual_components
 from greenkube.demo.data_generator import (
     DEMO_ZONE,
     generate_carbon_intensity_history,
@@ -53,27 +54,27 @@ async def _backfill_demo_savings_ledger(
         if not record.id or not record.applied_at:
             continue
 
-        annual_co2e = record.carbon_saved_co2e_grams or 0.0
-        if annual_co2e <= 0:
-            continue
-
-        annual_cost = record.cost_saved or 0.0
         rec_type = record.type.value if hasattr(record.type, "value") else str(record.type)
         timestamp = record.applied_at.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
         while timestamp <= now:
-            pending.append(
-                SavingsLedgerRecord(
-                    recommendation_id=record.id,
-                    cluster_name=cluster_name,
-                    namespace=record.namespace or "",
-                    recommendation_type=rec_type,
-                    co2e_saved_grams=annual_co2e * period_factor,
-                    cost_saved_dollars=annual_cost * period_factor,
-                    period_seconds=period_seconds,
-                    timestamp=timestamp,
+            # The production attributor decides what each slot accrues: the projection until the
+            # measurement is decided, the measured rate afterwards, nothing for an inconclusive one.
+            slot_end = timestamp + timedelta(seconds=period_seconds)
+            for component in accrual_components(record, at=slot_end):
+                pending.append(
+                    SavingsLedgerRecord(
+                        recommendation_id=record.id,
+                        cluster_name=cluster_name,
+                        namespace=record.namespace or "",
+                        recommendation_type=rec_type,
+                        co2e_saved_grams=component.co2e_grams_per_year * period_factor,
+                        cost_saved_dollars=component.cost_per_year * period_factor,
+                        period_seconds=period_seconds,
+                        timestamp=timestamp,
+                        measurement_method=component.method,
+                    )
                 )
-            )
 
             if len(pending) >= chunk_size:
                 inserted += await savings_repo.save_records(pending)
@@ -105,6 +106,7 @@ def _configure_demo_environment(db_path: str, port: int, no_browser: bool = Fals
     os.environ["CORS_ORIGINS"] = "*"
     os.environ["LOG_LEVEL"] = "INFO"
     os.environ["DEFAULT_ZONE"] = DEMO_ZONE
+    os.environ["GREENKUBE_DEMO_MODE"] = "true"
 
     get_config().reload()
 
@@ -157,6 +159,7 @@ async def _populate_database(days: int) -> dict[str, int]:
     # 4. Recommendations
     logger.info("💡 Generating optimization recommendations...")
     from greenkube.core.factory import get_recommendation_repository, get_savings_ledger_repository
+    from greenkube.core.savings_attributor import savings_cluster_name
 
     reco_repo = get_recommendation_repository()
     savings_repo = get_savings_ledger_repository()
@@ -167,9 +170,14 @@ async def _populate_database(days: int) -> dict[str, int]:
     counts["savings_ledger"] = await _backfill_demo_savings_ledger(
         reco_repo,
         savings_repo,
-        cluster_name=get_config().CLUSTER_NAME,
+        cluster_name=savings_cluster_name(),
     )
-    counts["savings_ledger_hourly"] = await savings_repo.compress_to_hourly()
+
+    logger.info("📏 Recording measured changes...")
+    from greenkube.demo.changes import populate_demo_changes
+    from greenkube.storage.change_repository import get_change_repository
+
+    counts["measured_changes"] = await populate_demo_changes(reco_repo, get_change_repository())
 
     # 5. Compress older raw metrics into hourly buckets so aggregate_timeseries
     #    can query both the raw and hourly tables consistently across all windows.
@@ -177,13 +185,13 @@ async def _populate_database(days: int) -> dict[str, int]:
     from greenkube.core.db import get_db_manager
     from greenkube.core.metrics_compressor import MetricsCompressor
 
-    compressor = MetricsCompressor(get_db_manager())
+    # Demo data is generated at once, never collected: no collection watermark bounds it.
+    compressor = MetricsCompressor(get_db_manager(), collection_watermark_provider=None)
     compression_stats = await compressor.run()
     counts["hourly_compressed"] = compression_stats.get("rows_compressed", 0)
 
     # 6. Pre-compute dashboard summary and timeseries cache for all windows
     logger.info("⚡ Pre-computing dashboard summary and timeseries cache...")
-    from greenkube.api.metrics_endpoint import update_dashboard_summary_metrics
     from greenkube.core.factory import get_summary_repository, get_timeseries_cache_repository
     from greenkube.core.summary_refresher import SummaryRefresher
 
@@ -194,10 +202,6 @@ async def _populate_database(days: int) -> dict[str, int]:
         timeseries_cache_repo=get_timeseries_cache_repository(),
     )
     counts["timeseries_cache_rows"] = await refresher.run()
-    try:
-        update_dashboard_summary_metrics(await summary_repo.get_rows(namespace=None), reset=True)
-    except Exception as exc:
-        logger.warning("Unable to publish demo dashboard summary metrics: %s", exc)
 
     return counts
 

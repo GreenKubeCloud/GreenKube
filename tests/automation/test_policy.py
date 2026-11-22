@@ -167,7 +167,7 @@ def _evaluator(
     history: _PlanHistory | None = None,
 ) -> AutomationPolicyEvaluator:
     return AutomationPolicyEvaluator(
-        config=config or AutomationPolicyConfig(),
+        config=config or AutomationPolicyConfig(missing_evidence="warn"),
         plan_repository=history if history is not None else _PlanHistory(),
         clock=lambda: _NOW,
     )
@@ -178,7 +178,7 @@ def _codes(result) -> list[AutomationErrorCode]:
 
 
 def test_policy_defaults_match_the_documented_gitops_values():
-    config = AutomationPolicyConfig()
+    config = AutomationPolicyConfig(missing_evidence="warn")
 
     assert config.max_risk_level.value == "medium"
     assert config.min_confidence == 0.6
@@ -409,7 +409,7 @@ async def test_available_rollout_controller_and_interaction_evidence_blocks(evid
 @pytest.mark.asyncio
 async def test_missing_plan_history_fails_closed_for_budget_and_cooldown():
     result = await AutomationPolicyEvaluator(
-        config=AutomationPolicyConfig(),
+        config=AutomationPolicyConfig(missing_evidence="warn"),
         plan_repository=None,
         clock=lambda: _NOW,
     ).evaluate([_recommendation()], _source())
@@ -421,3 +421,71 @@ async def test_missing_plan_history_fails_closed_for_budget_and_cooldown():
         "active_plan",
         "cooldown",
     }
+
+
+class _RecordHistory(_PlanHistory):
+    """Repository exposing the batched workload record read used by cooldowns (D15)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.record_reads: list[dict[str, Any]] = []
+
+    async def list_plan_records_for_workload(self, **identity: Any) -> list[AutomationPlanRecord]:
+        self.record_reads.append(identity)
+        return [
+            AutomationPlanRecord(plan=plan, updated_at=self.updated_at.get(plan.plan_id))
+            for plan in self.plans
+            if plan.status in identity["statuses"]
+        ]
+
+    async def get_plan_record(self, plan_id: str) -> AutomationPlanRecord | None:
+        raise AssertionError("cooldowns must not read plan records one by one")
+
+
+@pytest.mark.asyncio
+async def test_cooldown_reads_workload_history_with_one_batched_record_query():
+    source = _source()
+    merged_plan = _plan(source, plan_id="merged-plan", status=PlanStatus.MERGED)
+    synced_plan = _plan(source, plan_id="synced-plan", status=PlanStatus.SYNCED)
+    history = _RecordHistory(
+        (merged_plan, synced_plan),
+        updated_at={"merged-plan": _NOW - timedelta(hours=5), "synced-plan": _NOW - timedelta(minutes=10)},
+    )
+
+    result = await _evaluator(history=history).evaluate([_recommendation()], source)
+
+    assert len(history.record_reads) == 1
+    assert history.record_reads[0]["workload_name"] == source.workload_name
+    assert AutomationErrorCode.WORKLOAD_COOLDOWN_ACTIVE in _codes(result)
+    cooldown = next(check for check in result.checks if check.gate == "cooldown")
+    assert cooldown.state is PolicyCheckState.REJECTED
+
+
+@pytest.mark.asyncio
+async def test_min_coverage_is_evaluated_against_the_history_since_install():
+    """F7: a one-day-old install collecting every step passes minCoverage over a week lookback."""
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    recommendation = _recommendation().model_copy(
+        update={
+            "evidence": RecommendationEvidence(
+                sample_count=288,
+                coverage_ratio=288 / 2016,
+                observation_window_start=now - timedelta(days=7),
+                observation_window_end=now,
+                observation_window_seconds=7 * 86400,
+            )
+        }
+    )
+    strict = await _evaluator().evaluate([recommendation], _source())
+    assert next(c for c in strict.checks if c.gate == "sample_count_coverage").state is PolicyCheckState.REJECTED
+
+    evaluator = _evaluator()
+    evaluator.history_start = now - timedelta(days=1)
+    evaluator.step_seconds = 300
+    result = await evaluator.evaluate([recommendation], _source())
+
+    sample_check = next(check for check in result.checks if check.gate == "sample_count_coverage")
+    assert sample_check.state is PolicyCheckState.PASSED
+    assert sample_check.observed[0]["coverage_since_install"] == pytest.approx(1.0)

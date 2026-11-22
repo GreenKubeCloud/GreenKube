@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
 from greenkube.gitops.contracts import BindingStatus, ControllerKind, WorkloadSource
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 
-_FULL_COMMIT_SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z", re.IGNORECASE)
+logger = logging.getLogger(__name__)
+
+#: ``(ancestor_sha, descendant_sha) -> True | False | None`` (``None``: unknown).
+AncestryCheck = Callable[[str, str], Awaitable[bool | None]]
+#: ``observed_sha -> True | False | None``: does that revision still carry the
+#: plan's file changes (``None``: unknown)?
+PlannedChangeCheck = Callable[[str], Awaitable[bool | None]]
+
 _SHA1_COMPONENT = re.compile(r"^.+@sha1:([0-9a-f]{40})\Z", re.IGNORECASE)
 _SHA256_COMPONENT = re.compile(r"^.+@sha256:([0-9a-f]{64})\Z", re.IGNORECASE)
 _EXPLICIT_SHA1 = re.compile(r"^sha1:([0-9a-f]{40})\Z", re.IGNORECASE)
@@ -55,6 +64,7 @@ class GitOpsSyncReason(StrEnum):
     """Stable reason codes that never include controller response contents."""
 
     SYNC_CONFIRMED = "sync_confirmed"
+    SYNC_CONFIRMED_DESCENDANT = "sync_confirmed_descendant"
     RECONCILIATION_PENDING = "reconciliation_pending"
     CONTROLLER_FAILED = "controller_failed"
     CONTROLLER_NOT_FOUND = "controller_not_found"
@@ -67,6 +77,11 @@ class GitOpsSyncReason(StrEnum):
     UNSUPPORTED_CONTROLLER = "unsupported_controller"
     REVISION_UNAVAILABLE = "revision_unavailable"
     REVISION_MISMATCH = "revision_mismatch"
+    REVISION_NOT_DESCENDANT = "revision_not_descendant"
+    REVISION_BEHIND_MERGE = "revision_behind_merge"
+    ANCESTRY_UNAVAILABLE = "ancestry_unavailable"
+    PLANNED_CHANGE_NOT_PRESENT = "planned_change_not_present"
+    PLANNED_CHANGE_UNVERIFIED = "planned_change_unverified"
     INVALID_RESPONSE = "invalid_response"
     RESPONSE_TOO_LARGE = "response_too_large"
     RESPONSE_TRUNCATED = "response_truncated"
@@ -74,16 +89,24 @@ class GitOpsSyncReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class GitOpsSyncResult:
-    """Typed, payload-free result for a single GitOps sync observation."""
+    """Typed, payload-free result for a single GitOps sync observation.
+
+    ``observed_revision`` is the normalized full commit SHA the controller
+    reported, when it reported one.
+    """
 
     status: GitOpsSyncStatus
     reason: GitOpsSyncReason
+    observed_revision: str | None = None
 
 
 async def observe_gitops_sync(
     source: WorkloadSource,
     merge_commit_sha: str,
     custom_objects_api: Any,
+    *,
+    ancestry: AncestryCheck | None = None,
+    planned_changes: PlannedChangeCheck | None = None,
 ) -> GitOpsSyncResult:
     """Observe whether the source's exact GitOps controller applied ``merge_commit_sha``.
 
@@ -93,10 +116,55 @@ async def observe_gitops_sync(
     HelmRelease sync is verified against its GitRepository artifact revision,
     not the chart version in ``lastAttemptedRevision``. HTTP 404 is unavailable;
     permission, timeout, and other API failures propagate so callers can retry.
+
+    A healthy controller whose revision differs from the merge commit is
+    confirmed (D1) only when both checks pass: ``ancestry`` proves the observed
+    revision descends from the merge commit (later commits from another PR,
+    Renovate or image write-back landed on top of it), and ``planned_changes``
+    proves that revision still carries the plan's file changes (no later commit
+    reverted or overwrote them). The result is then ``SYNCED`` with reason
+    ``SYNC_CONFIRMED_DESCENDANT``; apply detection still proves live state.
+    Otherwise the result stays ``MISMATCHED`` with a reason that tells why,
+    and an unknown answer is never treated as a confirmation.
     """
+    result = await _observe_gitops_sync(source, merge_commit_sha, custom_objects_api)
+    if ancestry is None or result.reason is not GitOpsSyncReason.REVISION_MISMATCH or result.observed_revision is None:
+        return result
+    merge_sha, observed_sha = merge_commit_sha.lower(), result.observed_revision
+    descends = await _safe_check("ancestry", ancestry, merge_sha, observed_sha)
+    if descends is False:
+        behind = await _safe_check("ancestry", ancestry, observed_sha, merge_sha)
+        reason = GitOpsSyncReason.REVISION_BEHIND_MERGE if behind is True else GitOpsSyncReason.REVISION_NOT_DESCENDANT
+        return replace(result, reason=reason)
+    if descends is not True:
+        return replace(result, reason=GitOpsSyncReason.ANCESTRY_UNAVAILABLE)
+    present = None
+    if planned_changes is not None:
+        present = await _safe_check("planned change", planned_changes, observed_sha)
+    if present is True:
+        return replace(result, status=GitOpsSyncStatus.SYNCED, reason=GitOpsSyncReason.SYNC_CONFIRMED_DESCENDANT)
+    if present is False:
+        return replace(result, reason=GitOpsSyncReason.PLANNED_CHANGE_NOT_PRESENT)
+    return replace(result, reason=GitOpsSyncReason.PLANNED_CHANGE_UNVERIFIED)
+
+
+async def _safe_check(label: str, check: Callable[..., Awaitable[bool | None]], *args: str) -> bool | None:
+    try:
+        answer = await check(*args)
+    except Exception as error:
+        logger.warning("GitOps sync %s check failed (%s).", label, type(error).__name__)
+        return None
+    return answer if isinstance(answer, bool) else None
+
+
+async def _observe_gitops_sync(
+    source: WorkloadSource,
+    merge_commit_sha: str,
+    custom_objects_api: Any,
+) -> GitOpsSyncResult:
     if not isinstance(source, WorkloadSource):
         raise TypeError("source must be a WorkloadSource")
-    if not isinstance(merge_commit_sha, str) or _FULL_COMMIT_SHA.fullmatch(merge_commit_sha) is None:
+    if not isinstance(merge_commit_sha, str) or GIT_OBJECT_SHA.fullmatch(merge_commit_sha) is None:
         raise ValueError("merge_commit_sha must be a full commit SHA")
     if custom_objects_api is None:
         raise ValueError("custom_objects_api must be provided")
@@ -642,14 +710,14 @@ def _compare_revision(revision: str | None, merge_commit_sha: str) -> GitOpsSync
     if observed_sha is None:
         return _result(GitOpsSyncStatus.UNAVAILABLE, GitOpsSyncReason.REVISION_UNAVAILABLE)
     if observed_sha != merge_commit_sha:
-        return _result(GitOpsSyncStatus.MISMATCHED, GitOpsSyncReason.REVISION_MISMATCH)
-    return _result(GitOpsSyncStatus.SYNCED, GitOpsSyncReason.SYNC_CONFIRMED)
+        return GitOpsSyncResult(GitOpsSyncStatus.MISMATCHED, GitOpsSyncReason.REVISION_MISMATCH, observed_sha)
+    return GitOpsSyncResult(GitOpsSyncStatus.SYNCED, GitOpsSyncReason.SYNC_CONFIRMED, observed_sha)
 
 
 def _revision_commit_sha(revision: str | None) -> str | None:
     if not isinstance(revision, str) or not revision or len(revision) > 512 or revision != revision.strip():
         return None
-    if _FULL_COMMIT_SHA.fullmatch(revision) is not None:
+    if GIT_OBJECT_SHA.fullmatch(revision) is not None:
         return revision.lower()
     for pattern in (_SHA1_COMPONENT, _SHA256_COMPONENT, _EXPLICIT_SHA1, _EXPLICIT_SHA256):
         match = pattern.fullmatch(revision)

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from greenkube.automation.branch_cleanup_runtime import is_retryable_gitops_error, safe_gitops_error_fields
 from greenkube.automation.pr_lifecycle import PullRequestLifecycleOutcome, PullRequestLifecycleResult
+from greenkube.automation.provider_backoff import ProviderRetryBackoff
 from greenkube.core.observability import (
     elapsed,
     record_automation_failure,
@@ -128,6 +129,7 @@ class PullRequestPollingRuntime:
         provider_timeout_seconds: int | float = DEFAULT_GITOPS_PR_POLL_PROVIDER_TIMEOUT_SECONDS,
         owner_id: str | None = None,
         branch_cleanup: BranchCleanupWorker | None = None,
+        backoff: ProviderRetryBackoff | None = None,
     ) -> None:
         if type(batch_size) is not int or not 1 <= batch_size <= MAX_PULL_REQUEST_POLL_BATCH_SIZE:
             raise ValueError(f"batch_size must be between 1 and {MAX_PULL_REQUEST_POLL_BATCH_SIZE}.")
@@ -152,6 +154,7 @@ class PullRequestPollingRuntime:
         self.provider_timeout_seconds = float(provider_timeout_seconds)
         self.owner_id = selected_owner_id
         self.branch_cleanup = branch_cleanup
+        self.backoff = backoff if backoff is not None else ProviderRetryBackoff(pull_request_repository)
         self._after_id: int | None = None
         self._poll_lock = asyncio.Lock()
 
@@ -181,6 +184,29 @@ class PullRequestPollingRuntime:
                         )
                 outcome = "completed"
                 return summary
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        finally:
+            if outcome == "error":
+                record_pr_poll_error()
+                record_automation_failure("polling")
+            record_pr_poll_cycle(outcome, elapsed(timer))
+
+    async def poll_with_lease(self, lease: PullRequestPollingLease) -> PullRequestPollingSummary:
+        """Poll one bounded page under a lease the caller already holds.
+
+        The automation controller loop (M8) holds the singleton lease for its whole
+        tick (webhook outbox, polling, branch cleanup, expiry, retention) and calls
+        this instead of :meth:`poll_once`, which would contend with itself.
+        """
+        timer = start_timer()
+        outcome = "error"
+        try:
+            async with self._poll_lock:
+                summary = await self._poll_owned_page(lease)
+            outcome = "completed"
+            return summary
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
@@ -220,12 +246,23 @@ class PullRequestPollingRuntime:
         checked = merged = closed = skipped = errors = 0
         references: set[tuple[str, str, int]] = set()
 
+        by_reference: dict[tuple[str, str, int], list[PullRequestRecord]] = {}
+        for record in records:
+            reference = _poll_reference(record)
+            if reference is not None:
+                by_reference.setdefault(reference, []).append(record)
+
         for record in records:
             reference = _poll_reference(record)
             if reference is None or reference in references:
                 skipped += 1
                 continue
             references.add(reference)
+            linked = by_reference[reference]
+            if self.backoff.deferred(linked):
+                # Backing off (repository detached, credentials refused, rate limited).
+                skipped += 1
+                continue
             checked += 1
             lease = await self.lease_repository.renew_pr_polling_lease(lease, lease_seconds=self.lease_seconds)
             try:
@@ -233,12 +270,14 @@ class PullRequestPollingRuntime:
                     self.reconciler.reconcile_polled(*reference),
                     timeout=self.provider_timeout_seconds,
                 )
-            except Exception:
+            except Exception as exc:
                 errors += 1
                 record_pr_poll_error()
                 record_automation_failure("polling")
-                logger.warning("Git provider pull-request polling failed for a linked record.")
+                if not await self.backoff.failed(linked, exc, loop="pull-request polling"):
+                    logger.warning("Git provider pull-request polling failed for a linked record.")
                 continue
+            await self.backoff.succeeded(linked)
 
             if not isinstance(result, PullRequestLifecycleResult):
                 errors += 1

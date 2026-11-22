@@ -12,10 +12,25 @@ from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    SerializerFunctionWrapHandler,
+    StrictInt,
+    StrictStr,
+    ValidatorFunctionWrapHandler,
+    WrapSerializer,
+    WrapValidator,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
+
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 
 _QUANTITY_PATTERN = re.compile(r"^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+|(?:n|u|m|k|K|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei))?$")
-_SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SCP_REPOSITORY_PATTERN = re.compile(r"^(?:[^/@:\s]+@)?(?P<host>[^:/\s]+):(?P<path>[^?#\s]+)$")
 DEFAULT_BINDING_TTL = timedelta(minutes=30)
 MAX_BINDING_TTL = timedelta(hours=24)
@@ -48,12 +63,16 @@ class RendererKind(StrEnum):
     HELM_RELEASE = "helm_release"
 
 
+#: Renderers the planners, snapshot resolver and rollback can handle (one definition, roadmap M6).
+PLANNABLE_RENDERERS: frozenset[RendererKind] = frozenset(
+    {RendererKind.RAW, RendererKind.KUSTOMIZE, RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE}
+)
+
+
 class ControllerKind(StrEnum):
     ARGOCD = "argocd"
     FLUX_KUSTOMIZATION = "flux_kustomization"
     FLUX_HELM_RELEASE = "flux_helm_release"
-    EXPLICIT_REPOSITORY = "explicit_repository"
-    ANNOTATION = "annotation"
     MANUAL_RESOLUTION = "manual_resolution"
 
 
@@ -95,6 +114,8 @@ class PlanStatus(StrEnum):
     AMBIGUOUS = "ambiguous"
     REJECTED = "rejected"
     SUPERSEDED = "superseded"
+    # Cancelled by a user (POST /automation/plans/{id}/cancel), reason ``cancelled_by_user`` (F-10).
+    CANCELLED = "cancelled"
 
 
 class OperationStatus(StrEnum):
@@ -117,6 +138,7 @@ class AutomationErrorCode(StrEnum):
     PROVIDER_CAPABILITY_MISSING = "provider_capability_missing"
     AUTOMATION_BUDGET_EXHAUSTED = "automation_budget_exhausted"
     RENDER_VALIDATION_FAILED = "render_validation_failed"
+    NO_EFFECTIVE_CHANGE = "no_effective_change"
     REQUIRES_CONTAINER_TARGET = "requires_container_target"
     REVISION_CONFLICT = "revision_conflict"
     UNSAFE_PATH = "unsafe_path"
@@ -124,6 +146,7 @@ class AutomationErrorCode(StrEnum):
     POLICY_RISK_EXCEEDED = "policy_risk_exceeded"
     POLICY_CONFIDENCE_TOO_LOW = "policy_confidence_too_low"
     CHANGE_FREEZE_ACTIVE = "change_freeze_active"
+    DELIVERY_PAUSED = "delivery_paused"
     WORKLOAD_PR_LIMIT_EXCEEDED = "workload_pr_limit_exceeded"
     WORKLOAD_COOLDOWN_ACTIVE = "workload_cooldown_active"
     WORKLOAD_PLAN_ALREADY_EXISTS = "workload_plan_already_exists"
@@ -133,6 +156,10 @@ class AutomationErrorCode(StrEnum):
     ROLLBACK_NOT_READY = "rollback_not_ready"
     ROLLBACK_UNSUPPORTED = "rollback_unsupported"
     ROLLBACK_CONFLICT = "rollback_conflict"
+    DELIVERY_MODE_MISMATCH = "delivery_mode_mismatch"
+    DELIVERY_NOT_VERIFIED = "delivery_not_verified"
+    #: A requested recommendation is no longer active (dismissed, applied, expired, superseded).
+    NOT_ACTIVE = "not_active"
 
 
 def _nonblank(value: str) -> str:
@@ -155,7 +182,7 @@ def _repository_path(value: str, *, allow_root: bool) -> str:
 
 
 def _validate_digest(value: str) -> str:
-    if not _SHA256_PATTERN.fullmatch(value):
+    if not SHA256_DIGEST.fullmatch(value):
         raise ValueError("digest must be a sha256 digest")
     return value
 
@@ -207,28 +234,12 @@ class WorkloadSource(ContractModel):
         return _repository_path(value, allow_root=True)
 
 
-def canonical_repository_identity(value: str) -> str:
-    """Normalize a Git URL for identity without retaining userinfo or query credentials."""
-    if value == "unresolved":
-        return value
-    try:
-        parts = urlsplit(value)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return "redacted"
-    if parts.scheme.lower() in {"http", "https", "ssh", "git", "oci"} and host:
-        normalized_host = f"[{host.lower()}]" if ":" in host else host.lower()
-        normalized_netloc = f"{normalized_host}:{port}" if port is not None else normalized_host
-        return f"{parts.scheme.lower()}://{normalized_netloc}{parts.path}"
-    match = _SCP_REPOSITORY_PATTERN.fullmatch(value)
-    if match is not None:
-        return f"{match.group('host').lower()}:{match.group('path')}"
-    return "redacted"
-
-
 def sanitize_repository_url(value: str) -> str:
-    """Remove repository URL userinfo and query credentials before persistence."""
+    """Normalize a Git URL without userinfo or query credentials.
+
+    The result is both the persisted form and the identity used to compare
+    repositories (``canonical_repository_identity``).
+    """
     if value == "unresolved":
         return value
     try:
@@ -245,6 +256,65 @@ def sanitize_repository_url(value: str) -> str:
     if match is not None:
         return f"{match.group('host').lower()}:{match.group('path')}"
     return "redacted"
+
+
+canonical_repository_identity = sanitize_repository_url
+
+_GIT_REMOTE_SCHEMES = frozenset({"http", "https", "ssh", "git", "git+ssh", "ssh+git"})
+
+
+def repository_identity(value: str) -> str:
+    """The repository a Git remote names, independent of how the remote is spelled.
+
+    ``https://host/ops/app.git``, ``https://host/ops/app``, ``https://host/ops/app/``,
+    ``git@host:ops/app.git`` and ``ssh://git@host[:port]/ops/app.git`` all give
+    ``host/ops/app``: the lowercased host (no credentials, no port) and the path without
+    a trailing ``.git`` or ``/``. Anything else (a Helm or OCI registry, an unparsable
+    value) keeps its ``canonical_repository_identity``. Use it to compare repositories,
+    never as the persisted form.
+
+    The port is ignored on purpose: a self-hosted forge commonly serves SSH on a custom
+    port (``ssh://git@host:2222/...``) and HTTPS on 443 for the same repository. Two
+    different forges on one host distinguished only by port would compare equal.
+    """
+    candidate = value.strip()
+    host: str | None = None
+    path = ""
+    if "://" in candidate:
+        try:
+            parts = urlsplit(candidate)
+            parsed_host = parts.hostname
+            # An invalid port (``host:abc``) or a mixed scp/URL form (``ssh://git@host:org/repo``)
+            # raises here and keeps the canonical form instead of matching another repository.
+            _ = parts.port
+        except ValueError:
+            return canonical_repository_identity(value)
+        if parts.scheme.lower() in _GIT_REMOTE_SCHEMES and not parts.query and not parts.fragment:
+            host, path = parsed_host, parts.path
+    elif (match := _SCP_REPOSITORY_PATTERN.fullmatch(candidate)) is not None:
+        host, path = match.group("host"), match.group("path")
+    segments = [segment for segment in path.strip("/").removesuffix(".git").split("/") if segment]
+    if not host or not segments:
+        return canonical_repository_identity(value)
+    return f"{host.lower().rstrip('.')}/{'/'.join(segments)}"
+
+
+def same_repository(left: str | None, right: str | None) -> bool:
+    """Whether two Git remotes name the same repository (see ``repository_identity``)."""
+    if left is None or right is None or "unresolved" in {left, right}:
+        return False
+    if left.strip() == right.strip():
+        return True
+    left_identity, right_identity = repository_identity(left), repository_identity(right)
+    # Two unparsable values both sanitize to "redacted": that is no evidence of one repository.
+    return left_identity == right_identity and left_identity != "redacted"
+
+
+def public_repository_url(value: str) -> str:
+    """Repository URL safe to return from the API: bounded, printable and credential-free."""
+    if len(value) > 512 or any(ord(character) < 32 for character in value):
+        return "redacted"
+    return sanitize_repository_url(value)
 
 
 def _safe_renderer_generation_config(value: Any) -> Any:
@@ -345,10 +415,34 @@ class ContainerResources(ContractModel):
         return values
 
 
-class SetContainerResources(ContractModel):
+class TypedOperation(ContractModel):
+    """Base of every typed action operation (``op`` discriminates the action kind).
+
+    Built-in operations are listed in ``ActionOperation``; an action kind registered in
+    ``greenkube.automation.actions`` adds its own operation model with
+    ``register_operation_model`` without changing this module.
+    """
+
+    def conflict_key(self) -> str | None:
+        """Identity of what the operation changes; two operations of one action may not share it."""
+        return None
+
+
+#: Pod-spec list a container lives in (H1): ``containers``, or ``initContainers`` for sidecars and init containers.
+ContainerKind = Literal["container", "sidecar", "init"]
+#: Container resources whose limit an operation may set or remove.
+LimitResource = Literal["cpu", "memory"]
+
+
+class SetContainerResources(TypedOperation):
     op: Literal["set_container_resources"] = "set_container_resources"
     container: str = Field(min_length=1)
     resources: ContainerResources
+    #: Limits the operation removes (H1: only ``cpu`` is ever proposed by GreenKube).
+    remove_limits: list[LimitResource] = Field(default_factory=list)
+    #: Which pod-spec list holds the container (H1): ``containers``, or ``initContainers``
+    #: for a native sidecar (``restartPolicy: Always``) or a classic init container.
+    container_kind: ContainerKind = "container"
 
     @field_validator("container")
     @classmethod
@@ -357,12 +451,34 @@ class SetContainerResources(ContractModel):
             raise ValueError("container must be a non-blank name without surrounding whitespace")
         return value
 
+    @model_validator(mode="after")
+    def validate_limit_removals(self) -> SetContainerResources:
+        if len(set(self.remove_limits)) != len(self.remove_limits):
+            raise ValueError("remove_limits must not repeat a resource")
+        if set(self.remove_limits) & set(self.resources.limits):
+            raise ValueError("a limit cannot be both set and removed")
+        return self
 
-class DeleteResource(ContractModel):
+    @model_serializer(mode="wrap")
+    def _omit_v2_defaults(self, handler: SerializerFunctionWrapHandler) -> Any:
+        # Operations without H1 fields serialize exactly as before (action ids, digests, golden plans).
+        data = handler(self)
+        if isinstance(data, dict):
+            if not self.remove_limits:
+                data.pop("remove_limits", None)
+            if self.container_kind == "container":
+                data.pop("container_kind", None)
+        return data
+
+    def conflict_key(self) -> str | None:
+        return f"container {self.container!r}"
+
+
+class DeleteResource(TypedOperation):
     op: Literal["delete_resource"] = "delete_resource"
 
 
-class AddHorizontalPodAutoscaler(ContractModel):
+class AddHorizontalPodAutoscaler(TypedOperation):
     op: Literal["add_hpa"] = "add_hpa"
     min_replicas: int = Field(ge=1)
     max_replicas: int = Field(ge=1)
@@ -375,9 +491,64 @@ class AddHorizontalPodAutoscaler(ContractModel):
         return self
 
 
-ActionOperation = Annotated[
+_BUILTIN_OPERATION_MODELS: dict[str, type[TypedOperation]] = {
+    "set_container_resources": SetContainerResources,
+    "delete_resource": DeleteResource,
+    "add_hpa": AddHorizontalPodAutoscaler,
+}
+#: Operation models of action kinds registered at runtime (H0), keyed by ``op``.
+_EXTENSION_OPERATION_MODELS: dict[str, type[TypedOperation]] = {}
+
+
+def register_operation_model(op: str, model: type[TypedOperation]) -> None:
+    """Let ``ActionPlanV3`` parse and persist the typed operation of a registered action kind."""
+    if not isinstance(op, str) or not op.strip():
+        raise ValueError("operation names must be non-blank strings")
+    if not isinstance(model, type) or not issubclass(model, TypedOperation):
+        raise TypeError("operation models must subclass TypedOperation")
+    builtin = _BUILTIN_OPERATION_MODELS.get(op)
+    if builtin is not None:
+        if builtin is not model:
+            raise ValueError(f"operation {op!r} is a built-in operation")
+        return
+    existing = _EXTENSION_OPERATION_MODELS.get(op)
+    if existing is not None and existing is not model:
+        raise ValueError(f"operation {op!r} is already registered")
+    _EXTENSION_OPERATION_MODELS[op] = model
+
+
+def unregister_operation_model(op: str) -> None:
+    """Remove a runtime operation model (tests only; built-ins cannot be removed)."""
+    _EXTENSION_OPERATION_MODELS.pop(op, None)
+
+
+def _validate_operation(value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+    if isinstance(value, TypedOperation) and type(value) in _EXTENSION_OPERATION_MODELS.values():
+        return value
+    if isinstance(value, Mapping):
+        model = _EXTENSION_OPERATION_MODELS.get(str(value.get("op")))
+        if model is not None:
+            return model.model_validate(dict(value))
+    return handler(value)
+
+
+def _serialize_operation(value: Any, handler: SerializerFunctionWrapHandler, info: SerializationInfo) -> Any:
+    if isinstance(value, TypedOperation) and type(value) in _EXTENSION_OPERATION_MODELS.values():
+        return value.model_dump(mode=info.mode)
+    return handler(value)
+
+
+_BuiltinOperation = Annotated[
     SetContainerResources | DeleteResource | AddHorizontalPodAutoscaler,
     Field(discriminator="op"),
+]
+
+ActionOperation = Annotated[
+    _BuiltinOperation,
+    WrapValidator(_validate_operation),
+    # The return type keeps the built-in discriminated union in the published
+    # serialization schema (OpenAPI); registered kinds serialize as plain objects.
+    WrapSerializer(_serialize_operation, return_type=_BuiltinOperation | dict[str, Any]),
 ]
 
 
@@ -396,11 +567,14 @@ class ActionPlanV3(ContractModel):
             recommendation_id <= 0 for recommendation_id in self.recommendation_ids
         ):
             raise ValueError("recommendation_ids must be unique positive integers")
-        containers = [
-            operation.container for operation in self.operations if isinstance(operation, SetContainerResources)
-        ]
-        if len(set(containers)) != len(containers):
-            raise ValueError("each container may have only one resource operation")
+        keys: set[str] = set()
+        for operation in self.operations:
+            key = operation.conflict_key()
+            if key is None:
+                continue
+            if key in keys:
+                raise ValueError(f"each {key} may have only one resource operation")
+            keys.add(key)
         return self
 
 
@@ -428,6 +602,10 @@ class FileEdit(ContractModel):
         return self
 
 
+def _not_recorded(value: Any) -> bool:
+    return not value
+
+
 class ValidationResult(ContractModel):
     target_changed: bool
     unrelated_changes: bool
@@ -436,11 +614,35 @@ class ValidationResult(ContractModel):
     output_digest: str
     warnings: list[str] = Field(default_factory=list)
     reason: str | None = None
+    #: Every repository file the render read (Kustomize bases and patches, values files,
+    #: chart files, raw manifests in scope) with its Git blob ID at the base revision.
+    #: A moved branch head is accepted only while all of them are unchanged (D7).
+    #: Omitted from the digest and the JSON form when empty (plans created before it).
+    render_inputs: dict[str, str] = Field(default_factory=dict, exclude_if=_not_recorded)
+    #: Directories where any added or changed file changes the render (a raw manifest
+    #: directory, a chart directory), checked like ``render_inputs``.
+    render_scopes: list[str] = Field(default_factory=list, exclude_if=_not_recorded)
 
     @field_validator("output_digest")
     @classmethod
     def validate_output_digest(cls, value: str) -> str:
         return _validate_digest(value)
+
+    @field_validator("render_inputs")
+    @classmethod
+    def validate_render_inputs(cls, value: dict[str, str]) -> dict[str, str]:
+        validated: dict[str, str] = {}
+        for path, blob_sha in value.items():
+            canonical = _repository_path(path, allow_root=False)
+            if not isinstance(blob_sha, str) or GIT_OBJECT_SHA.fullmatch(blob_sha) is None:
+                raise ValueError("render input blob IDs must be full Git object IDs")
+            validated[canonical] = blob_sha.lower()
+        return dict(sorted(validated.items()))
+
+    @field_validator("render_scopes")
+    @classmethod
+    def validate_render_scopes(cls, value: list[str]) -> list[str]:
+        return sorted({_repository_path(path, allow_root=True) for path in value})
 
     @property
     def passed(self) -> bool:
@@ -472,6 +674,114 @@ class FilePlan(ContractModel):
         if self.validation.renderer is not self.renderer:
             raise ValueError("file plan renderer must match its validation renderer")
         return self
+
+
+class FileSummaryEntry(ContractModel):
+    """Content-free record of one planned file edit, kept after retention prunes file contents."""
+
+    path: str = Field(min_length=1)
+    operation: Literal["create", "update", "delete"]
+    original_sha: str | None = None
+    content_digest: str | None = None
+    size_bytes: int | None = Field(default=None, ge=0)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        return _repository_path(value, allow_root=False)
+
+    @field_validator("content_digest")
+    @classmethod
+    def validate_content_digest(cls, value: str | None) -> str | None:
+        return _validate_digest(value) if value is not None else None
+
+
+class DiffStats(ContractModel):
+    files_changed: int = Field(ge=0)
+    additions: int = Field(ge=0)
+    deletions: int = Field(ge=0)
+
+
+class FilePlanSummary(ContractModel):
+    """Compact, content-free projection of a FilePlan (paths, digests, diff stats).
+
+    Retention keeps this summary when it prunes plan file contents so a terminal plan
+    remains a valid, readable ``Plan``. ``files`` is empty only for plans pruned by
+    releases that did not keep a summary.
+    """
+
+    plan_id: str = Field(min_length=1)
+    files: list[FileSummaryEntry] = Field(default_factory=list)
+    base_revision: str = Field(min_length=1)
+    source_revision: str | None = None
+    renderer: RendererKind
+    validation: ValidationResult
+    warnings: list[str] = Field(default_factory=list)
+    digest: str
+    diff_stats: DiffStats | None = None
+    pruned_at: datetime | None = None
+
+    @field_validator("digest")
+    @classmethod
+    def validate_digest(cls, value: str) -> str:
+        return _validate_digest(value)
+
+    @model_validator(mode="after")
+    def validate_summary(self) -> FilePlanSummary:
+        paths = [entry.path for entry in self.files]
+        if len(paths) != len(set(paths)):
+            raise ValueError("file summary paths must be unique")
+        if self.validation.renderer is not self.renderer:
+            raise ValueError("file plan summary renderer must match its validation renderer")
+        return self
+
+    @classmethod
+    def from_file_plan(cls, file_plan: FilePlan, *, pruned_at: datetime | None = None) -> FilePlanSummary:
+        return cls(
+            plan_id=file_plan.plan_id,
+            files=[
+                FileSummaryEntry(
+                    path=edit.path,
+                    operation=edit.operation,
+                    original_sha=edit.original_sha,
+                    content_digest=(
+                        f"sha256:{hashlib.sha256(edit.content.encode('utf-8')).hexdigest()}"
+                        if edit.content is not None
+                        else None
+                    ),
+                    size_bytes=len(edit.content.encode("utf-8")) if edit.content is not None else None,
+                )
+                for edit in file_plan.files
+            ],
+            base_revision=file_plan.base_revision,
+            source_revision=file_plan.source_revision,
+            renderer=file_plan.renderer,
+            validation=file_plan.validation,
+            warnings=list(file_plan.warnings),
+            digest=file_plan.digest,
+            diff_stats=diff_stats(file_plan.diff, files_changed=len(file_plan.files)),
+            pruned_at=pruned_at,
+        )
+
+
+def diff_stats(diff: str | None, *, files_changed: int | None = None) -> DiffStats:
+    """Count unified-diff additions and deletions without keeping the diff text."""
+    additions = deletions = 0
+    changed_paths: set[str] = set()
+    for line in (diff or "").splitlines():
+        if line.startswith("+++ "):
+            changed_paths.add(line[4:].strip())
+        elif line.startswith("---"):
+            continue
+        elif line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+    return DiffStats(
+        files_changed=files_changed if files_changed is not None else len(changed_paths),
+        additions=additions,
+        deletions=deletions,
+    )
 
 
 class ContainerRequestBaseline(ContractModel):
@@ -514,11 +824,22 @@ class Plan(ContractModel):
     action: ActionPlanV3
     policy_result: dict[str, Any] = Field(default_factory=dict)
     file_plan: FilePlan | None = None
+    # Set instead of ``file_plan`` once retention pruned the file contents (D2).
+    file_plan_summary: FilePlanSummary | None = None
     status: PlanStatus = PlanStatus.DRAFT
     digest: str | None = None
     change_set_id: str | None = None
     rollback_of_plan_id: str | None = None
     pre_apply_baseline: PreApplyWorkloadBaseline | None = None
+    # Branch head the worker committed on when it differs from the planned base revision (D7).
+    committed_on_revision: str | None = Field(default=None, min_length=1)
+    # How the approved plan is delivered (F4): GreenKube opens the PR ("direct"), or an
+    # operator ("patch") or a CI job ("ci") applies the patch and reports the PR back.
+    # None for plans not approved yet, and for plans approved before delivery modes.
+    delivery_mode: Literal["direct", "patch", "ci"] | None = None
+    # Reason code of the last status change (``cancelled_by_user``, ``plan_expired``, ...);
+    # None for plans whose status has not changed since 0220 (F-10).
+    status_reason: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime | None = None
 
@@ -526,6 +847,19 @@ class Plan(ContractModel):
     @classmethod
     def validate_digest(cls, value: str | None) -> str | None:
         return _validate_digest(value) if value is not None else None
+
+    @property
+    def file_summary(self) -> FilePlanSummary | None:
+        """Content-free file summary, available before and after retention pruning."""
+        if self.file_plan is not None:
+            return FilePlanSummary.from_file_plan(self.file_plan)
+        return self.file_plan_summary
+
+    @property
+    def base_revision(self) -> str | None:
+        if self.file_plan is not None:
+            return self.file_plan.base_revision
+        return self.file_plan_summary.base_revision if self.file_plan_summary is not None else None
 
     @model_validator(mode="after")
     def validate_plan(self) -> Plan:
@@ -538,10 +872,15 @@ class Plan(ContractModel):
                 raise ValueError("rollback_of_plan_id must not be blank")
             if self.rollback_of_plan_id == self.plan_id:
                 raise ValueError("a plan cannot roll back itself")
-            if self.file_plan is None or self.digest is None:
+            if (self.file_plan is None and self.file_plan_summary is None) or self.digest is None:
                 raise ValueError("rollback plans require a persisted file plan and digest")
         if self.file_plan is not None and self.file_plan.plan_id != self.plan_id:
             raise ValueError("file plan plan_id must match its plan")
+        if self.file_plan_summary is not None:
+            if self.file_plan is not None:
+                raise ValueError("a plan carries either its file plan or a pruned file plan summary, not both")
+            if self.file_plan_summary.plan_id != self.plan_id:
+                raise ValueError("file plan summary plan_id must match its plan")
         if self.status in {
             PlanStatus.VALIDATED,
             PlanStatus.APPROVED,
@@ -552,9 +891,10 @@ class Plan(ContractModel):
             PlanStatus.APPLIED,
             PlanStatus.SYNC_FAILED,
         }:
-            if self.file_plan is None or not self.file_plan.validation.passed:
+            validated = self.file_plan if self.file_plan is not None else self.file_plan_summary
+            if validated is None or not validated.validation.passed:
                 raise ValueError("validated plan status requires a successful render validation")
-            if self.digest != self.file_plan.digest:
+            if self.digest != validated.digest:
                 raise ValueError("validated plan digest must match the file plan digest")
         return self
 

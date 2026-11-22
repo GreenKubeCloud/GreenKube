@@ -522,16 +522,14 @@ def test_action_target_must_match_binding_identity():
         _plan(action=_action(target=target))
 
 
-@pytest.mark.parametrize(
-    "operation",
-    [
-        DeleteResource(),
-        AddHorizontalPodAutoscaler(min_replicas=1, max_replicas=2),
-    ],
-)
-def test_non_rightsizing_action_is_rejected(operation):
+def test_non_rightsizing_action_is_rejected():
     with pytest.raises(RawManifestPlanError, match="per-container rightsizing"):
-        _plan(action=_action(operations=[operation]))
+        _plan(action=_action(operations=[AddHorizontalPodAutoscaler(min_replicas=1, max_replicas=2)]))
+
+
+def test_deleting_a_workload_is_not_a_resource_deletion_kind():
+    with pytest.raises(RawManifestPlanError, match="does not delete apps/v1/Deployment"):
+        _plan(action=_action(operations=[DeleteResource()]))
 
 
 def test_empty_resource_operation_is_rejected():

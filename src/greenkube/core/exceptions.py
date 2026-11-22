@@ -16,6 +16,12 @@ class ConnectionError(DatabaseError):
     pass
 
 
+class DatabaseClosedError(DatabaseError):
+    """Raised when a closed ``DatabaseManager`` is used: it never reopens on first use (roadmap A.9)."""
+
+    pass
+
+
 class QueryError(DatabaseError):
     """Raised when a database query fails."""
 

@@ -2,7 +2,7 @@
 """Maps Kubernetes node cloud zones to Electricity Maps zones."""
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from ..collectors.node_collector import NodeCollector
 from ..core.config import Config, get_config
@@ -10,6 +10,22 @@ from ..models.node import NodeInfo, NodeZoneContext
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 
 logger = logging.getLogger(__name__)
+
+#: Zone code of an unset DEFAULT_ZONE: never fetched from a provider.
+UNKNOWN_ZONE = "unknown"
+
+# Nodes whose default-zone fallback was already logged by this process (F-10):
+# the fallback is logged once per node, then at DEBUG on every later collection.
+# Each row still records it in its estimation reasons. Bounded: past
+# MAX_DEFAULT_ZONE_LOGGED_NODES entries (node churn) the state is reset, so
+# each node logs its fallback once more instead of the set growing forever.
+MAX_DEFAULT_ZONE_LOGGED_NODES = 4096
+_default_zone_logged: set[tuple[str, str]] = set()
+
+
+def reset_default_zone_log_state() -> None:
+    """Forget which nodes had their default-zone fallback logged (tests and restarts)."""
+    _default_zone_logged.clear()
 
 
 class NodeZoneMapper:
@@ -108,7 +124,20 @@ class NodeZoneMapper:
                         f"Used default zone '{self._config.DEFAULT_ZONE}'"
                     )
                     is_estimated = True
-                    if self._config.DEFAULT_ZONE == "unknown":
+                    log_key = (node_name, self._config.DEFAULT_ZONE)
+                    first_time = log_key not in _default_zone_logged
+                    if first_time and len(_default_zone_logged) >= MAX_DEFAULT_ZONE_LOGGED_NODES:
+                        _default_zone_logged.clear()
+                    _default_zone_logged.add(log_key)
+                    if not first_time:
+                        logger.debug(
+                            "Node '%s' (cloud zone '%s', region '%s') uses default zone '%s'.",
+                            node_name,
+                            cloud_zone,
+                            region,
+                            self._config.DEFAULT_ZONE,
+                        )
+                    elif self._config.DEFAULT_ZONE == "unknown":
                         logger.warning(
                             "⚠️  DEFAULT_ZONE is not set (or set to 'unknown'). Carbon intensity will use the global "
                             "fallback (%s gCO2e/kWh) for node '%s' (cloud zone '%s', region '%s'). "
@@ -120,8 +149,10 @@ class NodeZoneMapper:
                             region,
                         )
                     else:
-                        logger.warning(
-                            "Could not map cloud zone '%s' or region '%s' for node '%s'. Using default: '%s'",
+                        # A configured DEFAULT_ZONE is the intended setting: INFO, once per node.
+                        logger.info(
+                            "Could not map cloud zone '%s' or region '%s' for node '%s'. Using default: '%s' "
+                            "(logged once per node).",
                             cloud_zone,
                             region,
                             node_name,
@@ -136,3 +167,16 @@ class NodeZoneMapper:
             )
 
         return node_contexts
+
+    async def intensity_zones(self, nodes_info: Dict[str, NodeInfo]) -> Set[str]:
+        """Electricity Maps zones whose intensity history the hourly job must fetch (NRG-03).
+
+        The zones the rows are computed for: each node's resolved zone (the same
+        resolution as :meth:`map_nodes`), plus ``DEFAULT_ZONE``, which rows of
+        unresolved nodes and of nodes that left the cluster use. ``unknown`` is
+        never fetched.
+        """
+        contexts = await self.map_nodes(dict(nodes_info or {}))
+        zones = {context.emaps_zone for context in contexts.values()}
+        zones.add(self._config.DEFAULT_ZONE)
+        return {zone for zone in zones if zone and zone != UNKNOWN_ZONE}

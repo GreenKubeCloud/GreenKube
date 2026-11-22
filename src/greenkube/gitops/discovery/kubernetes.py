@@ -11,6 +11,9 @@ from greenkube.gitops.discovery.argo import discover_argo_application
 from greenkube.gitops.discovery.common import (
     WORKLOAD_KINDS,
     as_mapping,
+    flux_destination_evidence,
+    flux_targets_remote_cluster,
+    mark_destination_remote,
     text,
     workload_source,
 )
@@ -20,6 +23,7 @@ from greenkube.gitops.discovery.flux import (
     discover_flux_helm_release_values_sources,
     discover_flux_kustomization,
 )
+from greenkube.gitops.discovery.inventory import ResourceBindingIndex
 
 _ARGO_APPLICATIONS = "argocd"
 _FLUX_KUSTOMIZATIONS = ControllerKind.FLUX_KUSTOMIZATION.value
@@ -60,6 +64,9 @@ _WORKLOAD_LISTS = (
     ("DaemonSet", "list_daemon_set_for_all_namespaces"),
 )
 _MISSING_CRD_EXCEPTION_NAMES = frozenset({"NoMatch", "NoMatchError", "ResourceNotFoundError"})
+_VPA_GROUP = "autoscaling.k8s.io"
+_VPA_VERSION = "v1"
+_VPA_PLURAL = "verticalpodautoscalers"
 
 
 class KubernetesWorkloadInventoryError(RuntimeError):
@@ -88,6 +95,8 @@ class KubernetesDiscoveryResult:
 
     candidates: list[WorkloadSource]
     availability: dict[str, CapabilityAvailability]
+    #: Inventories of the listed Argo CD Applications and Flux Kustomizations (H0d).
+    resource_index: ResourceBindingIndex | None = None
 
 
 class KubernetesWorkloadInventoryReader:
@@ -99,6 +108,7 @@ class KubernetesWorkloadInventoryReader:
         *,
         autoscaling_v2_api: Any | None = None,
         policy_v1_api: Any | None = None,
+        custom_objects_api: Any | None = None,
         page_size: int = _DEFAULT_WORKLOAD_INVENTORY_PAGE_SIZE,
         max_pages: int = _DEFAULT_WORKLOAD_INVENTORY_MAX_PAGES,
     ) -> None:
@@ -117,16 +127,21 @@ class KubernetesWorkloadInventoryReader:
         self._apps_v1_api = apps_v1_api
         self._autoscaling_v2_api = autoscaling_v2_api
         self._policy_v1_api = policy_v1_api
+        self._custom_objects_api = custom_objects_api
         self.page_size = page_size
         self.max_pages = max_pages
 
     async def list_workloads(self) -> list[Mapping[str, Any]]:
-        """List workloads and attach optional HPA/PDB policy evidence."""
+        """List workloads and attach optional HPA/VPA/PDB policy evidence."""
         workloads: list[Mapping[str, Any]] = []
         for kind, method_name in _WORKLOAD_LISTS:
             workloads.extend(await self._list_kind(kind, method_name))
         if self._autoscaling_v2_api is not None or self._policy_v1_api is not None:
-            snapshot = await _read_policy_snapshot(self._autoscaling_v2_api, self._policy_v1_api)
+            snapshot = await _read_policy_snapshot(
+                self._autoscaling_v2_api,
+                self._policy_v1_api,
+                self._custom_objects_api,
+            )
             workloads = [_with_policy_snapshot(workload, snapshot) for workload in workloads]
         return workloads
 
@@ -170,10 +185,26 @@ class KubernetesDiscoverySource:
     The custom-object API is injected so callers own Kubernetes configuration
     and client lifecycle. ``resources`` supplies live workload objects used by
     the Flux HelmRelease adapter; this source itself only lists GitOps CRDs.
+
+    Controllers that deploy to another cluster (an Argo CD destination other than the
+    in-cluster address and ``local_cluster_aliases``, a Flux object with
+    ``spec.kubeConfig``) never bind a local workload or resource
+    (``destination_remote``). ``local_cluster_aliases`` defaults to
+    ``GITOPS_LOCAL_CLUSTER_ALIASES``.
     """
 
-    def __init__(self, custom_objects_api: Any) -> None:
+    def __init__(self, custom_objects_api: Any, *, local_cluster_aliases: Iterable[str] | None = None) -> None:
         self._custom_objects_api = custom_objects_api
+        self._local_cluster_aliases = tuple(local_cluster_aliases) if local_cluster_aliases is not None else None
+
+    @property
+    def local_cluster_aliases(self) -> tuple[str, ...]:
+        """Extra Argo CD server URLs or cluster names of the local cluster."""
+        if self._local_cluster_aliases is None:
+            from greenkube.core.config import get_config
+
+            return get_config().gitops_local_cluster_aliases
+        return self._local_cluster_aliases
 
     async def check_availability(
         self,
@@ -228,6 +259,7 @@ class KubernetesDiscoverySource:
         ]
         source_objects.extend(items_by_capability[_HELM_CHARTS.capability])
         live_resources = [resource for resource in resources if isinstance(resource, Mapping)]
+        local_cluster_aliases = self.local_cluster_aliases
         candidates: list[WorkloadSource] = []
 
         for application in items_by_capability[_APPLICATIONS.capability]:
@@ -238,6 +270,7 @@ class KubernetesDiscoverySource:
                         cluster=cluster,
                         provider_id=provider_id,
                         live_resources=live_resources,
+                        local_cluster_aliases=local_cluster_aliases,
                     )
                 )
             except Exception:
@@ -251,11 +284,14 @@ class KubernetesDiscoverySource:
 
         for kustomization in items_by_capability[_KUSTOMIZATIONS.capability]:
             candidates.extend(
-                discover_flux_kustomization(
+                _flux_destination_checked(
                     kustomization,
-                    source_objects,
-                    cluster=cluster,
-                    provider_id=provider_id,
+                    discover_flux_kustomization(
+                        kustomization,
+                        source_objects,
+                        cluster=cluster,
+                        provider_id=provider_id,
+                    ),
                 )
             )
 
@@ -273,19 +309,29 @@ class KubernetesDiscoverySource:
                 provider_id=provider_id,
             )
             candidates.extend(
-                discover_flux_helm_release(
+                _flux_destination_checked(
                     helm_release,
-                    live_resources,
-                    source_objects,
-                    cluster=cluster,
-                    provider_id=provider_id,
-                    manifest_source=manifest_source,
-                    git_managed_values=git_managed_values,
+                    discover_flux_helm_release(
+                        helm_release,
+                        live_resources,
+                        source_objects,
+                        cluster=cluster,
+                        provider_id=provider_id,
+                        manifest_source=manifest_source,
+                        git_managed_values=git_managed_values,
+                    ),
                 )
             )
 
         candidates = [_with_live_workload_evidence(candidate, live_resources) for candidate in candidates]
-        return KubernetesDiscoveryResult(candidates=candidates, availability=availability)
+        resource_index = ResourceBindingIndex()
+        for application in items_by_capability[_APPLICATIONS.capability]:
+            resource_index.add_argo_application(application, local_cluster_aliases)
+        for kustomization in items_by_capability[_KUSTOMIZATIONS.capability]:
+            resource_index.add_flux_kustomization(kustomization)
+        return KubernetesDiscoveryResult(
+            candidates=candidates, availability=availability, resource_index=resource_index
+        )
 
     async def _list(
         self,
@@ -309,6 +355,15 @@ class KubernetesDiscoverySource:
             plural=resource.plural,
             **options,
         )
+
+
+def _flux_destination_checked(controller: Mapping[str, Any], candidates: list[WorkloadSource]) -> list[WorkloadSource]:
+    """Block the candidates of a Flux object that applies to another cluster (``spec.kubeConfig``)."""
+    spec = as_mapping(controller.get("spec")) or {}
+    if not flux_targets_remote_cluster(spec):
+        return candidates
+    evidence = flux_destination_evidence(spec)
+    return [mark_destination_remote(candidate, evidence) for candidate in candidates]
 
 
 def _items(response: Any) -> list[Mapping[str, Any]]:
@@ -539,18 +594,43 @@ def _is_missing_crd(error: Exception) -> bool:
 @dataclass(frozen=True, slots=True)
 class _PolicySnapshot:
     checked: bool
-    hpa_targets: Mapping[tuple[str, str, str], Mapping[str, Any]]
+    #: Every HPA, several may target one workload (D13: keeping one per target missed the others).
+    hpa_targets: tuple[Mapping[str, Any], ...]
     pod_disruption_budgets: tuple[Mapping[str, Any], ...]
     reason: str | None = None
+    vpa_checked: bool = False
+    vpa_targets: tuple[Mapping[str, Any], ...] = ()
 
 
 async def _read_policy_snapshot(
     autoscaling_v2_api: Any | None,
     policy_v1_api: Any | None,
+    custom_objects_api: Any | None = None,
 ) -> _PolicySnapshot:
-    hpa_targets: dict[tuple[str, str, str], Mapping[str, Any]] = {}
+    hpa_targets: list[Mapping[str, Any]] = []
     pdbs: list[Mapping[str, Any]] = []
+    vpas: list[Mapping[str, Any]] = []
     errors: list[str] = []
+    vpa_checked = False
+
+    if custom_objects_api is not None:
+        try:
+            response = await custom_objects_api.list_cluster_custom_object(
+                group=_VPA_GROUP,
+                version=_VPA_VERSION,
+                plural=_VPA_PLURAL,
+            )
+            for item in _listed_objects(response, "VerticalPodAutoscaler"):
+                normalized = _normalize_vpa(item)
+                if normalized is not None:
+                    vpas.append(normalized)
+            vpa_checked = True
+        except Exception as error:
+            if _is_missing_crd(error):
+                # No VPA CRD installed: nothing can conflict.
+                vpa_checked = True
+            else:
+                errors.append("vpa-read-failed")
 
     if autoscaling_v2_api is not None:
         try:
@@ -558,7 +638,7 @@ async def _read_policy_snapshot(
             for item in _listed_objects(response, "HorizontalPodAutoscaler"):
                 normalized = _normalize_hpa(item)
                 if normalized is not None:
-                    hpa_targets[normalized[0]] = normalized[1]
+                    hpa_targets.append(normalized[1])
         except Exception:
             errors.append("hpa-read-failed")
 
@@ -572,12 +652,15 @@ async def _read_policy_snapshot(
         except Exception:
             errors.append("pdb-read-failed")
 
-    checked = autoscaling_v2_api is not None and policy_v1_api is not None and not errors
+    hpa_pdb_errors = [error for error in errors if error != "vpa-read-failed"]
+    checked = autoscaling_v2_api is not None and policy_v1_api is not None and not hpa_pdb_errors
     return _PolicySnapshot(
         checked=checked,
-        hpa_targets=hpa_targets,
+        hpa_targets=tuple(hpa_targets),
         pod_disruption_budgets=tuple(pdbs),
         reason=",".join(errors) if errors else None,
+        vpa_checked=vpa_checked,
+        vpa_targets=tuple(vpas),
     )
 
 
@@ -593,19 +676,70 @@ def _normalize_hpa(resource: Any) -> tuple[tuple[str, str, str], Mapping[str, An
         return None
     metrics = _field(spec, "metrics")
     metric_types: list[str] = []
+    resource_metrics: list[dict[str, Any]] = []
     if isinstance(metrics, (list, tuple)):
         for metric in metrics:
             metric_type = _field(metric, "type")
             if isinstance(metric_type, str) and metric_type:
                 metric_types.append(metric_type)
+            resource_metric = _hpa_resource_metric(metric)
+            if resource_metric is not None:
+                resource_metrics.append(resource_metric)
+    if not metric_types:
+        # autoscaling/v2 defaults an HPA without metrics to 80% average CPU utilization.
+        resource_metrics.append({"resource": "cpu", "container": None, "target_type": "Utilization"})
     return (namespace, kind, target_name), {
         "name": name,
         "namespace": namespace,
         "target_kind": kind,
         "target_name": target_name,
         "metric_types": sorted(set(metric_types)),
+        "resource_metrics": resource_metrics,
         "min_replicas": _field(spec, "minReplicas") if isinstance(_field(spec, "minReplicas"), int) else None,
         "max_replicas": _field(spec, "maxReplicas") if isinstance(_field(spec, "maxReplicas"), int) else None,
+    }
+
+
+def _hpa_resource_metric(metric: Any) -> dict[str, Any] | None:
+    metric_type = _field(metric, "type")
+    if metric_type == "Resource":
+        source = _field(metric, "resource")
+    elif metric_type == "ContainerResource":
+        source = _field(metric, "containerResource") or _field(metric, "container_resource")
+    else:
+        return None
+    resource = _field(source, "name")
+    if not isinstance(resource, str) or not resource:
+        return None
+    container = _field(source, "container") if metric_type == "ContainerResource" else None
+    target_type = _field(_field(source, "target"), "type")
+    return {
+        "resource": resource,
+        "container": container if isinstance(container, str) and container else None,
+        "target_type": target_type if isinstance(target_type, str) and target_type else None,
+    }
+
+
+def _normalize_vpa(resource: Any) -> Mapping[str, Any] | None:
+    metadata = _field(resource, "metadata")
+    spec = _field(resource, "spec")
+    namespace = _field(metadata, "namespace")
+    name = _field(metadata, "name")
+    target = _field(spec, "targetRef") or _field(spec, "target_ref")
+    kind = _field(target, "kind")
+    target_name = _field(target, "name")
+    if not all(isinstance(value, str) and value for value in (namespace, name, kind, target_name)):
+        return None
+    update_mode = _field(_field(spec, "updatePolicy") or _field(spec, "update_policy"), "updateMode")
+    if update_mode is None:
+        update_mode = _field(_field(spec, "updatePolicy") or _field(spec, "update_policy"), "update_mode")
+    return {
+        "name": name,
+        "namespace": namespace,
+        "target_kind": kind,
+        "target_name": target_name,
+        # The VPA API defaults updateMode to "Auto" when no update policy is set.
+        "update_mode": update_mode if isinstance(update_mode, str) and update_mode else "Auto",
     }
 
 
@@ -667,7 +801,7 @@ def _with_policy_snapshot(workload: Mapping[str, Any], snapshot: _PolicySnapshot
         "reason": snapshot.reason,
         "hpa_targets": [
             dict(hpa)
-            for hpa in snapshot.hpa_targets.values()
+            for hpa in snapshot.hpa_targets
             if hpa.get("namespace") == (workload.get("metadata") or {}).get("namespace")
             and hpa.get("target_kind") == workload.get("kind")
             and hpa.get("target_name") == (workload.get("metadata") or {}).get("name")
@@ -676,6 +810,14 @@ def _with_policy_snapshot(workload: Mapping[str, Any], snapshot: _PolicySnapshot
             dict(pdb)
             for pdb in snapshot.pod_disruption_budgets
             if pdb.get("namespace") == workload.get("metadata", {}).get("namespace")
+        ],
+        "vpa_checked": snapshot.vpa_checked,
+        "vpa_targets": [
+            dict(vpa)
+            for vpa in snapshot.vpa_targets
+            if vpa.get("namespace") == (workload.get("metadata") or {}).get("namespace")
+            and vpa.get("target_kind") == workload.get("kind")
+            and vpa.get("target_name") == (workload.get("metadata") or {}).get("name")
         ],
     }
     return result
@@ -708,7 +850,7 @@ def _with_live_workload_evidence(
     merged_labels = {**template_labels, **labels}
     rollout_in_progress = _workload_rollout_in_progress(resource, candidate.workload_kind)
     policy = _greenkube_policy_evidence(resource)
-    hpa_pdb = _hpa_pdb_interaction(candidate, merged_labels, resource, policy)
+    interactions = _policy_interaction_evidence(candidate, merged_labels, resource, policy)
 
     evidence = dict(candidate.evidence)
     evidence["workload_labels"] = merged_labels
@@ -718,15 +860,30 @@ def _with_live_workload_evidence(
     }
     if rollout_in_progress is not None:
         evidence["rollout_in_progress"] = rollout_in_progress
-    if hpa_pdb is not None:
-        interactions_checked, conflict = hpa_pdb
-        evidence["hpa_pdb_interactions_checked"] = interactions_checked
-        if conflict is not None:
-            evidence["hpa_pdb_conflict"] = conflict
+        evidence["rollout_pods_unavailable_only"] = _workload_pods_unavailable_only(resource, candidate.workload_kind)
+    # Raw interaction facts; the policy decides per planned resource whether they conflict (D13).
+    evidence.pop("hpa_pdb_conflict", None)
+    evidence.update(interactions)
     return candidate.model_copy(update={"evidence": evidence})
 
 
-def _workload_rollout_in_progress(resource: Mapping[str, Any], kind: str) -> bool | None:
+def _workload_pods_unavailable_only(resource: Mapping[str, Any], kind: str) -> bool:
+    """The rollout gate fires only because pods of a fully rolled-out spec are not ready.
+
+    An OOM-killed or crash-looping workload stays unavailable after its rollout has
+    completed: that is its health, not a rollout. The policy lets an increase-only
+    reliability fix through in that case (it is the remedy); every other plan stays
+    blocked by ``rollout_in_progress``.
+    """
+    return (
+        _workload_rollout_in_progress(resource, kind) is True
+        and _workload_rollout_in_progress(resource, kind, include_availability=False) is False
+    )
+
+
+def _workload_rollout_in_progress(
+    resource: Mapping[str, Any], kind: str, *, include_availability: bool = True
+) -> bool | None:
     spec = as_mapping(_field(resource, "spec")) or {}
     status = as_mapping(_field(resource, "status")) or {}
     generation = _field(_field(resource, "metadata") or {}, "generation")
@@ -741,12 +898,18 @@ def _workload_rollout_in_progress(resource: Mapping[str, Any], kind: str) -> boo
     unavailable = _field_any(status, "unavailableReplicas", "unavailable_replicas")
     current = _field_any(status, "currentReplicas", "current_replicas")
 
+    if not include_availability:
+        unavailable = ready = None
     if kind == "Deployment":
         if isinstance(updated, int) and updated < desired:
             return True
         if isinstance(unavailable, int) and unavailable > 0:
             return True
         if isinstance(current, int) and isinstance(updated, int) and current > updated:
+            return True
+        # Pods of an older ReplicaSet still exist (status.replicas counts every pod).
+        total = _field_any(status, "replicas")
+        if isinstance(total, int) and isinstance(updated, int) and total > updated:
             return True
         if isinstance(ready, int) and ready < desired:
             return True
@@ -770,6 +933,8 @@ def _workload_rollout_in_progress(resource: Mapping[str, Any], kind: str) -> boo
         updated_scheduled = _field_any(status, "updatedNumberScheduled", "updated_number_scheduled")
         number_unavailable = _field_any(status, "numberUnavailable", "number_unavailable")
         number_ready = _field_any(status, "numberReady", "number_ready")
+        if not include_availability:
+            number_unavailable = number_ready = None
         if isinstance(desired_scheduled, int):
             if isinstance(updated_scheduled, int) and updated_scheduled < desired_scheduled:
                 return True
@@ -786,29 +951,50 @@ def _greenkube_policy_evidence(resource: Mapping[str, Any]) -> Mapping[str, Any]
     return value if isinstance(value, Mapping) else None
 
 
-def _hpa_pdb_interaction(
+def _policy_interaction_evidence(
     candidate: WorkloadSource,
     labels: Mapping[str, str],
     resource: Mapping[str, Any],
     policy: Mapping[str, Any] | None,
-) -> tuple[bool, bool | None] | None:
-    if policy is None or policy.get("checked") is not True:
-        return None
-    hpa_present = any(
-        isinstance(hpa, Mapping)
-        and hpa.get("name")
-        and text(hpa.get("target_kind")) == candidate.workload_kind
-        and text(hpa.get("target_name")) == candidate.workload_name
-        for hpa in policy.get("hpa_targets") or ()
-    )
-    desired = _field(as_mapping(_field(resource, "spec")) or {}, "replicas")
-    desired = desired if isinstance(desired, int) and not isinstance(desired, bool) else None
-    hard_pdb = any(
-        _pdb_blocks_disruption(pdb, labels, desired_replicas=desired)
-        for pdb in policy.get("pod_disruption_budgets") or ()
-        if isinstance(pdb, Mapping)
-    )
-    return True, bool(hpa_present or hard_pdb)
+) -> dict[str, Any]:
+    """HPA, PDB and VPA facts for the policy gates; absent keys mean "not checked"."""
+    if policy is None:
+        return {}
+    evidence: dict[str, Any] = {}
+    if policy.get("checked") is True:
+        evidence["hpa_pdb_interactions_checked"] = True
+        evidence["hpa_targets"] = [
+            {
+                "name": hpa.get("name"),
+                "metric_types": list(hpa.get("metric_types") or []),
+                "resource_metrics": [
+                    dict(metric) for metric in hpa.get("resource_metrics") or () if isinstance(metric, Mapping)
+                ],
+            }
+            for hpa in policy.get("hpa_targets") or ()
+            if isinstance(hpa, Mapping)
+            and hpa.get("name")
+            and text(hpa.get("target_kind")) == candidate.workload_kind
+            and text(hpa.get("target_name")) == candidate.workload_name
+        ]
+        desired = _field(as_mapping(_field(resource, "spec")) or {}, "replicas")
+        desired = desired if isinstance(desired, int) and not isinstance(desired, bool) else None
+        evidence["pdb_conflict"] = any(
+            _pdb_blocks_disruption(pdb, labels, desired_replicas=desired)
+            for pdb in policy.get("pod_disruption_budgets") or ()
+            if isinstance(pdb, Mapping)
+        )
+    if policy.get("vpa_checked") is True:
+        evidence["vpa_interactions_checked"] = True
+        evidence["vpa_targets"] = [
+            {"name": vpa.get("name"), "update_mode": vpa.get("update_mode")}
+            for vpa in policy.get("vpa_targets") or ()
+            if isinstance(vpa, Mapping)
+            and vpa.get("name")
+            and text(vpa.get("target_kind")) == candidate.workload_kind
+            and text(vpa.get("target_name")) == candidate.workload_name
+        ]
+    return evidence
 
 
 def _pdb_blocks_disruption(

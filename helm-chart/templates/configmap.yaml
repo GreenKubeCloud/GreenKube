@@ -1,83 +1,72 @@
-{{- $automationMode := include "greenkube.automationMode" . }}
+{{- $v := include "greenkube.values" . | fromYaml }}
 {{- $gitProviderConfig := include "greenkube.gitProviderConfigJson" . }}
-{{- if not (kindIs "map" .Values.automation.policy) }}
-{{- fail "automation.policy must be a map" }}
-{{- end }}
-{{- if not (kindIs "map" .Values.automation.pullRequests) }}
-{{- fail "automation.pullRequests must be a map" }}
-{{- end }}
-{{- $prPollInterval := .Values.automation.prPollIntervalSeconds | toString }}
-{{- if not (regexMatch "^[0-9]+$" $prPollInterval) }}
-{{- fail "automation.prPollIntervalSeconds must be an integer between 10 and 86400" }}
-{{- end }}
-{{- $prPollIntervalSeconds := int $prPollInterval }}
-{{- if or (lt $prPollIntervalSeconds 10) (gt $prPollIntervalSeconds 86400) }}
-{{- fail "automation.prPollIntervalSeconds must be an integer between 10 and 86400" }}
-{{- end }}
-{{- $syncPollInterval := .Values.automation.syncPollIntervalSeconds | toString }}
-{{- if not (regexMatch "^[0-9]+$" $syncPollInterval) }}
-{{- fail "automation.syncPollIntervalSeconds must be an integer between 10 and 86400" }}
-{{- end }}
-{{- $syncPollIntervalSeconds := int $syncPollInterval }}
-{{- if or (lt $syncPollIntervalSeconds 10) (gt $syncPollIntervalSeconds 86400) }}
-{{- fail "automation.syncPollIntervalSeconds must be an integer between 10 and 86400" }}
-{{- end }}
-{{- $syncTimeout := .Values.automation.syncTimeoutSeconds | toString }}
-{{- if not (regexMatch "^[0-9]+$" $syncTimeout) }}
-{{- fail "automation.syncTimeoutSeconds must be an integer between 60 and 86400" }}
-{{- end }}
-{{- $syncTimeoutSeconds := int $syncTimeout }}
-{{- if or (lt $syncTimeoutSeconds 60) (gt $syncTimeoutSeconds 86400) }}
-{{- fail "automation.syncTimeoutSeconds must be an integer between 60 and 86400" }}
-{{- end }}
+{{- /* Types and ranges are validated by values.schema.json (N2). pauseDelivery
+is a policy, but it travels as its own setting so that the policy evaluator
+keeps rejecting unknown keys; minSamples comes from the single
+config.recommendations.minSamples knob (N3). */ -}}
+{{- $policy := omit (deepCopy (.Values.automation.policy | default dict)) "pauseDelivery" }}
+{{- $_ := set $policy "minSamples" $v.policyMinSamples }}
+{{- $_ := set $policy "missingEvidence" $v.missingEvidence }}
+{{- $prPollInterval := .Values.automation.prPollIntervalSeconds | int | toString }}
+{{- $syncPollInterval := .Values.automation.syncPollIntervalSeconds | int | toString }}
+{{- $syncTimeout := .Values.automation.syncTimeoutSeconds | int | toString }}
 {{- include "greenkube.validateAutomationWebhooks" . -}}
-{{- if not (has $automationMode (list "inline" "worker" "disabled")) }}
-{{- fail "automation.mode must be inline, worker, or disabled" }}
-{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "greenkube.fullname" . }}
+  name: {{ include "greenkube.configMapName" . }}
   labels:
     {{- include "greenkube.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-30"
-    "helm.sh/hook-delete-policy": before-hook-creation
 data:
   # --- General Config ---
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   LOG_FORMAT: {{ .Values.config.logFormat | quote }}
   ENVIRONMENT: {{ .Values.config.environment | quote }}
   API_AUTH_MODE: {{ .Values.config.apiAuthMode | quote }}
-  SERVICE_URL_ALLOWLIST: {{ join "," (.Values.config.serviceUrlAllowlist | default (list)) | quote }}
-  AUTOMATION_ENABLED: {{ and .Values.automation.enabled (eq $automationMode "inline") | quote }}
-  AUTOMATION_MODE: {{ ternary "inline" "disabled" (and .Values.automation.enabled (eq $automationMode "inline")) | quote }}
+  # Automation is always on (F12); pauseDelivery blocks approvals and PR creation.
+  AUTOMATION_PAUSE_DELIVERY: {{ $v.pauseDelivery | quote }}
+  AUTOMATION_REPOSITORY_ALLOWLIST: {{ .Values.automation.repositoryAllowlist | default (list "@discovered") | toJson | quote }}
+  GITOPS_DEFAULT_CREDENTIALS_SECRET: {{ include "greenkube.gitCredentialsSecretName" . | quote }}
+  {{- $delivery := .Values.automation.delivery | default dict }}
+  {{- $autoApprove := .Values.automation.autoApprove | default dict }}
+  # Delivery modes (F4) and policy-based auto-approval (F5).
+  AUTOMATION_DELIVERY_MODE: {{ $delivery.mode | default "direct" | quote }}
+  AUTOMATION_AUTO_APPROVE_ENABLED: {{ $autoApprove.enabled | default false | quote }}
+  AUTOMATION_AUTO_APPROVE_MAX_RISK: {{ $autoApprove.maxRisk | default "low" | quote }}
+  AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE: {{ hasKey $autoApprove "minConfidence" | ternary $autoApprove.minConfidence 0.8 | quote }}
+  # Container resources v2 (H1): request increases are auto-approved only on opt-in.
+  AUTOMATION_AUTO_APPROVE_INCREASES: {{ $autoApprove.increases | default false | quote }}
   GITOPS_PR_POLL_INTERVAL: {{ $prPollInterval | quote }}
   GITOPS_DISCOVERY_INTERVAL: {{ .Values.automation.discoveryInterval | default "5m" | quote }}
   GITOPS_BINDING_TTL: {{ .Values.automation.bindingTtl | default "30m" | quote }}
+  GITOPS_LOCAL_CLUSTER_ALIASES: {{ .Values.automation.localClusterAliases | default list | toJson | quote }}
   GITOPS_SYNC_POLL_INTERVAL: {{ $syncPollInterval | quote }}
   GITOPS_SYNC_TIMEOUT: {{ $syncTimeout | quote }}
-  GITOPS_POLICY_JSON: {{ .Values.automation.policy | toJson | quote }}
+  GITOPS_POLICY_JSON: {{ $policy | toJson | quote }}
   GITOPS_PULL_REQUESTS_JSON: {{ .Values.automation.pullRequests | toJson | quote }}
-  {{- if and .Values.automation.enabled .Values.rendererSandbox.enabled (ne $automationMode "disabled") }}
-  GITOPS_RENDERER_URL: {{ printf "http://%s-renderer:%v" (include "greenkube.fullname" .) .Values.rendererSandbox.servicePort | quote }}
-  GITOPS_RENDERER_EGRESS_FIREWALL: {{ .Values.rendererSandbox.egressFirewall.enabled | quote }}
-  {{- else }}
-  GITOPS_RENDERER_URL: ""
-  GITOPS_RENDERER_EGRESS_FIREWALL: "false"
-  {{- end }}
+  {{- $pr := .Values.automation.pr | default dict }}
+  GITOPS_PR_TITLE_PREFIX: {{ hasKey $pr "titlePrefix" | ternary $pr.titlePrefix "greenkube" | quote }}
+  GITOPS_PR_TEMPLATE: {{ $pr.template | default "" | quote }}
+  GITOPS_PR_DEFAULT_LABELS: {{ hasKey $pr "defaultLabels" | ternary $pr.defaultLabels true | quote }}
+  GITOPS_PR_DRAFT_HIGH_RISK: {{ hasKey $pr "draftHighRisk" | ternary $pr.draftHighRisk true | quote }}
+  GITOPS_PR_CODEOWNERS: {{ hasKey $pr "codeowners" | ternary $pr.codeowners true | quote }}
+  GITOPS_PR_COMMIT_STATUS: {{ hasKey $pr "commitStatus" | ternary $pr.commitStatus true | quote }}
+  GITOPS_PR_LIFECYCLE_COMMENTS: {{ hasKey $pr "lifecycleComments" | ternary $pr.lifecycleComments true | quote }}
+  GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS: {{ $pr.lifecycleLookbackDays | default 30 | quote }}
+  # config.externalUrl, else derived from ingress.* or httpRoute.* (N6).
+  GREENKUBE_EXTERNAL_URL: {{ include "greenkube.externalUrl" . | quote }}
+  GITOPS_RENDERER_URL: {{ printf "http://%s:%v" (include "greenkube.rendererName" .) (int $v.renderer.servicePort) | quote }}
+  GITOPS_RENDERER_EGRESS_FIREWALL: {{ ($v.renderer.egressFirewall | default dict).enabled | default false | quote }}
   GITOPS_SECRET_MOUNT: "/etc/greenkube/git-providers"
   {{- if .Values.automation.webhooks.enabled }}
   GITOPS_WEBHOOK_SECRET_FILE: {{ include "greenkube.webhookSecretFilePath" . | quote }}
   {{- end }}
   GITOPS_PROVIDERS_JSON: {{ $gitProviderConfig | quote }}
-  # Name of the Helm-managed Secret — used by the API to persist runtime
-  # configuration overrides (UI-set tokens/URLs) back into the Secret.
-  GREENKUBE_SECRET_NAME: {{ include "greenkube.secretName" . | quote }}
   CLOUD_PROVIDER: {{ .Values.config.cloudProvider | quote }}
   CLUSTER_NAME: {{ .Values.config.clusterName | quote }}
   DEFAULT_INTENSITY: {{ .Values.config.defaultIntensity | quote }}
+  INTENSITY_MAX_AGE: {{ .Values.config.intensityMaxAge | default "6h" | quote }}
+  CONTROLLER_METRICS_PORT: {{ include "greenkube.controllerMetricsPort" . | quote }}
   DEFAULT_PUE: {{ .Values.config.defaults.pue | quote }}
   {{- if .Values.config.defaultZone }}
   DEFAULT_ZONE: {{ .Values.config.defaultZone | quote }}
@@ -93,41 +82,116 @@ data:
   KUBERNETES_METRICS_API_ENABLED: {{ .Values.config.kubernetesMetricsApiEnabled | quote }}
   GITOPS_HELM_KUBE_VERSION: {{ .Capabilities.KubeVersion.Version | quote }}
   GITOPS_HELM_API_VERSIONS_JSON: {{ .Capabilities.APIVersions | toJson | quote }}
+  {{- /* Remote Helm charts and chart values-path mappings (H2). */}}
+  {{- $helmCharts := .Values.automation.helm | default dict }}
+  {{- $remoteCharts := $helmCharts.remoteCharts | default dict }}
+  GITOPS_HELM_REMOTE_CHARTS: {{ hasKey $remoteCharts "enabled" | ternary $remoteCharts.enabled true | quote }}
+  GITOPS_HELM_CHART_HOSTS: {{ $remoteCharts.allowedHosts | default list | toJson | quote }}
+  GITOPS_HELM_CHART_MAPPINGS: {{ $helmCharts.chartMappings | default list | toJson | quote }}
 
-  # --- Database Config ---
-  DB_TYPE: {{ .Values.config.db.type | quote }}
-  DB_PATH: {{ .Values.config.db.path | quote }}
+  # --- Database Config (PostgreSQL only; SQLite is for local development) ---
+  DB_TYPE: "postgres"
   DB_SSL_MODE: {{ .Values.config.db.sslMode | quote }}
   DB_POOL_MIN_SIZE: {{ .Values.config.db.poolMinSize | quote }}
   DB_POOL_MAX_SIZE: {{ .Values.config.db.poolMaxSize | quote }}
   DB_STATEMENT_TIMEOUT_MS: {{ .Values.config.db.statementTimeoutMs | quote }}
   
   # --- Boavizta Config ---
+  # Service URLs (BOAVIZTA_API_URL, PROMETHEUS_URL, OPENCOST_API_URL) are read
+  # from mounted Secrets, not from here: a URL set in values wins, then a key
+  # in Secret {{ include "greenkube.secretName" . }} (such as an override saved by the
+  # Settings page of GreenKube 0.3.x, which no longer edits them), then the
+  # built-in default or discovery.
+  {{- if and .Values.secrets.existingSecret .Values.config.boavizta.url }}
+  # secrets.existingSecret replaces the values Secret, so the Boavizta URL set in
+  # values is passed here, as in 0.3.x; a key in that Secret still wins.
   BOAVIZTA_API_URL: {{ .Values.config.boavizta.url | quote }}
+  {{- end }}
   DEFAULT_EMBODIED_EMISSIONS_KG: {{ .Values.config.boavizta.defaultEmbodiedEmissionsKg | quote }}
+  DEFAULT_EMBODIED_KG_PER_VCPU: {{ .Values.config.boavizta.embodiedKgPerVcpu | quote }}
+  DEFAULT_EMBODIED_KG_PER_GIB: {{ .Values.config.boavizta.embodiedKgPerGib | quote }}
+  EMBODIED_KG_BY_INSTANCE_TYPE: {{ .Values.config.boavizta.embodiedKgByInstanceType | default dict | toJson | quote }}
+  SHARED_HOST_DETECTION: {{ .Values.config.power.sharedHostDetection | quote }}
+  GPU_ASSUMED_UTILIZATION_PCT: {{ .Values.config.power.gpuAssumedUtilizationPct | quote }}
 
   # --- Prometheus Collector Config ---
-  # Note: PROMETHEUS_URL is managed in the Secret (supports UI-set overrides via lookup).
+  # PROMETHEUS_URL comes from a mounted Secret (see the Boavizta note above).
   PROMETHEUS_VERIFY_CERTS: {{ .Values.config.prometheus.verifyCerts | quote }}
   PROMETHEUS_QUERY_RANGE_STEP: {{ .Values.config.prometheus.queryRangeStep | quote }}
-  PROMETHEUS_QUERY_RANGE_MAX_SAMPLES: {{ .Values.config.prometheus.queryRangeMaxSamples | quote }}
+  PROMETHEUS_SCRAPE_INTERVAL: {{ .Values.config.prometheus.scrapeInterval | default "30s" | quote }}
+  COLLECTION_SAFETY_LAG: {{ (.Values.config.collection).safetyLag | default "1m" | quote }}
+  COLLECTION_MAX_BACKFILL: {{ (.Values.config.collection).maxBackfill | default "24h" | quote }}
+  COLLECTION_K8S_LIST_MAX_FAILURES: {{ (.Values.config.collection).k8sListMaxFailures | default 3 | quote }}
+  ALLOW_CLUSTER_UID_CHANGE: {{ (.Values.config.collection).allowClusterUidChange | default false | quote }}
   PROMETHEUS_NODE_INSTANCE_LABEL: {{ .Values.config.prometheus.nodeInstanceLabel | quote }}
 
   # --- OpenCost Collector Config ---
-  # Note: OPENCOST_API_URL is managed in the Secret (supports UI-set overrides via lookup).
+  # OPENCOST_API_URL comes from a mounted Secret (see the Boavizta note above).
   OPENCOST_VERIFY_CERTS: {{ .Values.config.opencost.verifyCerts | quote }}
-  
-  LOW_NODE_CPU_THRESHOLD: {{ .Values.config.lowNodeCpuThreshold | quote }}
-  
+  {{- with .Values.config.opencost.clusterId }}
+  OPENCOST_CLUSTER_ID: {{ . | quote }}
+  {{- end }}
+
   # --- API Config ---
-  {{- if .Values.config.api.enabled }}
   API_HOST: {{ .Values.config.api.host | quote }}
-  API_PORT: {{ .Values.config.api.port | quote }}
+  API_PORT: {{ $v.api.port | quote }}
   CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
   API_RATE_LIMIT: {{ .Values.config.apiRateLimit | quote }}
   ROOT_PATH: {{ .Values.config.rootPath | default "" | quote }}
   METRICS_LIST_MAX_RANGE_DAYS: {{ .Values.config.metricsListMaxRangeDays | default 30 | int | quote }}
+  TRUSTED_PROXY_IPS: {{ .Values.config.trustedProxyIps | default "" | quote }}
+
+  # --- Authentication (F14, F15) ---
+  {{- $auth := .Values.auth | default dict }}
+  {{- $session := $auth.session | default dict }}
+  {{- $admin := $auth.admin | default dict }}
+  {{- $secureCookie := $session.secureCookie | default "auto" | toString }}
+  {{- /* auto + an HTTPS exposure (Ingress TLS, https HTTPRoute): Secure without relying on
+    config.trustedProxyIps to see X-Forwarded-Proto (security hardening). */}}
+  {{- if and (eq $secureCookie "auto") (include "greenkube.httpsExposure" .) }}
+  {{- $secureCookie = "always" }}
   {{- end }}
+  SESSION_COOKIE_SECURE: {{ $secureCookie | quote }}
+  {{- $hsts := $session.hsts | default dict }}
+  HSTS_MAX_AGE: {{ ternary 31536000 $hsts.maxAge (kindIs "invalid" $hsts.maxAge) | int64 | quote }}
+  HSTS_INCLUDE_SUBDOMAINS: {{ $hsts.includeSubdomains | default false | toString | quote }}
+  AUTH_SESSION_IDLE_TIMEOUT: {{ $session.idleTimeout | default "12h" | quote }}
+  AUTH_SESSION_ABSOLUTE_LIFETIME: {{ $session.absoluteLifetime | default "7d" | quote }}
+  AUTH_SESSION_REMEMBER_LIFETIME: {{ $session.rememberLifetime | default "30d" | quote }}
+  AUTH_LOGIN_RATE_LIMIT: {{ ($auth.login | default dict).rateLimit | default "5/minute" | quote }}
+  AUTH_ADMIN_USERNAME: {{ $admin.username | default "admin" | quote }}
+  AUTH_INITIAL_ADMIN_SECRET: {{ include "greenkube.initialAdminSecretName" . | quote }}
+  AUTH_LEGACY_API_KEY: {{ include "greenkube.legacyApiKeyAccess" . | quote }}
+
+  # --- Single sign-on and roles (F16) ---
+  {{- $mode := .Values.config.apiAuthMode | default "session" }}
+  {{- $roles := $auth.roles | default dict }}
+  {{- $proxy := $auth.proxy | default dict }}
+  {{- $oidc := $auth.oidc | default dict }}
+  {{- if and (eq $mode "proxy") (not .Values.config.trustedProxyIps) }}
+  {{- fail "config.apiAuthMode=proxy needs config.trustedProxyIps: identity headers are trusted only from the authentication proxy addresses." }}
+  {{- end }}
+  {{- if and (eq $mode "oidc") (or (not $oidc.issuer) (not $oidc.clientId)) }}
+  {{- fail "config.apiAuthMode=oidc needs auth.oidc.issuer and auth.oidc.clientId." }}
+  {{- end }}
+  {{- $groups := dict }}
+  {{- range $role, $members := ($roles.groups | default dict) }}
+  {{- if $members }}{{- $_ := set $groups $role $members }}{{- end }}
+  {{- end }}
+  AUTH_LOCAL_LOGIN: {{ ternary "true" "false" (ne $auth.localLogin false) | quote }}
+  AUTH_ROLE_GROUPS: {{ ternary "" ($groups | toJson) (empty $groups) | quote }}
+  AUTH_DEFAULT_ROLE: {{ $roles.defaultRole | default "viewer" | quote }}
+  AUTH_PROXY_USER_HEADERS: {{ $proxy.userHeaders | default "X-Forwarded-User" | quote }}
+  AUTH_PROXY_GROUPS_HEADERS: {{ $proxy.groupsHeaders | default "X-Forwarded-Groups" | quote }}
+  {{- if eq $mode "oidc" }}
+  OIDC_ISSUER: {{ $oidc.issuer | quote }}
+  OIDC_AUDIENCE: {{ $oidc.clientId | quote }}
+  {{- end }}
+  OIDC_SCOPES: {{ $oidc.scopes | default "openid profile email" | quote }}
+  OIDC_USERNAME_CLAIM: {{ $oidc.usernameClaim | default "preferred_username" | quote }}
+  OIDC_GROUPS_CLAIM: {{ $oidc.groupsClaim | default "groups" | quote }}
+  OIDC_REDIRECT_URL: {{ $oidc.redirectUrl | default "" | quote }}
+  OIDC_PROVIDER_NAME: {{ $oidc.providerName | default "SSO" | quote }}
 
   # --- Estimator Defaults ---
   {{- with .Values.config.defaults.instance }}
@@ -143,36 +207,98 @@ data:
   RIGHTSIZING_CPU_THRESHOLD: {{ .rightsizingCpuThreshold | quote }}
   RIGHTSIZING_MEMORY_THRESHOLD: {{ .rightsizingMemoryThreshold | quote }}
   RIGHTSIZING_HEADROOM: {{ .rightsizingHeadroom | quote }}
-  ZOMBIE_COST_THRESHOLD: {{ .zombieCostThreshold | quote }}
-  ZOMBIE_ENERGY_THRESHOLD: {{ .zombieEnergyThreshold | quote }}
-  AUTOSCALING_CV_THRESHOLD: {{ .autoscalingCvThreshold | quote }}
-  AUTOSCALING_SPIKE_RATIO: {{ .autoscalingSpikeRatio | quote }}
-  OFF_PEAK_IDLE_THRESHOLD: {{ .offPeakIdleThreshold | quote }}
-  OFF_PEAK_MIN_IDLE_HOURS: {{ .offPeakMinIdleHours | quote }}
-  IDLE_NAMESPACE_ENERGY_THRESHOLD: {{ .idleNamespaceEnergyThreshold | quote }}
-  CARBON_AWARE_THRESHOLD: {{ .carbonAwareThreshold | quote }}
-  NODE_UTILIZATION_THRESHOLD: {{ .nodeUtilizationThreshold | quote }}
+  RIGHTSIZING_INCREASE_THRESHOLD: {{ .rightsizingIncreaseThreshold | default 0.9 | quote }}
+  RIGHTSIZING_MAX_INCREASE_FACTOR: {{ .rightsizingMaxIncreaseFactor | default 2.0 | quote }}
+  RIGHTSIZING_WARMUP_MINUTES: {{ if kindIs "invalid" .rightsizingWarmupMinutes }}"10"{{ else }}{{ .rightsizingWarmupMinutes | int | quote }}{{ end }}
+  RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS: {{ .minDecreaseCoverageDays | default 7 | quote }}
+  RECOMMENDATION_TARGET_MAX_STALENESS_HOURS: {{ .targetMaxStalenessHours | default 2 | quote }}
+  RECOMMENDATION_LIMITS_POLICY: {{ .limitsPolicy | default "keep" | quote }}
   STORAGE_COST_PER_GIB_MONTH: {{ .storageCostPerGibMonth | default 0.1 | quote }}
+  DELETION_MIN_UNUSED_DAYS: {{ .deletionMinUnusedDays | default 7 | quote }}
   LOAD_BALANCER_COST_PER_MONTH: {{ .loadBalancerCostPerMonth | default 18.0 | quote }}
   RECOMMEND_SYSTEM_NAMESPACES: {{ .recommendSystemNamespaces | quote }}
   RECOMMENDATION_MIN_CPU_MILLICORES: {{ .minCpuMillicores | default 10 | int | quote }}
   RECOMMENDATION_MIN_MEMORY_BYTES: {{ .minMemoryBytes | default 16777216 | int | quote }}
   RECOMMENDATION_APPLY_TOLERANCE: {{ .applyTolerance | default 0.25 | quote }}
-  RECOMMENDATION_VPA_ENABLED: {{ .vpaEnabled | default true | quote }}
-  RECOMMENDATION_KARPENTER_ENABLED: {{ .karpenterEnabled | default true | quote }}
-  RECOMMENDATION_SOURCE_PRIORITY: {{ .sourcePriority | default "vpa,karpenter,greenkube" | quote }}
+  RECOMMENDATION_VPA_ENABLED: {{ $v.vpaEnabled | quote }}
   RECOMMENDATION_TTL_DAYS: {{ .ttlDays | default 14 | int | quote }}
   RECOMMENDATION_RANKING_PROFILE: {{ .rankingProfile | default "balanced" | quote }}
   RECOMMENDATION_RANKING_WEIGHTS: {{ .rankingWeights | default "" | quote }}
-  RECOMMENDATION_MIN_SAMPLES: {{ .minSamples | default 36 | int | quote }}
+  {{- if not (kindIs "invalid" .incidentCost) }}
+  RECOMMENDATION_INCIDENT_COST: {{ .incidentCost | toString | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .engineerHourCost) }}
+  RECOMMENDATION_ENGINEER_HOUR_COST: {{ .engineerHourCost | toString | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .capacityValueWeight) }}
+  RECOMMENDATION_CAPACITY_VALUE_WEIGHT: {{ .capacityValueWeight | toString | quote }}
+  {{- end }}
+  RECOMMENDATION_MIN_SAMPLES: {{ $v.minSamples | int | quote }}
+  RECOMMENDATION_SCAN_INTERVAL: {{ .scanInterval | default "1h" | quote }}
   {{- with .verification }}
   VERIFICATION_WINDOW_HOURS: {{ .windowHours | default 72 | quote }}
-  VERIFICATION_MIN_SAMPLES: {{ .minSamples | default 36 | int | quote }}
+  VERIFICATION_MIN_SAMPLES: {{ $v.verificationMinSamples | int | quote }}
   VERIFICATION_MIN_SAVINGS_RATIO: {{ .minSavingsRatio | default 0.5 | quote }}
   VERIFICATION_USAGE_HEADROOM: {{ .usageHeadroom | default 1.1 | quote }}
   VERIFICATION_MAX_RESTART_DELTA: {{ .maxRestartDelta | default 0 | int | quote }}
   VERIFICATION_MIN_READINESS: {{ .minReadiness | default 0.99 | quote }}
   VERIFICATION_MAX_THROTTLE_RATIO: {{ .maxThrottleRatio | default 0.05 | quote }}
   RECOMMENDATION_LIFECYCLE_INTERVAL: {{ .lifecycleInterval | default "5m" | quote }}
+  {{- end }}
+  {{- with .changeMeasurement }}
+  CHANGE_MEASUREMENT_ENABLED: {{ ternary "true" "false" (ne .enabled false) | quote }}
+  CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: {{ .preWindowDays | default 7 | quote }}
+  CHANGE_MEASUREMENT_POST_WINDOW_DAYS: {{ .postWindowDays | default 7 | quote }}
+  CHANGE_MEASUREMENT_WARMUP_HOURS: {{ if hasKey . "warmupHours" }}{{ .warmupHours | quote }}{{ else }}"1"{{ end }}
+  CHANGE_MEASUREMENT_MIN_COVERAGE: {{ .minCoverage | default 0.8 | quote }}
+  CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES: {{ .bootstrapSamples | default 1000 | int | quote }}
+  CHANGE_MEASUREMENT_EPSILON_RATIO: {{ if hasKey . "epsilonRatio" }}{{ .epsilonRatio | quote }}{{ else }}"0.02"{{ end }}
+  CHANGE_DRIFT_THRESHOLD: {{ if hasKey . "driftThreshold" }}{{ .driftThreshold | quote }}{{ else }}"0.5"{{ end }}
+  CHANGE_DRIFT_SUSTAINED_DAYS: {{ if hasKey . "driftSustainedDays" }}{{ .driftSustainedDays | int | quote }}{{ else }}"3"{{ end }}
+  CHANGE_MEASUREMENT_ACCELERATED: {{ ternary "true" "false" (eq .accelerated true) | quote }}
+  CHANGE_MEASUREMENT_PRIOR_WEEK_CV: {{ if hasKey . "priorWeekCv" }}{{ .priorWeekCv | quote }}{{ else }}"0.05"{{ end }}
+  {{- end }}
+  {{- end }}
+
+  # --- Savings ledger v2 (C6) ---
+  LEDGER_CHAIN_VERIFY_INTERVAL: {{ dig "ledger" "chainVerifyInterval" "1h" .Values.config | quote }}
+
+  # --- Recommendation sources (Source SDK) ---
+  {{- with .Values.sources }}
+  SOURCES_PLUGINS_ENABLED: {{ if hasKey . "pluginsEnabled" }}{{ .pluginsEnabled | toString | quote }}{{ else }}"true"{{ end }}
+  SOURCES_CONFIG: {{ .settings | default dict | toJson | quote }}
+  {{- if hasKey . "toolFloors" }}
+  SIGNAL_TOOL_FLOORS: {{ .toolFloors | default dict | toJson | quote }}
+  {{- end }}
+  {{- with .minChange }}
+  SIGNAL_MIN_CHANGE_PERCENT: {{ if hasKey . "percent" }}{{ .percent | toString | quote }}{{ else }}"5"{{ end }}
+  SIGNAL_MIN_CHANGE_CPU_MILLICORES: {{ if hasKey . "cpuMillicores" }}{{ .cpuMillicores | int | quote }}{{ else }}"10"{{ end }}
+  SIGNAL_MIN_CHANGE_MEMORY_BYTES: {{ if hasKey . "memoryBytes" }}{{ .memoryBytes | int64 | quote }}{{ else }}"16777216"{{ end }}
+  {{- end }}
+  {{- with .vpa }}
+  VPA_MIN_SAMPLE_HOURS: {{ if hasKey . "minSampleHours" }}{{ .minSampleHours | toString | quote }}{{ else }}"24"{{ end }}
+  {{- end }}
+  {{- end }}
+
+  # --- Impact Model ---
+  {{- with .Values.impact }}
+  {{- with .pricing }}
+  {{- if not (kindIs "invalid" .cpuCoreHour) }}
+  IMPACT_PRICING_CPU_CORE_HOUR: {{ .cpuCoreHour | toString | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .ramGiBHour) }}
+  IMPACT_PRICING_RAM_GIB_HOUR: {{ .ramGiBHour | toString | quote }}
+  {{- end }}
+  IMPACT_PRICING_CURRENCY: {{ .currency | default "USD" | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .realizationFactor) }}
+  IMPACT_REALIZATION_FACTOR: {{ .realizationFactor | toString | quote }}
+  {{- end }}
+  IMPACT_AUTOSCALER_HINT: {{ .autoscalerHint | default "" | quote }}
+  {{- if not (kindIs "invalid" .carbonPricePerTonne) }}
+  CARBON_PRICE_PER_TONNE: {{ .carbonPricePerTonne | toString | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .memoryWattsPerGiB) }}
+  POWER_MEMORY_W_PER_GIB: {{ .memoryWattsPerGiB | toString | quote }}
   {{- end }}
   {{- end }}

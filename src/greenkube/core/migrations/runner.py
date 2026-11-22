@@ -14,10 +14,18 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 
+import asyncpg
+
 logger = logging.getLogger(__name__)
 
 # Location of the bundled SQL scripts (sibling ``scripts/`` package).
 _SCRIPTS_PACKAGE = "greenkube.core.migrations.scripts"
+
+# A migration waits at most this long for a table lock held by a running process
+# (API reads are bounded by DB_STATEMENT_TIMEOUT_MS, 30 s by default). Past it the
+# whole batch rolls back and the controller retries on its next start, instead of
+# queueing every reader of the table behind a blocked ALTER TABLE.
+DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 60_000
 
 
 class MigrationRunner:
@@ -34,10 +42,13 @@ class MigrationRunner:
     4. Applies any unapplied migrations **in order**.
     """
 
-    def __init__(self, db_type: str):
+    def __init__(self, db_type: str, *, lock_timeout_ms: int = DEFAULT_MIGRATION_LOCK_TIMEOUT_MS):
         if db_type not in ("sqlite", "postgres"):
             raise ValueError(f"Unsupported db_type for migrations: {db_type}")
+        if type(lock_timeout_ms) is not int or lock_timeout_ms <= 0:
+            raise ValueError("lock_timeout_ms must be a positive integer")
         self.db_type = db_type
+        self.lock_timeout_ms = lock_timeout_ms
 
     # ------------------------------------------------------------------
     # Public API
@@ -62,15 +73,37 @@ class MigrationRunner:
                 raise
             await connection.commit()
         else:
-            async with connection.transaction():
-                await connection.execute("SELECT pg_advisory_xact_lock($1)", self._lock_key())
-                count = await self._run_in_transaction(connection)
+            try:
+                count = await self._run_postgres(connection)
+            except asyncpg.exceptions.LockNotAvailableError:
+                logger.error(
+                    "A migration waited more than %d ms for a table lock held by another session; "
+                    "the batch was rolled back and runs again on the next controller start. "
+                    "Look for long-running queries or idle transactions in pg_stat_activity.",
+                    self.lock_timeout_ms,
+                )
+                raise
 
         if count:
             logger.info("Applied %d migration(s).", count)
         else:
             logger.debug("No pending migrations.")
         return count
+
+    async def _run_postgres(self, connection) -> int:
+        async with connection.transaction():
+            # The pool sets statement_timeout (DB_STATEMENT_TIMEOUT_MS) for every
+            # session; a backfill of a large metrics table must not be cancelled by
+            # it, or every controller start would roll the batch back and retry
+            # forever. SET LOCAL ends with this transaction, so the pooled
+            # connection keeps its timeout afterwards.
+            await connection.execute("SET LOCAL statement_timeout = 0")
+            # Wait as long as needed for another replica's migration batch ...
+            await connection.execute("SET LOCAL lock_timeout = 0")
+            await connection.execute("SELECT pg_advisory_xact_lock($1)", self._lock_key())
+            # ... but never queue indefinitely behind a table lock held elsewhere.
+            await connection.execute(f"SET LOCAL lock_timeout = {int(self.lock_timeout_ms)}")
+            return await self._run_in_transaction(connection)
 
     async def _run_in_transaction(self, connection) -> int:
         await self._ensure_migrations_table(connection)
@@ -87,6 +120,27 @@ class MigrationRunner:
 
     def _lock_key(self) -> int:
         return 0x47524E4B554245
+
+    def latest_version(self) -> int:
+        """Highest migration version shipped with this release (0 when there is none)."""
+        return max((version for version, _, _ in self._discover_scripts()), default=0)
+
+    async def pending_versions(self, connection) -> list[int]:
+        """Shipped migration versions not yet applied (all of them before the first run).
+
+        Read-only: processes that do not migrate (the API and the optional worker, F11)
+        use it to report not-ready until the controller has migrated the schema.
+        """
+        shipped = [version for version, _, _ in self._discover_scripts()]
+        if self.db_type == "sqlite":
+            cursor = await connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+            )
+            exists = await cursor.fetchone() is not None
+        else:
+            exists = bool(await connection.fetchval("SELECT to_regclass('schema_migrations') IS NOT NULL"))
+        applied = await self._get_applied_versions(connection) if exists else set()
+        return [version for version in shipped if version not in applied]
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -191,9 +245,19 @@ class MigrationRunner:
         To make migrations safe on databases where the ``CREATE TABLE``
         already includes the columns, each statement is executed individually
         and ``OperationalError`` from duplicate-column ``ALTER TABLE`` is
-        silently ignored.
+        silently ignored. Fragments are joined until SQLite reports a complete
+        statement, so trigger bodies (``BEGIN ...; END;``) stay intact.
         """
-        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        statements: list[str] = []
+        pending = ""
+        for fragment in sql.split(";"):
+            pending += fragment + ";"
+            if sqlite3.complete_statement(pending):
+                if pending.strip(" \t\r\n;"):
+                    statements.append(pending.strip())
+                pending = ""
+        if pending.strip(" \t\r\n;"):
+            statements.append(pending.strip())
         for stmt in statements:
             try:
                 await connection.execute(stmt)

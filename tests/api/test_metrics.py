@@ -225,3 +225,62 @@ class TestMetricsTopPodsEndpoint:
     def test_top_pods_invalid_last_returns_400(self, client):
         response = client.get("/api/v1/metrics/top-pods?last=bad_value")
         assert response.status_code == 400
+
+
+IDLE = {"idle_co2e_grams": 3.0, "idle_embodied_co2e_grams": 0.5, "idle_cost": 0.01, "idle_energy_joules": 7000.0}
+
+
+def test_summary_adds_the_idle_share_cluster_wide(client, mock_combined_metrics_repo, sample_combined_metrics):
+    """NRG-02 acceptance a: allocated totals, idle share and cluster totals = allocated + idle."""
+    mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+    mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+    data = client.get("/api/v1/metrics/summary").json()
+    assert data["total_energy_joules"] == pytest.approx(20000.0)
+    assert data["idle_energy_joules"] == pytest.approx(7000.0)
+    assert data["cluster_total_energy_joules"] == pytest.approx(27000.0)
+
+
+def test_namespace_summary_has_no_idle_share(client, mock_combined_metrics_repo, sample_combined_metrics):
+    """NRG-02 acceptance c: the idle share belongs to no namespace."""
+    mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+    mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+    data = client.get("/api/v1/metrics/summary?namespace=default").json()
+    assert data["idle_energy_joules"] is None
+    assert data["cluster_total_energy_joules"] is None
+    mock_combined_metrics_repo.aggregate_idle_summary.assert_not_awaited()
+
+
+def test_the_timeseries_bucket_that_straddles_the_idle_history_start_has_no_idle_share(
+    client, mock_combined_metrics_repo
+):
+    """Pod rows earlier in the bucket than the first idle row: its idle share covers only part of it."""
+    from datetime import datetime, timezone
+
+    buckets = [
+        {
+            "timestamp": "2026-10-01T00:00:00Z",
+            "co2e_grams": 1.0,
+            "embodied_co2e_grams": 0.0,
+            "total_cost": 1.0,
+            "energy_joules": 10.0,
+        },
+        {
+            "timestamp": "2026-10-02T00:00:00Z",
+            "co2e_grams": 1.0,
+            "embodied_co2e_grams": 0.0,
+            "total_cost": 1.0,
+            "energy_joules": 10.0,
+        },
+    ]
+    idle = [
+        {"timestamp": stamp, "co2e_grams": 2.0, "embodied_co2e_grams": 0.0, "total_cost": 2.0, "energy_joules": 20.0}
+        for stamp in ("2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z")
+    ]
+    mock_combined_metrics_repo.aggregate_timeseries = AsyncMock(return_value=buckets)
+    mock_combined_metrics_repo.aggregate_idle_timeseries = AsyncMock(return_value=idle)
+    mock_combined_metrics_repo.idle_data_since = AsyncMock(return_value=datetime(2026, 10, 1, 10, tzinfo=timezone.utc))
+    mock_combined_metrics_repo.aggregate_summary = AsyncMock(return_value={"row_count": 5})
+    points = client.get("/api/v1/metrics/timeseries?last=30d&granularity=day").json()
+    assert points[0]["idle_energy_joules"] is None
+    assert points[0]["cluster_total_energy_joules"] is None
+    assert points[1]["idle_energy_joules"] == pytest.approx(20.0)

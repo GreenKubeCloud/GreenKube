@@ -1,350 +1,350 @@
-Zone Code;Country;Zone name;Tier;Default Grid Intensity;
-AE;United Arab Emirates;United Arab Emirates;C;
-AF;Afghanistan;Afghanistan;C;
-AG;Antigua and Barbuda;Antigua and Barbuda;C;
-AL;Albania;Albania;C;
-AM;Armenia;Armenia;C;
-AO;Angola;Angola;C;
-AR;Argentina;Argentina;A;226;
-AT;Austria;Austria;A;
-AU;Australia;Australia;500;
-AU-NSW;Australia;New South Wales;A;
-AU-NT;Australia;Northern Territory;A;490;
-AU-QLD;Australia;Queensland;A;659;
-AU-SA;Australia;South Australia;A;
-AU-TAS;Australia;Tasmania;A;22;
-AU-TAS-FI;Australia;Flinders Island;A;
-AU-TAS-KI;Australia;King Island;A;
-AU-VIC;Australia;Victoria;A;438;
-AU-WA;Australia;Western Australia;A;446;
-AU-WA-RI;Australia;Rottnest Island;A;
-AW;Aruba;Aruba;A;
-AX;Åland Islands;Åland Islands;A;
-AZ;Azerbaijan;Azerbaijan;C;
-BA;Bosnia and Herzegovina;Bosnia and Herzegovina;A;
-BB;Barbados;Barbados;C;
-BD;Bangladesh;Bangladesh;A;
-BE;Belgium;Belgium;A;82;
-BF;Burkina Faso;Burkina Faso;C;
-BG;Bulgaria;Bulgaria;A;
-BH;Bahrain;Bahrain;C;
-BI;Burundi;Burundi;C;
-BJ;Benin;Benin;C;
-BN;Brunei;Brunei;C;
-BO;Bolivia;Bolivia;A;358;
-BR;Brazil;Brazil;
-BR-CS;Brazil;Central Brazil;A;152;
-BR-N;Brazil;North Brazil;A;193;
-BR-NE;Brazil;North-East Brazil;A;94;
-BR-S;Brazil;South Brazil;A;86;
-BS;Bahamas;Bahamas;C;
-BT;Bhutan;Bhutan;C;
-BW;Botswana;Botswana;C;
-BY;Belarus;Belarus;C;
-BZ;Belize;Belize;C;
-CA;Canada;Canada;
-CA-AB;Canada;Alberta;A;356;
-CA-BC;Canada;British Columbia;C;102;
-CA-MB;Canada;Manitoba;C;84;
-CA-NB;Canada;New Brunswick;C;133;
-CA-NL;Canada;Newfoundland and Labrador;C;27;
-CA-NS;Canada;Nova Scotia;C;324;
-CA-NT;Canada;Northwest Territories;C;90;
-CA-NU;Canada;Nunavut;C;650;
-CA-ON;Canada;Ontario;A;90;
-CA-PE;Canada;Prince Edward Island;C;20;
-CA-QC;Canada;Québec;A;41;
-CA-SK;Canada;Saskatchewan;C;487;
-CA-YT;Canada;Yukon;C;219;
-CD;Democratic Republic of the Congo;Democratic Republic of the Congo;C;
-CF;Central African Republic;Central African Republic;C;
-CG;Congo;Congo;C;
-CH;Switzerland;Switzerland;C;
-CI;Ivory Coast;Ivory Coast;C;
-CL-SEN;Chile;Sistema Eléctrico Nacional;A;92;
-CM;Cameroon;Cameroon;C;
-CN;China;China;C;
-CO;Colombia;Colombia;A;105;
-CR;Costa Rica;Costa Rica;A;23;
-CU;Cuba;Cuba;C;607;
-CV;Cabo Verde;Cabo Verde;C;
-CW;Curaçao;Curaçao;C;
-CY;Cyprus;Cyprus;A;
-CZ;Czechia;Czechia;A;
-DE;Germany;Germany;A;224;
-DJ;Djibouti;Djibouti;C;
-DK;Denmark;Denmark;79;
-DK-BHM;Denmark;Bornholm;A;
-DK-DK1;Denmark;West Denmark;A;
-DK-DK2;Denmark;East Denmark;A;
-DM;Dominica;Dominica;C;
-DO;Dominican Republic;Dominican Republic;C;
-DZ;Algeria;Algeria;C;
-EC;Ecuador;Ecuador;C;
-EE;Estonia;Estonia;A;
-EG;Egypt;Egypt;C;
-ER;Eritrea;Eritrea;C;
-ES;Spain;Spain;89;
-ES-CE;Spain;Ceuta;A;
-ES-CN-FV;Spain;Fuerteventura;A;
-ES-CN-GC;Spain;Gran Canaria;A;
-ES-CN-HI;Spain;El Hierro;A;
-ES-CN-IG;Spain;Isla de la Gomera;A;
-ES-CN-LP;Spain;La Palma;A;
-ES-CN-LZ;Spain;Lanzarote;A;
-ES-CN-TE;Spain;Tenerife;A;
-ES-IB-FO;Spain;Formentera;A;
-ES-IB-IZ;Spain;Ibiza;A;
-ES-IB-MA;Spain;Mallorca;A;
-ES-IB-ME;Spain;Menorca;A;
-ES-ML;Spain;Melilla;A;
-ET;Ethiopia;Ethiopia;C;
-FI;Finland;Finland;A;67;
-FJ;Fiji;Fiji;C;
-FK;Falkland Islands;Falkland Islands;C;
-FM;Micronesia;Micronesia;C;
-FO;Faroe Islands;Faroe Islands;
-FO-MI;Faroe Islands;Main Islands;A;
-FO-SI;Faroe Islands;South Island;A;
-FR;France;France;A;26;
-FR-COR;France;Corsica;A;
-GA;Gabon;Gabon;C;
-GB;Great Britain;Great Britain;A;67;
-GB-NIR;Great Britain;Northern Ireland;B;200;
-GB-ORK;Great Britain;Orkney Islands;A;
-GE;Georgia;Georgia;A;
-GF;French Guiana;French Guiana;A;
-GH;Ghana;Ghana;C;
-GI;Gibraltar;Gibraltar;C;
-GL;Greenland;Greenland;C;
-GN;Guinea;Guinea;C;
-GP;Guadeloupe;Guadeloupe;A;
-GQ;Equatorial Guinea;Equatorial Guinea;C;
-GR;Greece;Greece;A;
-GS;South Georgia and the South Sandwich Islands;South Georgia and the South Sandwich Islands;C;
-GT;Guatemala;Guatemala;A;239;
-GU;Guam;Guam;C;
-GW;Guinea-Bissau;Guinea-Bissau;C;
-GY;Guyana;Guyana;C;630;
-HK;Hong Kong;Hong Kong;C;592;
-HN;Honduras;Honduras;A;231;
-HR;Croatia;Croatia;A;
-HT;Haiti;Haiti;C;45;
-HU;Hungary;Hungary;A;
-ID;Indonesia;Indonesia;C;
-IE;Ireland;Ireland;B;178;
-IL;Israel;Israel;B;
-IN;Mainland India;Mainland India;
-IN-EA;India;Eastern India;B;762;
-IN-NE;India;North Eastern India;B;629;
-IN-NO;India;Northern India;B;629;
-IN-SO;India;Southern India;B;576;
-IN-WE;India;Western India;B;737;
-IQ;Iraq;Iraq;C;
-IR;Iran;Iran;C;
-IS;Iceland;Iceland;A;
-IT;Italy;Italy;
-IT-CNO;Italy;Central North Italy;A;214;
-IT-CSO;Italy;Central South Italy;A;234;
-IT-NO;Italy;North Italy;A;235;
-IT-SAR;Italy;Sardinia;A;314;
-IT-SIC;Italy;Sicily;A;110;
-IT-SO;Italy;South Italy;A;181;
-JM;Jamaica;Jamaica;C;
-JO;Jordan;Jordan;C;
-JP;Japan;Japan;;505;
-JP-CB;Japan;Chūbu;B;559;
-JP-CG;Japan;Chūgoku;B;554;
-JP-HKD;Japan;Hokkaidō;B;508;
-JP-HR;Japan;Hokuriku;B;475;
-JP-KN;Japan;Kansai;B;337;
-JP-KY;Japan;Kyūshū;B;361;
-JP-ON;Japan;Okinawa;B;625;
-JP-SK;Japan;Shikoku;A;454;
-JP-TH;Japan;Tōhoku;B;525;
-JP-TK;Japan;Tōkyō;B;595;
-KE;Kenya;Kenya;C;
-KG;Kyrgyzstan;Kyrgyzstan;C;
-KH;Cambodia;Cambodia;C;
-KM;Comoros;Comoros;C;
-KP;North Korea;North Korea;C;270;
-KR;South Korea;South Korea;A;426;
-KW;Kuwait;Kuwait;C;
-KY;Cayman Islands;Cayman Islands;C;
-KZ;Kazakhstan;Kazakhstan;C;
-LA;Laos;Laos;C;
-LB;Lebanon;Lebanon;C;
-LC;Saint Lucia;Saint Lucia;C;
-LK;Sri Lanka;Sri Lanka;A;
-LR;Liberia;Liberia;C;
-LS;Lesotho;Lesotho;C;
-LT;Lithuania;Lithuania;A;
-LU;Luxembourg;Luxembourg;A;
-LV;Latvia;Latvia;A;
-LY;Libya;Libya;C;
-MA;Morocco;Morocco;C;
-MD;Moldova;Moldova;A;
-ME;Montenegro;Montenegro;A;
-MG;Madagascar;Madagascar;C;
-MK;North Macedonia;North Macedonia;A;
-ML;Mali;Mali;C;
-MM;Myanmar;Myanmar;C;
-MN;Mongolia;Mongolia;C;
-MO;Macao;Macao;C;
-MQ;Martinique;Martinique;A;
-MR;Mauritania;Mauritania;C;
-MT;Malta;Malta;C;
-MU;Mauritius;Mauritius;C;
-MV;Maldives;Maldives;C;
-MW;Malawi;Malawi;C;
-MX;Mexico;Mexico;A;396;
-MY;Malaysia;Malaysia;
-MY-EM;Malaysia;Borneo;C;
-MY-WM;Malaysia;Peninsula;A;
-MZ;Mozambique;Mozambique;C;
-NA;Namibia;Namibia;C;
-NC;New Caledonia;New Caledonia;C;
-NE;Niger;Niger;C;
-NG;Nigeria;Nigeria;A;
-NI;Nicaragua;Nicaragua;A;78;
-NL;Netherlands;Netherlands;A;
-NO;Norway;Norway;35;
-NO-NO1;Norway;Southeast Norway;A;24;
-NO-NO2;Norway;Southwest Norway;A;24;
-NO-NO3;Norway;Middle Norway;A;35;
-NO-NO4;Norway;North Norway;A;53;
-NO-NO5;Norway;West Norway;A;25;
-NP;Nepal;Nepal;C;
-NZ;New Zealand;New Zealand;A;
-OM;Oman;Oman;C;
-PA;Panama;Panama;A;99;
-PE;Peru;Peru;A;197;
-PF;French Polynesia;French Polynesia;A;
-PG;Papua New Guinea;Papua New Guinea;C;
-PH;Philippines;Philippines;A;
-PH-LU;Philippines;Luzon;A;
-PH-MI;Philippines;Mindanao;A;
-PH-VI;Philippines;Visayas;A;
-PK;Pakistan;Pakistan;C;
-PL;Poland;Poland;A;756;
-PM;Saint Pierre and Miquelon;Saint Pierre and Miquelon;C;
-PR;Puerto Rico;Puerto Rico;C;
-PS;State of Palestine;State of Palestine;C;
-PT;Portugal;Portugal;A;103;
-PT-MA;Portugal;Madeira;C;
-PW;Palau;Palau;C;
-PY;Paraguay;Paraguay;C;26;
-QA;Qatar;Qatar;C;
-RE;Réunion;Réunion;A;
-RO;Romania;Romania;A;
-RS;Serbia;Serbia;A;
-RU-1;Russia;Europe-Ural;A;
-RU-2;Russia;Siberia;A;
-RU-AS;Russia;East;A;
-RW;Rwanda;Rwanda;C;
-SA;Saudi Arabia;Saudi Arabia;C;
-SB;Solomon Islands;Solomon Islands;C;
-SC;Seychelles;Seychelles;C;
-SD;Sudan;Sudan;C;
-SE;Sweden;Sweden;22;
-SE-SE1;Sweden;North Sweden;A;16;
-SE-SE2;Sweden;North Central Sweden;A;16;
-SE-SE3;Sweden;South Central Sweden;A;22;
-SE-SE4;Sweden;South Sweden;A;32;
-SG;Singapore;Singapore;A;496;
-SI;Slovenia;Slovenia;A;
-SK;Slovakia;Slovakia;A;
-SL;Sierra Leone;Sierra Leone;C;
-SN;Senegal;Senegal;C;
-SO;Somalia;Somalia;C;
-SR;Suriname;Suriname;C;250;
-SS;South Sudan;South Sudan;C;
-SV;El Salvador;El Salvador;A;292;
-SY;Syria;Syria;C;
-SZ;Eswatini;Eswatini;C;
-TD;Chad;Chad;C;
-TG;Togo;Togo;C;
-TH;Thailand;Thailand;C;
-TJ;Tajikistan;Tajikistan;C;
-TL;Timor-Leste;Timor-Leste;C;
-TM;Turkmenistan;Turkmenistan;C;
-TN;Tunisia;Tunisia;C;
-TO;Tonga;Tonga;C;
-TR;Turkey;Turkey;A;
-TT;Trinidad and Tobago;Trinidad and Tobago;C;
-TW;Taiwan;Taiwan;A;516;
-TZ;Tanzania;Tanzania;C;
-UG;Uganda;Uganda;C;
-US;Contiguous United States;Contiguous United States;
-US-AK;USA;Alaska;C;512;
-US-AK-SEAPA;USA;Southeast Alaska Power Agency;A;
-US-CAL-BANC;USA;Balancing Authority of Northern California;A;
-US-CAL-CISO;USA;CAISO;A;336;
-US-CAL-IID;USA;Imperial Irrigation District;A;
-US-CAL-LDWP;USA;Los Angeles Department of Water and Power;A;
-US-CAL-TIDC;USA;Turlock Irrigation District;A;
-US-CAR-CPLE;USA;Duke Energy Progress East;A;
-US-CAR-CPLW;USA;Duke Energy Progress West;A;
-US-CAR-DUK;USA;Duke Energy Carolinas;A;235;
-US-CAR-SC;USA;South Carolina Public Service Authority;A;562;
-US-CAR-SCEG;USA;South Carolina Electric & Gas Company;A;396;
-US-CAR-YAD;USA;Alcoa Power Generating;A;
-US-CENT-SPA;USA;Southwestern Power Administration;A;
-US-CENT-SWPP;USA;Southwest Power Pool;A;
-US-FLA-FMPP;USA;Florida Municipal Power Pool;A;
-US-FLA-FPC;USA;Duke Energy Florida;A;
-US-FLA-FPL;USA;Florida Power and Light Company;A;
-US-FLA-GVL;USA;Gainesville Regional Utilities;A;
-US-FLA-HST;USA;City of Homestead;B;
-US-FLA-JEA;USA;Jacksonville Electric Authority;A;
-US-FLA-SEC;USA;Seminole Electric Cooperative;A;
-US-FLA-TAL;USA;City of Tallahassee;A;
-US-FLA-TEC;USA;Tampa Electric Company;A;
-US-MIDA-PJM;USA;PJM Interconnection;A;368;
-US-MIDW-AECI;USA;Associated Electric Cooperative;A;
-US-MIDW-LGEE;USA;Louisville Gas and Electric Company and Kentucky Utilities;A;
-US-MIDW-MISO;USA;Midcontinent ISO;A;552;
-US-NE-ISNE;USA;ISO New England;A;317;
-US-NW-AVA;USA;Avista Corporation;A;
-US-NW-BPAT;USA;Bonneville Power Administration;A;
-US-NW-CHPD;USA;Chelan County;A;
-US-NW-DOPD;USA;Douglas County;A;
-US-NW-GCPD;USA;Grant County;A;
-US-NW-GRID;USA;Gridforce Energy Management;A;
-US-NW-IPCO;USA;Idaho Power Company;A;
-US-NW-NEVP;USA;Nevada Power Company;A;
-US-NW-NWMT;USA;Northwestern Energy;A;
-US-NW-PACE;USA;Pacificorp East;A;
-US-NW-PACW;USA;Pacificorp West;A;336;
-US-NW-PGE;USA;Portland General Electric Company;A;
-US-NW-PSCO;USA;Public Service Company of Colorado;A;
-US-NW-PSEI;USA;Puget Sound Energy;A;
-US-NW-SCL;USA;Seattle City Light;A;
-US-NW-TPWR;USA;City of Tacoma;A;
-US-NW-WACM;USA;Western Area Power Administration - Rocky Mountain Region;A;
-US-NW-WAUW;USA;Western Area Power Administration - Upper Great Plains West;A;
-US-NY-NYIS;USA;New York ISO;A;287;
-US-SE-SEPA;USA;Southeastern Power Administration;A;
-US-SE-SOCO;USA;Southern Company Services;A;426;
-US-SW-AZPS;USA;Arizona Public Service Company;A;
-US-SW-EPE;USA;El Paso Electric Company;A;
-US-SW-PNM;USA;Public Service Company of New Mexico;A;
-US-SW-SRP;USA;Salt River Project;A;
-US-SW-TEPC;USA;Tucson Electric Power Company;A;
-US-SW-WALC;USA;Western Area Power Administration - Desert Southwest Region;A;
-US-TEN-TVA;USA;Tennessee Valley Authority;A;
-US-TEX-ERCO;USA;Electric Reliability Council of Texas;A;414;
-UY;Uruguay;Uruguay;A;54;
-UZ;Uzbekistan;Uzbekistan;C;
-VC;Saint Vincent and the Grenadines;Saint Vincent and the Grenadines;C;
-VE;Venezuela;Venezuela;C;85;
-VI;USA;Virgin Islands;C;
-VN;Vietnam;Vietnam;C;
-VU;Vanuatu;Vanuatu;C;
-WS;Samoa;Samoa;C;
-XK;Kosovo;Kosovo;A;
-YE;Yemen;Yemen;C;
-YT;Mayotte;Mayotte;C;
-ZA;South Africa;South Africa;A;
-ZM;Zambia;Zambia;C;
-ZW;Zimbabwe;Zimbabwe;C
+zone,country,name,intensity_g_per_kwh,year,source,emission_factor_type
+AE,United Arab Emirates,United Arab Emirates,477.3,2024,Ember yearly electricity data,lifecycle
+AF,Afghanistan,Afghanistan,117.2,2024,Ember yearly electricity data,lifecycle
+AG,Antigua and Barbuda,Antigua and Barbuda,608.1,2024,Ember yearly electricity data,lifecycle
+AL,Albania,Albania,24.7,2024,Ember yearly electricity data,lifecycle
+AM,Armenia,Armenia,240.3,2024,Ember yearly electricity data,lifecycle
+AO,Angola,Angola,185.1,2024,Ember yearly electricity data,lifecycle
+AR,Argentina,Argentina,346.6,2024,Ember yearly electricity data,lifecycle
+AT,Austria,Austria,103.5,2024,Ember yearly electricity data,lifecycle
+AU,Australia,Australia,549.5,2024,Ember yearly electricity data,lifecycle
+AU-NSW,Australia,New South Wales,,,,
+AU-NT,Australia,Northern Territory,,,,
+AU-QLD,Australia,Queensland,,,,
+AU-SA,Australia,South Australia,,,,
+AU-TAS,Australia,Tasmania,,,,
+AU-TAS-FI,Australia,Flinders Island,,,,
+AU-TAS-KI,Australia,King Island,,,,
+AU-VIC,Australia,Victoria,,,,
+AU-WA,Australia,Western Australia,,,,
+AU-WA-RI,Australia,Rottnest Island,,,,
+AW,Aruba,Aruba,549.0,2024,Ember yearly electricity data,lifecycle
+AX,Åland Islands,Åland Islands,,,,
+AZ,Azerbaijan,Azerbaijan,634.4,2024,Ember yearly electricity data,lifecycle
+BA,Bosnia and Herzegovina,Bosnia and Herzegovina,602.1,2024,Ember yearly electricity data,lifecycle
+BB,Barbados,Barbados,600.9,2024,Ember yearly electricity data,lifecycle
+BD,Bangladesh,Bangladesh,695.8,2024,Ember yearly electricity data,lifecycle
+BE,Belgium,Belgium,126.9,2024,Ember yearly electricity data,lifecycle
+BF,Burkina Faso,Burkina Faso,560.9,2024,Ember yearly electricity data,lifecycle
+BG,Bulgaria,Bulgaria,279.1,2024,Ember yearly electricity data,lifecycle
+BH,Bahrain,Bahrain,902.5,2024,Ember yearly electricity data,lifecycle
+BI,Burundi,Burundi,183.7,2024,Ember yearly electricity data,lifecycle
+BJ,Benin,Benin,579.2,2024,Ember yearly electricity data,lifecycle
+BN,Brunei,Brunei,893.0,2024,Ember yearly electricity data,lifecycle
+BO,Bolivia,Bolivia,495.7,2024,Ember yearly electricity data,lifecycle
+BR,Brazil,Brazil,101.8,2024,Ember yearly electricity data,lifecycle
+BR-CS,Brazil,Central Brazil,,,,
+BR-N,Brazil,North Brazil,,,,
+BR-NE,Brazil,North-East Brazil,,,,
+BR-S,Brazil,South Brazil,,,,
+BS,Bahamas,Bahamas,652.4,2024,Ember yearly electricity data,lifecycle
+BT,Bhutan,Bhutan,23.7,2024,Ember yearly electricity data,lifecycle
+BW,Botswana,Botswana,852.5,2024,Ember yearly electricity data,lifecycle
+BY,Belarus,Belarus,329.5,2024,Ember yearly electricity data,lifecycle
+BZ,Belize,Belize,170.2,2024,Ember yearly electricity data,lifecycle
+CA,Canada,Canada,184.8,2024,Ember yearly electricity data,lifecycle
+CA-AB,Canada,Alberta,,,,
+CA-BC,Canada,British Columbia,,,,
+CA-MB,Canada,Manitoba,,,,
+CA-NB,Canada,New Brunswick,,,,
+CA-NL,Canada,Newfoundland and Labrador,,,,
+CA-NS,Canada,Nova Scotia,,,,
+CA-NT,Canada,Northwest Territories,,,,
+CA-NU,Canada,Nunavut,,,,
+CA-ON,Canada,Ontario,,,,
+CA-PE,Canada,Prince Edward Island,,,,
+CA-QC,Canada,Québec,,,,
+CA-SK,Canada,Saskatchewan,,,,
+CA-YT,Canada,Yukon,,,,
+CD,Democratic Republic of the Congo,Democratic Republic of the Congo,27.6,2024,Ember yearly electricity data,lifecycle
+CF,Central African Republic,Central African Republic,,,,
+CG,Congo,Congo,715.6,2024,Ember yearly electricity data,lifecycle
+CH,Switzerland,Switzerland,34.6,2024,Ember yearly electricity data,lifecycle
+CI,Ivory Coast,Ivory Coast,405.6,2024,Ember yearly electricity data,lifecycle
+CL-SEN,Chile,Sistema Eléctrico Nacional,260.9,2024,Ember yearly electricity data,lifecycle
+CM,Cameroon,Cameroon,226.2,2024,Ember yearly electricity data,lifecycle
+CN,China,China,559.0,2024,Ember yearly electricity data,lifecycle
+CO,Colombia,Colombia,298.2,2024,Ember yearly electricity data,lifecycle
+CR,Costa Rica,Costa Rica,25.8,2024,Ember yearly electricity data,lifecycle
+CU,Cuba,Cuba,642.9,2024,Ember yearly electricity data,lifecycle
+CV,Cabo Verde,Cabo Verde,463.5,2024,Ember yearly electricity data,lifecycle
+CW,Curaçao,Curaçao,,,,
+CY,Cyprus,Cyprus,513.0,2024,Ember yearly electricity data,lifecycle
+CZ,Czechia,Czechia,414.2,2024,Ember yearly electricity data,lifecycle
+DE,Germany,Germany,339.9,2024,Ember yearly electricity data,lifecycle
+DJ,Djibouti,Djibouti,430.0,2024,Ember yearly electricity data,lifecycle
+DK,Denmark,Denmark,132.2,2024,Ember yearly electricity data,lifecycle
+DK-BHM,Denmark,Bornholm,,,,
+DK-DK1,Denmark,West Denmark,,,,
+DK-DK2,Denmark,East Denmark,,,,
+DM,Dominica,Dominica,,,,
+DO,Dominican Republic,Dominican Republic,567.3,2024,Ember yearly electricity data,lifecycle
+DZ,Algeria,Algeria,632.8,2024,Ember yearly electricity data,lifecycle
+EC,Ecuador,Ecuador,203.7,2024,Ember yearly electricity data,lifecycle
+EE,Estonia,Estonia,344.2,2024,Ember yearly electricity data,lifecycle
+EG,Egypt,Egypt,571.4,2024,Ember yearly electricity data,lifecycle
+ER,Eritrea,Eritrea,591.1,2024,Ember yearly electricity data,lifecycle
+ES,Spain,Spain,146.3,2024,Ember yearly electricity data,lifecycle
+ES-CE,Spain,Ceuta,,,,
+ES-CN-FV,Spain,Fuerteventura,,,,
+ES-CN-GC,Spain,Gran Canaria,,,,
+ES-CN-HI,Spain,El Hierro,,,,
+ES-CN-IG,Spain,Isla de la Gomera,,,,
+ES-CN-LP,Spain,La Palma,,,,
+ES-CN-LZ,Spain,Lanzarote,,,,
+ES-CN-TE,Spain,Tenerife,,,,
+ES-IB-FO,Spain,Formentera,,,,
+ES-IB-IZ,Spain,Ibiza,,,,
+ES-IB-MA,Spain,Mallorca,,,,
+ES-IB-ME,Spain,Menorca,,,,
+ES-ML,Spain,Melilla,,,,
+ET,Ethiopia,Ethiopia,23.5,2024,Ember yearly electricity data,lifecycle
+FI,Finland,Finland,66.8,2024,Ember yearly electricity data,lifecycle
+FJ,Fiji,Fiji,275.7,2024,Ember yearly electricity data,lifecycle
+FK,Falkland Islands,Falkland Islands,,,,
+FM,Micronesia,Micronesia,,,,
+FO,Faroe Islands,Faroe Islands,,,,
+FO-MI,Faroe Islands,Main Islands,,,,
+FO-SI,Faroe Islands,South Island,,,,
+FR,France,France,40.3,2024,Ember yearly electricity data,lifecycle
+FR-COR,France,Corsica,,,,
+GA,Gabon,Gabon,525.4,2024,Ember yearly electricity data,lifecycle
+GB,Great Britain,Great Britain,216.2,2024,Ember yearly electricity data,lifecycle
+GB-NIR,Great Britain,Northern Ireland,,,,
+GB-ORK,Great Britain,Orkney Islands,,,,
+GE,Georgia,Georgia,145.1,2024,Ember yearly electricity data,lifecycle
+GF,French Guiana,French Guiana,,,,
+GH,Ghana,Ghana,468.8,2024,Ember yearly electricity data,lifecycle
+GI,Gibraltar,Gibraltar,,,,
+GL,Greenland,Greenland,138.3,2024,Ember yearly electricity data,lifecycle
+GN,Guinea,Guinea,181.4,2024,Ember yearly electricity data,lifecycle
+GP,Guadeloupe,Guadeloupe,,,,
+GQ,Equatorial Guinea,Equatorial Guinea,643.0,2024,Ember yearly electricity data,lifecycle
+GR,Greece,Greece,321.8,2024,Ember yearly electricity data,lifecycle
+GS,South Georgia and the South Sandwich Islands,South Georgia and the South Sandwich Islands,,,,
+GT,Guatemala,Guatemala,301.5,2024,Ember yearly electricity data,lifecycle
+GU,Guam,Guam,605.4,2024,Ember yearly electricity data,lifecycle
+GW,Guinea-Bissau,Guinea-Bissau,662.5,2024,Ember yearly electricity data,lifecycle
+GY,Guyana,Guyana,642.0,2024,Ember yearly electricity data,lifecycle
+HK,Hong Kong,Hong Kong,675.6,2024,Ember yearly electricity data,lifecycle
+HN,Honduras,Honduras,322.0,2024,Ember yearly electricity data,lifecycle
+HR,Croatia,Croatia,170.5,2024,Ember yearly electricity data,lifecycle
+HT,Haiti,Haiti,539.5,2024,Ember yearly electricity data,lifecycle
+HU,Hungary,Hungary,183.9,2024,Ember yearly electricity data,lifecycle
+ID,Indonesia,Indonesia,710.4,2024,Ember yearly electricity data,lifecycle
+IE,Ireland,Ireland,270.8,2024,Ember yearly electricity data,lifecycle
+IL,Israel,Israel,540.7,2024,Ember yearly electricity data,lifecycle
+IN,Mainland India,Mainland India,707.1,2024,Ember yearly electricity data,lifecycle
+IN-EA,India,Eastern India,,,,
+IN-NE,India,North Eastern India,,,,
+IN-NO,India,Northern India,,,,
+IN-SO,India,Southern India,,,,
+IN-WE,India,Western India,,,,
+IQ,Iraq,Iraq,683.1,2024,Ember yearly electricity data,lifecycle
+IR,Iran,Iran,643.5,2024,Ember yearly electricity data,lifecycle
+IS,Iceland,Iceland,27.8,2024,Ember yearly electricity data,lifecycle
+IT,Italy,Italy,281.4,2024,Ember yearly electricity data,lifecycle
+IT-CNO,Italy,Central North Italy,,,,
+IT-CSO,Italy,Central South Italy,,,,
+IT-NO,Italy,North Italy,,,,
+IT-SAR,Italy,Sardinia,,,,
+IT-SIC,Italy,Sicily,,,,
+IT-SO,Italy,South Italy,,,,
+JM,Jamaica,Jamaica,562.4,2024,Ember yearly electricity data,lifecycle
+JO,Jordan,Jordan,529.7,2024,Ember yearly electricity data,lifecycle
+JP,Japan,Japan,484.3,2024,Ember yearly electricity data,lifecycle
+JP-CB,Japan,Chūbu,,,,
+JP-CG,Japan,Chūgoku,,,,
+JP-HKD,Japan,Hokkaidō,,,,
+JP-HR,Japan,Hokuriku,,,,
+JP-KN,Japan,Kansai,,,,
+JP-KY,Japan,Kyūshū,,,,
+JP-ON,Japan,Okinawa,,,,
+JP-SK,Japan,Shikoku,,,,
+JP-TH,Japan,Tōhoku,,,,
+JP-TK,Japan,Tōkyō,,,,
+KE,Kenya,Kenya,85.8,2024,Ember yearly electricity data,lifecycle
+KG,Kyrgyzstan,Kyrgyzstan,120.2,2024,Ember yearly electricity data,lifecycle
+KH,Cambodia,Cambodia,538.7,2024,Ember yearly electricity data,lifecycle
+KM,Comoros,Comoros,,,,
+KP,North Korea,North Korea,340.6,2024,Ember yearly electricity data,lifecycle
+KR,South Korea,South Korea,410.1,2024,Ember yearly electricity data,lifecycle
+KW,Kuwait,Kuwait,635.3,2024,Ember yearly electricity data,lifecycle
+KY,Cayman Islands,Cayman Islands,632.4,2024,Ember yearly electricity data,lifecycle
+KZ,Kazakhstan,Kazakhstan,805.8,2024,Ember yearly electricity data,lifecycle
+LA,Laos,Laos,232.1,2024,Ember yearly electricity data,lifecycle
+LB,Lebanon,Lebanon,388.2,2024,Ember yearly electricity data,lifecycle
+LC,Saint Lucia,Saint Lucia,642.5,2024,Ember yearly electricity data,lifecycle
+LK,Sri Lanka,Sri Lanka,404.0,2024,Ember yearly electricity data,lifecycle
+LR,Liberia,Liberia,314.0,2024,Ember yearly electricity data,lifecycle
+LS,Lesotho,Lesotho,,,,
+LT,Lithuania,Lithuania,116.1,2024,Ember yearly electricity data,lifecycle
+LU,Luxembourg,Luxembourg,124.3,2024,Ember yearly electricity data,lifecycle
+LV,Latvia,Latvia,134.5,2024,Ember yearly electricity data,lifecycle
+LY,Libya,Libya,826.9,2024,Ember yearly electricity data,lifecycle
+MA,Morocco,Morocco,595.3,2024,Ember yearly electricity data,lifecycle
+MD,Moldova,Moldova,636.7,2024,Ember yearly electricity data,lifecycle
+ME,Montenegro,Montenegro,422.3,2024,Ember yearly electricity data,lifecycle
+MG,Madagascar,Madagascar,433.7,2024,Ember yearly electricity data,lifecycle
+MK,North Macedonia,North Macedonia,511.9,2024,Ember yearly electricity data,lifecycle
+ML,Mali,Mali,537.4,2024,Ember yearly electricity data,lifecycle
+MM,Myanmar,Myanmar,502.3,2024,Ember yearly electricity data,lifecycle
+MN,Mongolia,Mongolia,817.0,2024,Ember yearly electricity data,lifecycle
+MO,Macao,Macao,474.4,2024,Ember yearly electricity data,lifecycle
+MQ,Martinique,Martinique,,,,
+MR,Mauritania,Mauritania,515.0,2024,Ember yearly electricity data,lifecycle
+MT,Malta,Malta,488.1,2024,Ember yearly electricity data,lifecycle
+MU,Mauritius,Mauritius,642.2,2024,Ember yearly electricity data,lifecycle
+MV,Maldives,Maldives,615.3,2024,Ember yearly electricity data,lifecycle
+MW,Malawi,Malawi,56.8,2024,Ember yearly electricity data,lifecycle
+MX,Mexico,Mexico,489.7,2024,Ember yearly electricity data,lifecycle
+MY,Malaysia,Malaysia,604.3,2024,Ember yearly electricity data,lifecycle
+MY-EM,Malaysia,Borneo,,,,
+MY-WM,Malaysia,Peninsula,,,,
+MZ,Mozambique,Mozambique,129.4,2024,Ember yearly electricity data,lifecycle
+NA,Namibia,Namibia,52.4,2024,Ember yearly electricity data,lifecycle
+NC,New Caledonia,New Caledonia,564.1,2024,Ember yearly electricity data,lifecycle
+NE,Niger,Niger,670.5,2024,Ember yearly electricity data,lifecycle
+NG,Nigeria,Nigeria,495.6,2024,Ember yearly electricity data,lifecycle
+NI,Nicaragua,Nicaragua,300.4,2024,Ember yearly electricity data,lifecycle
+NL,Netherlands,Netherlands,250.8,2024,Ember yearly electricity data,lifecycle
+NO,Norway,Norway,29.6,2024,Ember yearly electricity data,lifecycle
+NO-NO1,Norway,Southeast Norway,,,,
+NO-NO2,Norway,Southwest Norway,,,,
+NO-NO3,Norway,Middle Norway,,,,
+NO-NO4,Norway,North Norway,,,,
+NO-NO5,Norway,West Norway,,,,
+NP,Nepal,Nepal,24.0,2024,Ember yearly electricity data,lifecycle
+NZ,New Zealand,New Zealand,111.9,2024,Ember yearly electricity data,lifecycle
+OM,Oman,Oman,542.9,2024,Ember yearly electricity data,lifecycle
+PA,Panama,Panama,220.3,2024,Ember yearly electricity data,lifecycle
+PE,Peru,Peru,258.4,2024,Ember yearly electricity data,lifecycle
+PF,French Polynesia,French Polynesia,440.3,2024,Ember yearly electricity data,lifecycle
+PG,Papua New Guinea,Papua New Guinea,516.1,2024,Ember yearly electricity data,lifecycle
+PH,Philippines,Philippines,629.5,2024,Ember yearly electricity data,lifecycle
+PH-LU,Philippines,Luzon,,,,
+PH-MI,Philippines,Mindanao,,,,
+PH-VI,Philippines,Visayas,,,,
+PK,Pakistan,Pakistan,334.4,2024,Ember yearly electricity data,lifecycle
+PL,Poland,Poland,608.5,2024,Ember yearly electricity data,lifecycle
+PM,Saint Pierre and Miquelon,Saint Pierre and Miquelon,,,,
+PR,Puerto Rico,Puerto Rico,656.5,2024,Ember yearly electricity data,lifecycle
+PS,State of Palestine,State of Palestine,417.2,2024,Ember yearly electricity data,lifecycle
+PT,Portugal,Portugal,110.6,2024,Ember yearly electricity data,lifecycle
+PT-MA,Portugal,Madeira,,,,
+PW,Palau,Palau,,,,
+PY,Paraguay,Paraguay,24.9,2024,Ember yearly electricity data,lifecycle
+QA,Qatar,Qatar,581.7,2024,Ember yearly electricity data,lifecycle
+RE,Réunion,Réunion,,,,
+RO,Romania,Romania,259.7,2024,Ember yearly electricity data,lifecycle
+RS,Serbia,Serbia,668.4,2024,Ember yearly electricity data,lifecycle
+RU-1,Russia,Europe-Ural,443.5,2024,Ember yearly electricity data,lifecycle
+RU-2,Russia,Siberia,443.5,2024,Ember yearly electricity data,lifecycle
+RU-AS,Russia,East,443.5,2024,Ember yearly electricity data,lifecycle
+RW,Rwanda,Rwanda,361.9,2024,Ember yearly electricity data,lifecycle
+SA,Saudi Arabia,Saudi Arabia,689.1,2024,Ember yearly electricity data,lifecycle
+SB,Solomon Islands,Solomon Islands,600.0,2024,Ember yearly electricity data,lifecycle
+SC,Seychelles,Seychelles,560.3,2024,Ember yearly electricity data,lifecycle
+SD,Sudan,Sudan,154.3,2024,Ember yearly electricity data,lifecycle
+SE,Sweden,Sweden,34.9,2024,Ember yearly electricity data,lifecycle
+SE-SE1,Sweden,North Sweden,,,,
+SE-SE2,Sweden,North Central Sweden,,,,
+SE-SE3,Sweden,South Central Sweden,,,,
+SE-SE4,Sweden,South Sweden,,,,
+SG,Singapore,Singapore,498.7,2024,Ember yearly electricity data,lifecycle
+SI,Slovenia,Slovenia,230.5,2024,Ember yearly electricity data,lifecycle
+SK,Slovakia,Slovakia,97.2,2024,Ember yearly electricity data,lifecycle
+SL,Sierra Leone,Sierra Leone,57.1,2024,Ember yearly electricity data,lifecycle
+SN,Senegal,Senegal,540.1,2024,Ember yearly electricity data,lifecycle
+SO,Somalia,Somalia,530.2,2024,Ember yearly electricity data,lifecycle
+SR,Suriname,Suriname,323.0,2024,Ember yearly electricity data,lifecycle
+SS,South Sudan,South Sudan,646.4,2024,Ember yearly electricity data,lifecycle
+SV,El Salvador,El Salvador,107.3,2024,Ember yearly electricity data,lifecycle
+SY,Syria,Syria,706.2,2024,Ember yearly electricity data,lifecycle
+SZ,Eswatini,Eswatini,119.7,2024,Ember yearly electricity data,lifecycle
+TD,Chad,Chad,629.7,2024,Ember yearly electricity data,lifecycle
+TG,Togo,Togo,421.1,2024,Ember yearly electricity data,lifecycle
+TH,Thailand,Thailand,524.5,2024,Ember yearly electricity data,lifecycle
+TJ,Tajikistan,Tajikistan,70.8,2024,Ember yearly electricity data,lifecycle
+TL,Timor-Leste,Timor-Leste,,,,
+TM,Turkmenistan,Turkmenistan,1306.2,2024,Ember yearly electricity data,lifecycle
+TN,Tunisia,Tunisia,558.1,2024,Ember yearly electricity data,lifecycle
+TO,Tonga,Tonga,571.4,2024,Ember yearly electricity data,lifecycle
+TR,Turkey,Turkey,470.8,2024,Ember yearly electricity data,lifecycle
+TT,Trinidad and Tobago,Trinidad and Tobago,681.3,2024,Ember yearly electricity data,lifecycle
+TW,Taiwan,Taiwan,635.2,2024,Ember yearly electricity data,lifecycle
+TZ,Tanzania,Tanzania,343.9,2024,Ember yearly electricity data,lifecycle
+UG,Uganda,Uganda,58.5,2024,Ember yearly electricity data,lifecycle
+US,Contiguous United States,Contiguous United States,383.8,2024,Ember yearly electricity data,lifecycle
+US-AK,USA,Alaska,,,,
+US-AK-SEAPA,USA,Southeast Alaska Power Agency,,,,
+US-CAL-BANC,USA,Balancing Authority of Northern California,,,,
+US-CAL-CISO,USA,CAISO,,,,
+US-CAL-IID,USA,Imperial Irrigation District,,,,
+US-CAL-LDWP,USA,Los Angeles Department of Water and Power,,,,
+US-CAL-TIDC,USA,Turlock Irrigation District,,,,
+US-CAR-CPLE,USA,Duke Energy Progress East,,,,
+US-CAR-CPLW,USA,Duke Energy Progress West,,,,
+US-CAR-DUK,USA,Duke Energy Carolinas,,,,
+US-CAR-SC,USA,South Carolina Public Service Authority,,,,
+US-CAR-SCEG,USA,South Carolina Electric & Gas Company,,,,
+US-CAR-YAD,USA,Alcoa Power Generating,,,,
+US-CENT-SPA,USA,Southwestern Power Administration,,,,
+US-CENT-SWPP,USA,Southwest Power Pool,,,,
+US-FLA-FMPP,USA,Florida Municipal Power Pool,,,,
+US-FLA-FPC,USA,Duke Energy Florida,,,,
+US-FLA-FPL,USA,Florida Power and Light Company,,,,
+US-FLA-GVL,USA,Gainesville Regional Utilities,,,,
+US-FLA-HST,USA,City of Homestead,,,,
+US-FLA-JEA,USA,Jacksonville Electric Authority,,,,
+US-FLA-SEC,USA,Seminole Electric Cooperative,,,,
+US-FLA-TAL,USA,City of Tallahassee,,,,
+US-FLA-TEC,USA,Tampa Electric Company,,,,
+US-MIDA-PJM,USA,PJM Interconnection,,,,
+US-MIDW-AECI,USA,Associated Electric Cooperative,,,,
+US-MIDW-LGEE,USA,Louisville Gas and Electric Company and Kentucky Utilities,,,,
+US-MIDW-MISO,USA,Midcontinent ISO,,,,
+US-NE-ISNE,USA,ISO New England,,,,
+US-NW-AVA,USA,Avista Corporation,,,,
+US-NW-BPAT,USA,Bonneville Power Administration,,,,
+US-NW-CHPD,USA,Chelan County,,,,
+US-NW-DOPD,USA,Douglas County,,,,
+US-NW-GCPD,USA,Grant County,,,,
+US-NW-GRID,USA,Gridforce Energy Management,,,,
+US-NW-IPCO,USA,Idaho Power Company,,,,
+US-NW-NEVP,USA,Nevada Power Company,,,,
+US-NW-NWMT,USA,Northwestern Energy,,,,
+US-NW-PACE,USA,Pacificorp East,,,,
+US-NW-PACW,USA,Pacificorp West,,,,
+US-NW-PGE,USA,Portland General Electric Company,,,,
+US-NW-PSCO,USA,Public Service Company of Colorado,,,,
+US-NW-PSEI,USA,Puget Sound Energy,,,,
+US-NW-SCL,USA,Seattle City Light,,,,
+US-NW-TPWR,USA,City of Tacoma,,,,
+US-NW-WACM,USA,Western Area Power Administration - Rocky Mountain Region,,,,
+US-NW-WAUW,USA,Western Area Power Administration - Upper Great Plains West,,,,
+US-NY-NYIS,USA,New York ISO,,,,
+US-SE-SEPA,USA,Southeastern Power Administration,,,,
+US-SE-SOCO,USA,Southern Company Services,,,,
+US-SW-AZPS,USA,Arizona Public Service Company,,,,
+US-SW-EPE,USA,El Paso Electric Company,,,,
+US-SW-PNM,USA,Public Service Company of New Mexico,,,,
+US-SW-SRP,USA,Salt River Project,,,,
+US-SW-TEPC,USA,Tucson Electric Power Company,,,,
+US-SW-WALC,USA,Western Area Power Administration - Desert Southwest Region,,,,
+US-TEN-TVA,USA,Tennessee Valley Authority,,,,
+US-TEX-ERCO,USA,Electric Reliability Council of Texas,,,,
+UY,Uruguay,Uruguay,68.8,2024,Ember yearly electricity data,lifecycle
+UZ,Uzbekistan,Uzbekistan,1040.2,2024,Ember yearly electricity data,lifecycle
+VC,Saint Vincent and the Grenadines,Saint Vincent and the Grenadines,573.3,2024,Ember yearly electricity data,lifecycle
+VE,Venezuela,Venezuela,85.9,2024,Ember yearly electricity data,lifecycle
+VI,USA,Virgin Islands,,,,
+VN,Vietnam,Vietnam,477.0,2024,Ember yearly electricity data,lifecycle
+VU,Vanuatu,Vanuatu,,,,
+WS,Samoa,Samoa,400.0,2024,Ember yearly electricity data,lifecycle
+XK,Kosovo,Kosovo,924.9,2024,Ember yearly electricity data,lifecycle
+YE,Yemen,Yemen,591.4,2024,Ember yearly electricity data,lifecycle
+YT,Mayotte,Mayotte,,,,
+ZA,South Africa,South Africa,717.4,2024,Ember yearly electricity data,lifecycle
+ZM,Zambia,Zambia,125.8,2024,Ember yearly electricity data,lifecycle
+ZW,Zimbabwe,Zimbabwe,383.7,2024,Ember yearly electricity data,lifecycle

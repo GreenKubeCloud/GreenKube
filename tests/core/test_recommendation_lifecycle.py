@@ -7,7 +7,7 @@ Tests for the recommendation lifecycle:
 - API endpoint behaviour (mocked repository)
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -190,40 +190,64 @@ class TestSavingsSummary:
 class TestAppliedRecommendationRefresh:
     """Tests for keeping applied recommendations aligned with later observations."""
 
-    def test_cpu_rightsizing_refresh_updates_realized_savings_from_current_request(self):
-        """If a 500m -> 200m applied recommendation drifts to 400m, only partial savings remain."""
+    @pytest.mark.parametrize(
+        ("rec_type", "fields", "stale_scan"),
+        [
+            (
+                RecommendationType.RIGHTSIZING_CPU,
+                {
+                    "current_cpu_request_millicores": 400,
+                    "recommended_cpu_request_millicores": 10,
+                    "actual_cpu_request_millicores": 10,
+                },
+                {"current_cpu_request_millicores": 400, "recommended_cpu_request_millicores": 12},
+            ),
+            (
+                RecommendationType.RIGHTSIZING_MEMORY,
+                {
+                    "current_memory_request_bytes": 384 * 1024**2,
+                    "recommended_memory_request_bytes": 16 * 1024**2,
+                    "actual_memory_request_bytes": 16 * 1024**2,
+                },
+                {"current_memory_request_bytes": 384 * 1024**2, "recommended_memory_request_bytes": 20 * 1024**2},
+            ),
+        ],
+    )
+    def test_rightsizing_refresh_never_rewrites_the_applied_change(self, rec_type, fields, stale_scan):
+        """A scan regenerating an applied rightsizing keeps baseline, actual and savings (bug 1).
+
+        The analyzers read requests from the hourly usage rollup, whose latest
+        bucket still holds the pre-change request for up to an hour after the
+        rollout: copying that value into ``actual_*`` showed a merged 400m -> 10m
+        change as 400m -> 400m and zeroed its savings.
+        """
         applied = RecommendationRecord(
             id=1,
-            pod_name="api",
-            namespace="prod",
-            type=RecommendationType.RIGHTSIZING_CPU,
-            description="Reduce CPU",
+            pod_name="oversized-web",
+            namespace="apps",
+            type=rec_type,
+            description="Reduce requests",
             status=RecommendationStatus.APPLIED,
-            current_cpu_request_millicores=500,
-            recommended_cpu_request_millicores=200,
-            actual_cpu_request_millicores=200,
             potential_savings_co2e_grams=300.0,
             potential_savings_cost=30.0,
             carbon_saved_co2e_grams=300.0,
             cost_saved=30.0,
-            applied_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            applied_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+            **fields,
         )
         observed = RecommendationRecord(
-            pod_name="api",
-            namespace="prod",
-            type=RecommendationType.RIGHTSIZING_CPU,
-            description="Still oversized",
-            current_cpu_request_millicores=400,
-            recommended_cpu_request_millicores=200,
+            pod_name="oversized-web",
+            namespace="apps",
+            type=rec_type,
+            description="Regenerated from the hourly rollup",
+            **stale_scan,
         )
+        observed_at = datetime.now(timezone.utc)
 
-        refreshed = refresh_applied_recommendation(applied, observed)
+        refreshed = refresh_applied_recommendation(applied, observed, observed_at=observed_at)
 
-        assert refreshed.status == RecommendationStatus.APPLIED
-        assert refreshed.applied_at == applied.applied_at
-        assert refreshed.actual_cpu_request_millicores == 400
-        assert refreshed.carbon_saved_co2e_grams == pytest.approx(100.0)
-        assert refreshed.cost_saved == pytest.approx(10.0)
+        assert refreshed.updated_at == observed_at
+        assert refreshed.model_dump(exclude={"updated_at"}) == applied.model_dump(exclude={"updated_at"})
 
     def test_non_resource_refresh_stops_savings_when_issue_reappears(self):
         """If an applied non-resource recommendation is generated again, it is no longer saving."""

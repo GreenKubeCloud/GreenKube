@@ -20,6 +20,8 @@ from greenkube.automation.git.base import (
     GitProviderError,
     GitProviderTransientError,
     GitRepository,
+    GitTreeChange,
+    GitTreeComparison,
     PullRequestInfo,
     PullRequestOptions,
     pull_request_option_capabilities,
@@ -147,6 +149,9 @@ def _plan(
         requests_within_limits=True,
         renderer=RendererKind.RAW,
         output_digest=OUTPUT_DIGEST,
+        # D7: the raw render read the manifests of apps/payments (moved heads compare them).
+        render_inputs={MANIFEST_PATH: _blob_sha(BASE_CONTENT)},
+        render_scopes=["apps/payments"],
     )
     file_plan = FilePlan(
         plan_id=action.action_id,
@@ -279,7 +284,9 @@ class FakeOperationRepository:
         )
         return lease.operation.model_copy(update={"status": OperationStatus.SUCCEEDED})
 
-    async def mark_failed(self, lease: PlanOperationLease, error: str, *, retryable: bool = True) -> Operation:
+    async def mark_failed(
+        self, lease: PlanOperationLease, error: str, *, retryable: bool = True, retry_at: datetime | None = None
+    ) -> Operation:
         self.failures.append((error, retryable))
         return lease.operation.model_copy(
             update={
@@ -295,6 +302,7 @@ class FakePlanRepository:
             recommendation_id: ActionStatus.PLAN_READY for recommendation_id in plan.recommendation_ids
         }
         self.status_updates: list[tuple[str, PlanStatus]] = []
+        self.reason_codes: list[str | None] = []
 
     async def get_plan(self, plan_id: str) -> Plan | None:
         return self.plans.get(plan_id)
@@ -315,6 +323,7 @@ class FakePlanRepository:
         updated = plan.model_copy(update={"status": status})
         self.plans[plan_id] = updated
         self.status_updates.append((plan_id, status))
+        self.reason_codes.append(reason_code)
         return updated
 
     async def set_plan_pre_apply_baseline_if_absent(
@@ -351,6 +360,9 @@ class FakePullRequestRepository:
 
     async def get_pull_requests_for_recommendation(self, recommendation_id: int) -> list[PullRequestRecord]:
         return [record for record in self.records if record.recommendation_id == recommendation_id]
+
+    async def list_pull_requests_by_plan_id(self, plan_id: str) -> list[PullRequestRecord]:
+        return [record for record in self.records if record.plan_id == plan_id]
 
     async def save_pull_request(self, record: PullRequestRecord) -> PullRequestRecord:
         saved = record.model_copy(update={"id": self._next_id})
@@ -400,14 +412,15 @@ class FakeGitProvider:
         self.commit_requests: list[GitCommitRequest] = []
         self.pull_request_creations: list[tuple[str, str]] = []
         self.pull_request_bodies: list[str] = []
+        self.pull_request_titles: list[str] = []
         self.pull_request_options: list[PullRequestOptions | None] = []
         self.pull_request_option_ensures: list[PullRequestOptions | None] = []
         self.pull_request_fail_mode: str | None = None
         self.next_pr_number = 17
-        self.updated_files = 0
         self.plan_repository: FakePlanRepository | None = None
         self.plan_id: str | None = None
         self.mutation_baselines: list[PreApplyWorkloadBaseline | None] = []
+        self.tree_reads: list[tuple[str, str]] = []
 
     def supports(self, capability: GitProviderCapability | str) -> bool:
         return capability in self.capabilities
@@ -439,19 +452,39 @@ class FakeGitProvider:
             tree = {}
         return sorted(tree)
 
+    def _tree_at(self, ref: str) -> dict[str, GitFile]:
+        if ref in self.branches:
+            return self.branches[ref]
+        return self.base_tree if ref == BASE_REVISION else {}
+
+    async def get_blob_ids(self, repo: GitRepository, ref: str, paths: Sequence[str]) -> dict[str, str | None]:
+        self.tree_reads.append(("blobs", ref))
+        tree = self._tree_at(ref)
+        return {path: (tree[path].blob_sha if path in tree else None) for path in paths}
+
+    async def compare_trees(self, repo: GitRepository, base_revision: str, head_ref: str) -> GitTreeComparison:
+        self.tree_reads.append(("compare", head_ref))
+        base, head = self._tree_at(base_revision), self._tree_at(head_ref)
+        changes: list[GitTreeChange] = []
+        for path in sorted(set(base) | set(head)):
+            if path not in head:
+                changes.append(GitTreeChange(path, "deleted"))
+            elif path not in base:
+                changes.append(GitTreeChange(path, "added", head[path].blob_sha))
+            elif base[path].blob_sha != head[path].blob_sha or base[path].content != head[path].content:
+                changes.append(GitTreeChange(path, "modified", head[path].blob_sha))
+        return GitTreeComparison(base_revision, head_ref, tuple(changes))
+
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
         if self.plan_repository is not None and self.plan_id is not None:
             plan = self.plan_repository.plans.get(self.plan_id)
             self.mutation_baselines.append(plan.pre_apply_baseline if plan is not None else None)
         self.branch_creations.append((branch, from_ref))
         if branch not in self.branches:
-            if from_ref != "main":
+            # Plan branches start at the validated base commit, never at the moving ref.
+            if from_ref != BASE_REVISION:
                 raise GitConflictError("unexpected branch base")
             self.branches[branch] = dict(self.base_tree)
-
-    async def update_file(self, *args: Any, **kwargs: Any) -> None:
-        self.updated_files += 1
-        raise AssertionError("the plan worker must use one atomic commit, not update_file")
 
     async def create_commit(self, request: GitCommitRequest) -> GitCommitResult:
         self.commit_requests.append(request)
@@ -488,6 +521,7 @@ class FakeGitProvider:
     ) -> PullRequestInfo:
         self.validate_pull_request_options(options)
         self.pull_request_creations.append((head, base))
+        self.pull_request_titles.append(title)
         self.pull_request_bodies.append(body)
         self.pull_request_options.append(options)
         if self.pull_request_fail_mode == "before":
@@ -543,12 +577,16 @@ class FakeProviderResolver:
         self.provider = provider
         self.error = error
         self.calls: list[WorkloadSource] = []
+        self.checks: list[tuple[str, str, str | None]] = []
 
     async def resolve(self, source: WorkloadSource) -> GitProviderTarget:
         self.calls.append(source)
         if self.error is not None:
             raise self.error
         return GitProviderTarget(self.provider, self.provider.repo)
+
+    async def record_check(self, provider_id: str, status: str, *, error_code: str | None = None) -> None:
+        self.checks.append((provider_id, status, error_code))
 
 
 class FakeRevisionResolver:
@@ -595,17 +633,6 @@ class FakeAuthorizedAdapter(GitProvider):
         return []
 
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
-        return None
-
-    async def update_file(
-        self,
-        repo: GitRepository,
-        path: str,
-        content: str,
-        message: str,
-        branch: str,
-        sha: str | None = None,
-    ) -> None:
         return None
 
     async def create_pull_request(
@@ -690,7 +717,7 @@ async def test_commits_all_file_plan_edits_atomically_and_records_one_pr_per_act
     assert await worker.process_once("worker-1")
 
     branch = plan_branch_name(_plan())
-    assert provider.branch_creations == [(branch, "main")]
+    assert provider.branch_creations == [(branch, BASE_REVISION)]
     assert len(provider.commit_requests) == 1
     commit = provider.commit_requests[0]
     assert commit.branch == branch
@@ -699,7 +726,6 @@ async def test_commits_all_file_plan_edits_atomically_and_records_one_pr_per_act
         (MANIFEST_PATH, "update", UPDATED_CONTENT),
         (NEW_PATH, "create", NEW_CONTENT),
     ]
-    assert provider.updated_files == 0
     assert provider.pull_request_creations == [(branch, "main")]
     assert len(provider.pull_requests) == 1
     assert {record.recommendation_id for record in pull_requests.records} == {41, 42}
@@ -852,18 +878,31 @@ async def test_pull_request_body_includes_evidence_impact_risk_diff_and_provenan
     assert await worker.process_once("worker-1")
 
     body = provider.pull_request_bodies[0]
-    assert "## Plan and provenance" in body
+    for heading in (
+        "## Summary",
+        "## Changes",
+        "## Why",
+        "## Risk & what to watch",
+        "## Assumptions",
+        "## Rollback",
+        "## Verification plan",
+    ):
+        assert heading in body
     assert "Repository: `acme/gitops`" in body
     assert "Revision drift: this plan targets branch head" in body
-    assert "## Recommendation evidence and impact" in body
-    assert "Projected annual savings: cost $12.50/year, carbon 42.000 g CO2e/year" in body
-    assert "CPU usage: p95 120m, max 200m" in body
-    assert "Risk factors: p95 usage remains below target" in body
-    assert "Review if CPU p95 exceeds 330m." in body
-    assert "## Source diff" in body
-    assert "## Rendered diff" in body
-    assert "## Verification" in body
+    assert "| Cost (USD) | $1.04 | $12.50 |" in body
+    assert "| `api` | requests.cpu | 1000m | 300m | −700m (-70%) |" in body
+    assert "CPU usage: p95 120m · p99 180m · max 200m" in body
+    assert "- p95 usage remains below target" in body
+    assert "- Review if CPU p95 exceeds 330m." in body
+    assert "<summary>Source diff</summary>" in body
+    assert "<summary>Rendered diff</summary>" in body
     assert "Recommendation evidence is unavailable for #42" in body
+    assert body.rstrip().endswith("-->") and '<!-- greenkube:v1 {"plan_id":"plan-1"' in body
+    assert provider.pull_request_titles == ["greenkube: rightsize payments/api · −$13/yr · −42 gCO₂e/yr"]
+    commit_message = provider.commit_requests[0].message
+    assert commit_message.startswith(provider.pull_request_titles[0] + "\n\n")
+    assert commit_message.endswith("GreenKube-Plan: plan-1\nGreenKube-Recommendations: 41, 42\n")
 
 
 @pytest.mark.asyncio
@@ -880,10 +919,10 @@ async def test_worker_forwards_pull_request_options_without_replacing_the_rich_b
 
     assert provider.pull_request_options == [options]
     body = provider.pull_request_bodies[0]
-    assert "## Plan and provenance" in body
-    assert "## Recommendation evidence and impact" in body
-    assert "## Rendered diff" in body
-    assert "## Verification" in body
+    assert "<summary>Plan provenance</summary>" in body
+    assert "## Why" in body
+    assert "<summary>Rendered diff</summary>" in body
+    assert "## Verification plan" in body
 
 
 @pytest.mark.asyncio
@@ -1183,7 +1222,7 @@ async def test_unexpected_preexisting_branch_fails_closed_without_commit_or_pr()
 
     assert await worker.process_once("worker-1")
 
-    assert provider.branch_creations == [(branch, "main")]
+    assert provider.branch_creations == [(branch, BASE_REVISION)]
     assert provider.commit_requests == []
     assert provider.pull_request_creations == []
     assert operations.failures and operations.failures[0][1] is False
@@ -1397,7 +1436,6 @@ async def test_existing_worker_entry_point_can_process_injected_plan_worker():
 
     assert await automation_worker.process_once(
         "worker-1",
-        queue="plans",
         plan_worker=cast(PlanWorker, plan_worker),
     )
     assert plan_worker.worker_ids == ["worker-1"]
@@ -1416,7 +1454,7 @@ async def test_worker_entry_point_defaults_to_the_plan_queue(monkeypatch: pytest
 
     plan_worker = EmptyPlanWorker()
 
-    async def create_runtime():
+    async def create_runtime(**_options):
         return SimpleNamespace(worker=plan_worker)
 
     monkeypatch.setattr(automation_worker, "create_plan_runtime", create_runtime)
@@ -1660,3 +1698,79 @@ async def test_plan_worker_merge_sync_and_apply_form_one_closed_loop():
     assert [item.status for item in applied] == [RecommendationStatus.APPLIED]
     assert plans.action_status[41] is ActionStatus.APPLIED
     assert plans.plans[plan.plan_id].status is PlanStatus.APPLIED
+
+
+@pytest.mark.asyncio
+async def test_plan_whose_requests_are_already_live_fails_closed_without_a_pull_request():
+    """no_effective_change: the cluster already runs 300m, so the PR would change nothing."""
+    reader = FakeWorkloadReader({("payments", "Deployment", "api"): _workload_snapshot(cpu_request_millicores=300)})
+    worker, operations, plans, pull_requests, provider = _worker(workload_reader=reader)
+
+    assert await worker.process_once("worker-1")
+
+    assert provider.branch_creations == []
+    assert provider.commit_requests == []
+    assert provider.pull_request_creations == []
+    assert pull_requests.records == []
+    assert plans.plans["plan-1"].status is PlanStatus.FAILED
+    assert plans.reason_codes[-1] == "no_effective_change"
+    assert set(plans.action_status.values()) == {ActionStatus.FAILED}
+    message, retryable = operations.failures[0]
+    assert message.startswith("no_effective_change") and retryable is False
+
+
+@pytest.mark.parametrize(
+    ("requests", "live", "no_op"),
+    [
+        ({"memory": "1Gi"}, (None, 1024 * 1024 * 1024), True),
+        ({"cpu": "0.5"}, (500, None), True),
+        ({"cpu": "500m", "memory": "1024Mi"}, (500, 1024 * 1024 * 1024), True),
+        ({"cpu": "500m", "memory": "512Mi"}, (500, 1024 * 1024 * 1024), False),
+        ({"cpu": "250m"}, (None, None), False),
+    ],
+)
+def test_effective_change_compares_normalized_quantities(requests, live, no_op):
+    plan = _plan()
+    action = plan.action.model_copy(
+        update={"operations": [SetContainerResources(container="api", resources=ContainerResources(requests=requests))]}
+    )
+    baseline = PreApplyWorkloadBaseline(
+        workload_uid="uid-api-1",
+        generation=7,
+        observed_generation=7,
+        container_requests={"api": {"cpu_millicores": live[0], "memory_bytes": live[1]}},
+    )
+    candidate = plan.model_copy(update={"action": action})
+    if no_op:
+        with pytest.raises(PlanWorkerError, match="no_effective_change") as error:
+            PlanWorker._ensure_effective_change(candidate, baseline)
+        assert error.value.reason_code == "no_effective_change"
+        assert error.value.plan_status is PlanStatus.FAILED and not error.value.retryable
+    else:
+        PlanWorker._ensure_effective_change(candidate, baseline)
+
+
+@pytest.mark.asyncio
+async def test_successful_pull_request_marks_the_provider_verified():
+    """The provider status left "unverified" forever after successful PRs (e2e defect)."""
+    worker, _, _, _, _ = _worker()
+
+    assert await worker.process_once("worker-1")
+
+    resolver = cast(FakeProviderResolver, worker.provider_resolver)
+    assert resolver.checks == [("github-main", "verified", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "error_code"),
+    [(401, "auth_failed"), (403, "permission_denied"), (500, None)],
+)
+async def test_rejected_credentials_mark_the_provider_in_error(status_code, error_code):
+    worker, _, _, _, _ = _worker(provider_error=GitProviderError("provider refused the token", status_code=status_code))
+
+    assert await worker.process_once("worker-1")
+
+    resolver = cast(FakeProviderResolver, worker.provider_resolver)
+    expected = [("github-main", "error", error_code)] if error_code else []
+    assert resolver.checks == expected

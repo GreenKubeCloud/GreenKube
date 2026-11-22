@@ -326,14 +326,17 @@ def _normalize_github_or_gitea(
     repository = _required_mapping(payload, "repository")
     head = _optional_mapping(pull_request, "head")
     base = _optional_mapping(pull_request, "base")
+    merged = _optional_boolean(pull_request, "merged", default=False)
+    merge_commit_sha = _optional_string(pull_request, "merge_commit_sha")
     return _make_event(
         provider_id=provider_id,
         delivery_id=delivery_id,
         repo=_required_string(repository, "full_name"),
         number=_required_positive_integer(pull_request, "number"),
         action=action,
-        merged=_optional_boolean(pull_request, "merged", default=False),
-        merge_commit_sha=_optional_string(pull_request, "merge_commit_sha"),
+        merged=merged,
+        # GitHub keeps a test-merge SHA on requests closed without merging (BUG-45).
+        merge_commit_sha=merge_commit_sha if merged else None,
         head_sha=_optional_string(head, "sha") if head is not None else None,
         base_sha=_optional_string(base, "sha") if base is not None else None,
         occurred_at=_first_present(
@@ -374,16 +377,18 @@ def _normalize_gitlab(
     merged_at = _optional_string(attributes, "merged_at")
     last_commit = _optional_mapping(attributes, "last_commit")
     diff_refs = _optional_mapping(attributes, "diff_refs")
+    merged = (
+        (isinstance(raw_action, str) and raw_action.casefold() == "merge") or state == "merged" or merged_at is not None
+    )
+    merge_commit_sha = _optional_string(attributes, "merge_commit_sha")
     return _make_event(
         provider_id=provider_id,
         delivery_id=delivery_id,
         repo=_required_string(project, "path_with_namespace"),
         number=_required_positive_integer(attributes, "iid"),
         action=action,
-        merged=(isinstance(raw_action, str) and raw_action.casefold() == "merge")
-        or state == "merged"
-        or merged_at is not None,
-        merge_commit_sha=_optional_string(attributes, "merge_commit_sha"),
+        merged=merged,
+        merge_commit_sha=merge_commit_sha if merged else None,
         head_sha=(
             _optional_string(last_commit, "id")
             if last_commit is not None

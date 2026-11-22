@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Sequence
 from typing import List, Optional
 from urllib.parse import quote, urlsplit
 
 from greenkube.automation.git.base import (
+    COMMENT_PAGE_SIZE,
+    CommitStatusState,
     GitCommitRequest,
     GitCommitResult,
     GitConflictError,
@@ -17,20 +20,37 @@ from greenkube.automation.git.base import (
     GitProviderCapability,
     GitProviderError,
     GitRepository,
+    GitTree,
+    GitTreeEntry,
+    PullRequestComment,
     PullRequestInfo,
     PullRequestOptions,
     _git_response_object,
     _validate_full_commit_sha,
+    _validate_git_path,
+    is_full_commit_sha,
     normalize_open_pull_request_branch_match,
     normalize_open_pull_request_match,
     normalize_pull_request,
+    normalize_terminal_pull_request_match,
+    parse_comment_id,
+    parse_comment_list,
     parse_pull_request_list,
     pull_request_next_page,
     quote_git_path,
     validate_git_ref,
 )
 
+_TREE_ENTRY_TYPES = frozenset({"blob", "commit"})
+
 logger = logging.getLogger(__name__)
+
+
+def _author_login(pull_request: PullRequestInfo) -> str | None:
+    """The login of the PR's author (GreenKube's identity), when the payload carries it."""
+    user = pull_request.raw.get("user") if isinstance(pull_request.raw, dict) else None
+    login = user.get("login") if isinstance(user, dict) else None
+    return login if isinstance(login, str) and login else None
 
 
 class GitHubProvider(GitProvider):
@@ -50,6 +70,10 @@ class GitHubProvider(GitProvider):
             GitProviderCapability.TEAM_REVIEWERS,
             GitProviderCapability.FIND_OPEN_PULL_REQUEST_FOR_BRANCH,
             GitProviderCapability.DELETE_PLAN_BRANCH,
+            GitProviderCapability.COMMIT_ANCESTRY,
+            GitProviderCapability.COMMIT_STATUS,
+            GitProviderCapability.PULL_REQUEST_COMMENTS,
+            GitProviderCapability.PULL_REQUEST_METADATA,
         }
     )
 
@@ -99,6 +123,76 @@ class GitHubProvider(GitProvider):
             raise GitProviderError(f"GitHub tree for {repo.full_name}@{ref} was truncated; refusing partial results.")
         return [item["path"] for item in tree if item.get("type") == "blob"]
 
+    async def get_tree(self, repo: GitRepository, ref: str) -> GitTree:
+        """Read the whole recursive tree in one call, independent of repository size."""
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/git/trees/{quote(ref, safe='/')}",
+            params={"recursive": "1"},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitHub tree for {repo.full_name}@{ref} was not found.", status_code=404)
+        data = _git_response_object(response, provider=self.name, ref=ref)
+        if data.get("truncated"):
+            raise GitProviderError(f"GitHub tree for {repo.full_name}@{ref} was truncated; refusing partial results.")
+        items = data.get("tree")
+        tree_sha = data.get("sha")
+        if not isinstance(items, list) or not isinstance(tree_sha, str) or not tree_sha:
+            raise GitProviderError(f"GitHub returned an invalid tree for {repo.full_name}@{ref}.")
+        entries: dict[str, GitTreeEntry] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                raise GitProviderError(f"GitHub returned an invalid tree entry for {repo.full_name}@{ref}.")
+            item_type = item.get("type")
+            if item_type == "tree":
+                continue
+            path, sha, mode = item.get("path"), item.get("sha"), item.get("mode")
+            if (
+                not isinstance(item_type, str)
+                or item_type not in _TREE_ENTRY_TYPES
+                or not isinstance(path, str)
+                or not isinstance(sha, str)
+                or not sha
+                or not isinstance(mode, str)
+                or path in entries
+            ):
+                raise GitProviderError(f"GitHub returned an invalid tree entry for {repo.full_name}@{ref}.")
+            entries[path] = GitTreeEntry(path=path, sha=sha, mode=mode, type=item_type)
+        return GitTree(entries=entries, sha=tree_sha)
+
+    async def get_blob_ids(self, repo: GitRepository, ref: str, paths: Sequence[str]) -> dict[str, Optional[str]]:
+        """Resolve blob IDs from one (cached) recursive tree instead of per-file reads."""
+        for path in paths:
+            _validate_git_path(path)
+        if not paths:
+            return {}
+        tree = await self._get_tree_cached(repo, ref)
+        blob_ids: dict[str, Optional[str]] = {}
+        for path in paths:
+            entry = tree.entries.get(path)
+            blob_ids[path] = entry.sha if entry is not None and entry.type == "blob" else None
+        return blob_ids
+
+    async def is_ancestor(self, repo: GitRepository, ancestor_sha: str, descendant_sha: str) -> Optional[bool]:
+        ancestor, descendant = self._validate_ancestry_request(repo, ancestor_sha, descendant_sha)
+        if ancestor == descendant:
+            return True
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/compare/{ancestor}...{descendant}",
+            params={"per_page": "1"},
+        )
+        if response.status_code == 404:
+            return None
+        data = _git_response_object(response, provider=self.name, ref=f"{ancestor}...{descendant}")
+        status = data.get("status")
+        behind_by = data.get("behind_by")
+        if status in ("identical", "ahead"):
+            return behind_by in (None, 0)
+        if status in ("behind", "diverged"):
+            return False
+        return None
+
     async def get_archive(self, repo: GitRepository, revision: str, *, max_bytes: int) -> bytes:
         revision = self._validate_archive_request(repo, revision, max_bytes)
         parsed_base = urlsplit(self.api_base_url)
@@ -119,47 +213,33 @@ class GitHubProvider(GitProvider):
 
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
         branch = validate_git_ref(branch, field="branch name")
-        from_ref = validate_git_ref(from_ref, field="base branch")
-        ref_response = await self._request(
-            "GET", f"/repos/{repo.owner}/{repo.name}/git/ref/heads/{quote(from_ref, safe='/')}"
-        )
-        if ref_response.status_code == 404:
-            raise GitProviderError(f"Base branch '{from_ref}' not found in {repo.full_name}.")
-        sha = ref_response.json()["object"]["sha"]
+        if is_full_commit_sha(from_ref):
+            # A plan branch starts at the exact commit the plan was validated on, never at a
+            # branch head that may have moved since.
+            sha = from_ref
+        else:
+            from_ref = validate_git_ref(from_ref, field="base branch")
+            ref_response = await self._request(
+                "GET", f"/repos/{repo.owner}/{repo.name}/git/ref/heads/{quote(from_ref, safe='/')}"
+            )
+            if ref_response.status_code == 404:
+                raise GitProviderError(f"Base branch '{from_ref}' not found in {repo.full_name}.")
+            sha = ref_response.json()["object"]["sha"]
 
+        # Create first: an existing ref answers 422, so the common case costs one write.
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/git/refs",
+            json_body={"ref": f"refs/heads/{branch}", "sha": sha},
+            ok_statuses=(200, 201, 422),
+        )
+        if response.status_code != 422:
+            return
         exists = await self._request("GET", f"/repos/{repo.owner}/{repo.name}/git/ref/heads/{quote(branch, safe='/')}")
         if exists.status_code == 200:
             logger.info("Branch %s already exists in %s; reusing it.", branch, repo.full_name)
             return
-
-        await self._request(
-            "POST",
-            f"/repos/{repo.owner}/{repo.name}/git/refs",
-            json_body={"ref": f"refs/heads/{branch}", "sha": sha},
-        )
-
-    async def update_file(
-        self,
-        repo: GitRepository,
-        path: str,
-        content: str,
-        message: str,
-        branch: str,
-        sha: Optional[str] = None,
-    ) -> None:
-        body = {
-            "message": message,
-            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-            "branch": branch,
-            "committer": {"name": self.author_name, "email": self.author_email},
-        }
-        if sha:
-            body["sha"] = sha
-        await self._request(
-            "PUT",
-            f"/repos/{repo.owner}/{repo.name}/contents/{quote_git_path(path)}",
-            json_body=body,
-        )
+        raise GitProviderError(f"GitHub could not create branch '{branch}' in {repo.full_name}.", status_code=422)
 
     async def _branch_head_sha(self, repo: GitRepository, branch: str) -> str:
         response = await self._request(
@@ -228,20 +308,25 @@ class GitHubProvider(GitProvider):
         if current_head != base_revision:
             raise GitConflictError(f"Branch '{branch}' moved from base revision {base_revision} to {current_head}.")
 
-        base_commit = await self._request(
-            "GET",
-            f"/repos/{repo.owner}/{repo.name}/git/commits/{quote(base_revision, safe='')}",
-            conflict_statuses=(404,),
-        )
-        commit_data = base_commit.json()
-        base_tree_sha = commit_data.get("tree", {}).get("sha") if isinstance(commit_data, dict) else None
+        # One recursive tree read (shared with branch-state checks through the
+        # immutable cache) yields the base tree SHA and every precondition, so
+        # the commit costs O(1) reads instead of one Contents call per file.
+        base_tree = await self._get_tree_cached(repo, base_revision)
+        base_tree_sha = base_tree.sha
         if not isinstance(base_tree_sha, str) or not base_tree_sha:
             raise GitProviderError(f"GitHub returned an invalid base tree for {repo.full_name}@{base_revision}.")
-
-        await self._validate_commit_edits(request)
+        for edit in request.files:
+            existing = base_tree.entries.get(edit.path)
+            exists = existing is not None and existing.type == "blob"
+            if edit.action == "create" and existing is not None:
+                raise GitConflictError(f"Cannot create '{edit.path}': the file already exists at the base revision.")
+            if edit.action != "create" and not exists:
+                raise GitConflictError(f"Cannot {edit.action} '{edit.path}': the file is missing at the base revision.")
         tree_entries = []
         for edit in request.files:
-            entry: dict[str, str | None] = {"path": edit.path, "mode": "100644", "type": "blob"}
+            base_entry = base_tree.entries.get(edit.path)
+            mode = base_entry.mode if base_entry is not None and base_entry.mode in ("100644", "100755") else "100644"
+            entry: dict[str, str | None] = {"path": edit.path, "mode": mode, "type": "blob"}
             if edit.action == "delete":
                 entry["sha"] = None
             else:
@@ -261,17 +346,21 @@ class GitHubProvider(GitProvider):
         if not isinstance(new_tree_sha, str) or not new_tree_sha:
             raise GitProviderError("GitHub returned an invalid tree after creating the atomic commit plan.")
 
-        author = {"name": request.author_name, "email": request.author_email}
+        commit_body: dict[str, object] = {
+            "message": request.message,
+            "tree": new_tree_sha,
+            "parents": [base_revision],
+        }
+        if not self.platform_signed_commits:
+            author = {"name": request.author_name, "email": request.author_email}
+            commit_body["author"] = author
+            commit_body["committer"] = author
+        # A GitHub App commit without author and committer is created and signed by GitHub
+        # as the App's bot, so it shows as Verified (J8).
         commit_response = await self._request(
             "POST",
             f"/repos/{repo.owner}/{repo.name}/git/commits",
-            json_body={
-                "message": request.message,
-                "tree": new_tree_sha,
-                "parents": [base_revision],
-                "author": author,
-                "committer": author,
-            },
+            json_body=commit_body,
             retryable=False,
         )
         new_commit = commit_response.json()
@@ -289,10 +378,15 @@ class GitHubProvider(GitProvider):
             conflict_statuses=(404, 409, 422),
             retryable=False,
         )
+        verification = new_commit.get("verification") if isinstance(new_commit, dict) else None
+        verified = verification.get("verified") if isinstance(verification, dict) else None
+        reason = verification.get("reason") if isinstance(verification, dict) else None
         return GitCommitResult(
             commit_sha=commit_sha,
             branch=branch,
             files_changed=[edit.path for edit in request.files],
+            verified=verified if isinstance(verified, bool) else None,
+            verification_reason=reason if isinstance(reason, str) else None,
         )
 
     async def create_pull_request(
@@ -349,26 +443,46 @@ class GitHubProvider(GitProvider):
             if response.status_code == 404:
                 raise GitProviderError("GitHub could not mark the existing pull request ready for review.")
         if selected_options.labels:
-            response = await self._request(
-                "POST",
-                f"/repos/{repo.owner}/{repo.name}/issues/{pull_request.number}/labels",
-                json_body={"labels": list(selected_options.labels)},
-            )
-            if response.status_code == 404:
-                raise GitProviderError("GitHub could not apply configured labels to the pull request.")
-        if not selected_options.reviewers and not selected_options.team_reviewers:
-            return
+            await self._add_labels(repo, pull_request.number, selected_options.labels)
+        await self._request_reviewers(
+            repo,
+            pull_request.number,
+            selected_options.reviewers,
+            selected_options.team_reviewers,
+            author=_author_login(pull_request),
+        )
 
+    async def _add_labels(self, repo: GitRepository, number: int, labels: Sequence[str]) -> None:
+        # The issues API creates labels that do not exist yet (J2).
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/issues/{number}/labels",
+            json_body={"labels": list(labels)},
+        )
+        if response.status_code == 404:
+            raise GitProviderError("GitHub could not apply configured labels to the pull request.")
+
+    async def _request_reviewers(
+        self,
+        repo: GitRepository,
+        number: int,
+        requested_users: Sequence[str],
+        requested_teams: Sequence[str],
+        *,
+        author: str | None = None,
+    ) -> None:
+        if not requested_users and not requested_teams:
+            return
         response = await self._request(
             "GET",
-            f"/repos/{repo.owner}/{repo.name}/pulls/{pull_request.number}/requested_reviewers",
+            f"/repos/{repo.owner}/{repo.name}/pulls/{number}/requested_reviewers",
         )
         if response.status_code == 404:
             raise GitProviderError("GitHub could not read requested reviewers for the pull request.")
         data = _git_response_object(
             response,
             provider=self.name,
-            ref=f"pull request {pull_request.number} reviewers",
+            ref=f"pull request {number} reviewers",
         )
         users = data.get("users", [])
         teams = data.get("teams", [])
@@ -383,16 +497,118 @@ class GitHubProvider(GitProvider):
         if len(existing_users) != len(users) or len(existing_teams) != len(teams):
             raise GitProviderError("GitHub returned an invalid requested-reviewers response.")
 
-        reviewers = [name for name in selected_options.reviewers if name.casefold() not in existing_users]
-        team_reviewers = [name for name in selected_options.team_reviewers if name.casefold() not in existing_teams]
-        if reviewers or team_reviewers:
-            response = await self._request(
-                "POST",
-                f"/repos/{repo.owner}/{repo.name}/pulls/{pull_request.number}/requested_reviewers",
-                json_body={"reviewers": reviewers, "team_reviewers": team_reviewers},
-            )
-            if response.status_code == 404:
-                raise GitProviderError("GitHub could not request configured pull-request reviewers.")
+        # GitHub refuses a review request from the PR's own author (GreenKube's identity).
+        skipped = {author.casefold()} if author else set()
+        reviewers = [name for name in requested_users if name.casefold() not in existing_users | skipped]
+        team_reviewers = [name for name in requested_teams if name.casefold() not in existing_teams]
+        if not reviewers and not team_reviewers:
+            return
+        try:
+            await self._post_reviewers(repo, number, reviewers, team_reviewers)
+            return
+        except GitProviderError as error:
+            if error.status_code != 422 or len(reviewers) + len(team_reviewers) < 2:
+                raise
+        # One unknown, departed or non-collaborator login makes GitHub refuse the whole
+        # request (422); request each reviewer alone so the valid ones are still asked.
+        refused: list[str] = []
+        for users, teams in [*(([name], []) for name in reviewers), *(([], [name]) for name in team_reviewers)]:
+            try:
+                await self._post_reviewers(repo, number, users, teams)
+            except GitProviderError as error:
+                if error.status_code != 422:
+                    raise
+                refused.extend(users or [f"team {name}" for name in teams])
+        if refused:
+            raise GitProviderError(f"GitHub refused review requests for: {', '.join(refused)}.", status_code=422)
+
+    async def _post_reviewers(
+        self, repo: GitRepository, number: int, reviewers: Sequence[str], team_reviewers: Sequence[str]
+    ) -> None:
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/pulls/{number}/requested_reviewers",
+            json_body={"reviewers": list(reviewers), "team_reviewers": list(team_reviewers)},
+        )
+        if response.status_code == 404:
+            raise GitProviderError("GitHub could not request configured pull-request reviewers.")
+
+    def _open_pull_requests_query(self, repo: GitRepository, base: str, limit: int) -> tuple[str, dict[str, str]]:
+        return (
+            f"/repos/{repo.owner}/{repo.name}/pulls",
+            {"state": "open", "base": base, "sort": "created", "direction": "desc", "per_page": str(limit)},
+        )
+
+    def _pull_request_commits_path(self, repo: GitRepository, number: int) -> str:
+        return f"/repos/{repo.owner}/{repo.name}/pulls/{number}/commits"
+
+    async def add_pull_request_metadata(
+        self,
+        repo: GitRepository,
+        pull_request: PullRequestInfo,
+        *,
+        labels: Sequence[str] = (),
+        reviewers: Sequence[str] = (),
+        team_reviewers: Sequence[str] = (),
+    ) -> None:
+        number = self._validate_pull_request_number(repo, pull_request.number)
+        if labels:
+            await self._add_labels(repo, number, labels)
+        await self._request_reviewers(repo, number, reviewers, team_reviewers, author=_author_login(pull_request))
+
+    async def set_commit_status(
+        self,
+        repo: GitRepository,
+        sha: str,
+        *,
+        state: CommitStatusState,
+        context: str,
+        description: str,
+        target_url: Optional[str] = None,
+    ) -> None:
+        sha = self._validate_commit_status(repo, sha, state, context)
+        payload: dict[str, str] = {"state": state, "context": context, "description": description[:140]}
+        if target_url:
+            payload["target_url"] = target_url
+        response = await self._request(
+            "POST", f"/repos/{repo.owner}/{repo.name}/statuses/{quote(sha, safe='')}", json_body=payload
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitHub could not set a commit status on {sha} in {repo.full_name}.")
+
+    async def _list_pull_request_comments(
+        self, repo: GitRepository, number: int, page: int
+    ) -> tuple[list[PullRequestComment], bool]:
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/issues/{number}/comments",
+            params={"per_page": str(COMMENT_PAGE_SIZE), "page": str(page)},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitHub could not list comments of pull request {number}.")
+        comments = parse_comment_list(response, provider=self.name)
+        has_next = pull_request_next_page(response, repo=repo, current_page=page) is not None or (
+            "next" not in response.links and len(comments) >= COMMENT_PAGE_SIZE
+        )
+        return comments, has_next
+
+    async def _create_pull_request_comment(self, repo: GitRepository, number: int, body: str) -> int:
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/issues/{number}/comments",
+            json_body={"body": body},
+            retryable=False,
+        )
+        return parse_comment_id(response, provider=self.name)
+
+    async def _update_pull_request_comment(self, repo: GitRepository, number: int, comment_id: int, body: str) -> None:
+        response = await self._request(
+            "PATCH",
+            f"/repos/{repo.owner}/{repo.name}/issues/comments/{comment_id}",
+            json_body={"body": body},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitHub comment {comment_id} disappeared before it could be updated.")
 
     async def get_pull_request(self, repo: GitRepository, number: int) -> PullRequestInfo:
         if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
@@ -446,6 +662,42 @@ class GitHubProvider(GitProvider):
             else:
                 page += 1
         raise GitProviderError("GitHub pull-request pagination exceeded the safety limit.")
+
+    async def find_terminal_pull_request(self, repo: GitRepository, head: str, base: str) -> Optional[PullRequestInfo]:
+        """The most recently updated merged or closed request from ``head`` into ``base`` (D10)."""
+        if repo.provider != self.name:
+            raise GitProviderError(f"Pull-request lookup targets provider '{repo.provider}', not '{self.name}'.")
+        head = validate_git_ref(head, field="branch name")
+        base = validate_git_ref(base, field="base branch")
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/pulls",
+            params={
+                "state": "closed",
+                "head": f"{repo.owner}:{head}",
+                "base": base,
+                "sort": "updated",
+                "direction": "desc",
+                "per_page": "100",
+            },
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"Could not list pull requests in {repo.full_name}: repository not found.")
+        for item in parse_pull_request_list(response, repo=repo):
+            pull_request_head = item.get("head")
+            pull_request_base = item.get("base")
+            match = normalize_terminal_pull_request_match(
+                item,
+                repo=repo,
+                head=head,
+                base=base,
+                provider_head=pull_request_head.get("ref") if isinstance(pull_request_head, dict) else None,
+                provider_base=pull_request_base.get("ref") if isinstance(pull_request_base, dict) else None,
+                open_states=("open",),
+            )
+            if match is not None:
+                return match
+        return None
 
     async def find_open_pull_request_for_branch(
         self,

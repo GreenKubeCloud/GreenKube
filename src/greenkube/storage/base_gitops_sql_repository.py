@@ -18,6 +18,7 @@ from greenkube.gitops.contracts import (
     configured_binding_ttl,
     sanitize_repository_url,
 )
+from greenkube.models.metrics import RecommendationEventType
 from greenkube.storage.base_gitops_repository import (
     MAX_PULL_REQUEST_POLLING_LEASE_SECONDS,
     MAX_WORKLOAD_BINDING_CANDIDATES,
@@ -35,11 +36,14 @@ from greenkube.storage.base_gitops_repository import (
     WorkloadBindingEvent,
     WorkloadBindingEventType,
     WorkloadBindingPage,
+    WorkloadPlanConflictError,
+    WorkloadPlanGuard,
     _binding_identity_cursor,
     _binding_identity_from_cursor,
     _validate_binding_page,
     freshen_workload_binding,
     freshen_workload_source,
+    workload_identity,
 )
 from greenkube.storage.gitops_mapper import (
     PLAN_PRE_APPLY_BASELINE_POLICY_KEY,
@@ -47,6 +51,7 @@ from greenkube.storage.gitops_mapper import (
     datetime_value,
     json_text,
     json_value,
+    pruned_file_plan_summary_payload,
     row_to_automation_plan_record,
     row_to_gitops_provider,
     row_to_webhook_delivery,
@@ -56,6 +61,28 @@ from greenkube.storage.gitops_mapper import (
     row_to_workload_source,
 )
 from greenkube.storage.unit_of_work import UnitOfWork
+from greenkube.utils.time import ensure_utc
+
+_PRUNE_BATCH_SIZE = 100
+_PLAN_HYDRATION_BATCH_SIZE = 500
+_MAX_PLAN_LIST_LIMIT = 10_000
+
+#: Provider states written after a real provider call (``unverified`` until the first one).
+PROVIDER_CHECK_STATUSES = frozenset({"verified", "error"})
+
+#: Action states in which a pull request for the recommendation is open, or
+#: merged and not yet observed in the cluster: the recommendation is ``pr_open``.
+_PR_IN_FLIGHT_ACTION_STATUSES = frozenset({ActionStatus.PR_OPEN, ActionStatus.MERGED, ActionStatus.SYNC_PENDING})
+#: Action states that release a ``pr_open`` recommendation back to ``active``
+#: (PR closed unmerged, failed or the plan cleared).
+_PR_RELEASED_ACTION_STATUSES = frozenset(
+    {ActionStatus.NONE, ActionStatus.GROUPED, ActionStatus.PLAN_READY, ActionStatus.CLOSED, ActionStatus.FAILED}
+)
+
+
+def _validate_list_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_PLAN_LIST_LIMIT:
+        raise ValueError(f"plan list limit must be an integer between 1 and {_MAX_PLAN_LIST_LIMIT}")
 
 
 class _BindingGenerationConflict(RuntimeError):
@@ -303,6 +330,106 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             assert row is not None
             return row_to_gitops_provider(row)
 
+    async def record_provider_check(
+        self,
+        provider_id: str,
+        status: str,
+        *,
+        error_code: str | None = None,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        """Record the outcome of a real provider call without touching its configuration.
+
+        ``status`` is ``verified`` after a successful authenticated call and
+        ``error`` (with ``error_code``) after an authentication or permission
+        failure. Returns whether an enabled provider row was updated.
+        """
+        if status not in PROVIDER_CHECK_STATUSES:
+            raise ValueError(f"unsupported provider check status {status!r}")
+        checked = ensure_utc(checked_at) if checked_at is not None else datetime.now(timezone.utc)
+        async with self._transaction() as connection:
+            updated = await self._execute(
+                connection,
+                """
+                UPDATE gitops_providers
+                SET status = ?, last_checked_at = ?, last_error_code = ?, updated_at = ?
+                WHERE id = ? AND enabled = ?
+                """,
+                (
+                    status,
+                    self._db_datetime(checked),
+                    error_code if status != "verified" else None,
+                    self._db_datetime(checked),
+                    provider_id,
+                    True,
+                ),
+            )
+        return bool(updated)
+
+    async def record_provider_feature_note(
+        self,
+        provider_id: str,
+        feature: str,
+        error_code: str | None,
+        *,
+        observed_at: datetime | None = None,
+    ) -> None:
+        """Record (``error_code``) or clear (``None``) a degraded best-effort feature of a provider.
+
+        A refused label, reviewer, comment or commit-status call keeps the provider
+        ``verified``; the feature is noted here until a call of it succeeds again.
+        """
+        if not feature.strip():
+            raise ValueError("feature must not be blank")
+        async with self._transaction() as connection:
+            if error_code is None:
+                await self._execute(
+                    connection,
+                    "DELETE FROM gitops_provider_feature_notes WHERE provider_id = ? AND feature = ?",
+                    (provider_id, feature),
+                )
+                return
+            exists = await self._fetchrow(connection, "SELECT id FROM gitops_providers WHERE id = ?", (provider_id,))
+            if exists is None:
+                return
+            observed = ensure_utc(observed_at) if observed_at is not None else datetime.now(timezone.utc)
+            await self._execute(
+                connection,
+                """
+                INSERT INTO gitops_provider_feature_notes (provider_id, feature, error_code, observed_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (provider_id, feature) DO UPDATE SET
+                    error_code = excluded.error_code,
+                    observed_at = excluded.observed_at
+                """,
+                (provider_id, feature, error_code, self._db_datetime(observed)),
+            )
+
+    async def list_provider_feature_notes(self, provider_id: str | None = None) -> list[dict[str, Any]]:
+        """Degraded best-effort features, as ``{provider_id, feature, error_code, observed_at}``."""
+        query = "SELECT provider_id, feature, error_code, observed_at FROM gitops_provider_feature_notes"
+        params: tuple[Any, ...] = ()
+        if provider_id is not None:
+            query += " WHERE provider_id = ?"
+            params = (provider_id,)
+        query += " ORDER BY provider_id, feature"
+        async with self.db_manager.connection_scope() as connection:
+            rows = await self._fetch(connection, query, params)
+        notes = []
+        for row in rows:
+            observed = row["observed_at"]
+            if isinstance(observed, str):
+                observed = datetime.fromisoformat(observed)
+            notes.append(
+                {
+                    "provider_id": str(row["provider_id"]),
+                    "feature": str(row["feature"]),
+                    "error_code": str(row["error_code"]),
+                    "observed_at": ensure_utc(observed) if isinstance(observed, datetime) else None,
+                }
+            )
+        return notes
+
     async def get_provider_config(self, provider_id: str) -> GitOpsProviderConfig | None:
         async with self.db_manager.connection_scope() as connection:
             row = await self._fetchrow(connection, "SELECT * FROM gitops_providers WHERE id = ?", (provider_id,))
@@ -323,7 +450,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         if not repository_pattern.strip():
             raise ValueError("repository pattern must not be blank")
         async with self._transaction() as connection:
-            await self._execute(
+            inserted = await self._execute(
                 connection,
                 """
                 INSERT INTO gitops_provider_allowlists (provider_id, repository_pattern)
@@ -332,6 +459,18 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 """,
                 (provider_id, repository_pattern),
             )
+            if inserted:
+                # A widened allowlist may cover detached pull-request records again: make
+                # them due now instead of waiting out their backoff. The next poll either
+                # reattaches them or detaches them again silently.
+                await self._execute(
+                    connection,
+                    """
+                    UPDATE recommendation_pull_requests SET provider_retry_at = NULL
+                    WHERE provider_id = ? AND provider_detached_reason IS NOT NULL
+                    """,
+                    (provider_id,),
+                )
 
     async def list_provider_allowlists(self, provider_id: str) -> list[str]:
         async with self.db_manager.connection_scope() as connection:
@@ -449,7 +588,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         """
 
     def _workload_binding_freshness_parameters(self, now: datetime) -> tuple[Any, Any, Any, Any]:
-        current = _as_utc(now)
+        current = ensure_utc(now)
         ttl = configured_binding_ttl()
         return (
             self._db_datetime(current),
@@ -806,11 +945,11 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         ):
             raise ValueError("manual binding source generation does not match its audit event")
 
-        observed_now = _as_utc(now)
+        observed_now = ensure_utc(now)
         if (
             binding.source.expires_at is None
-            or _as_utc(binding.source.expires_at) <= observed_now
-            or _as_utc(binding.source.expires_at) > observed_now + configured_binding_ttl()
+            or ensure_utc(binding.source.expires_at) <= observed_now
+            or ensure_utc(binding.source.expires_at) > observed_now + configured_binding_ttl()
         ):
             raise ValueError("manual binding expiry must be bounded by the binding TTL")
         async with self._serialized_transaction() as connection:
@@ -849,8 +988,8 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 or candidate.provider_id == "unresolved"
                 or candidate.repo_url == "unresolved"
                 or binding_candidate_generation_token(candidate) != expected_generation_token
-                or (candidate.expires_at is not None and _as_utc(candidate.expires_at) <= observed_now)
-                or observed_now - _as_utc(candidate.observed_at) >= configured_binding_ttl()
+                or (candidate.expires_at is not None and ensure_utc(candidate.expires_at) <= observed_now)
+                or observed_now - ensure_utc(candidate.observed_at) >= configured_binding_ttl()
             ):
                 raise WorkloadBindingConflictError("workload binding candidate generation changed")
             await self._save_workload_binding_on_connection(connection, binding)
@@ -1064,7 +1203,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         )
         if selected_statuses is not None and not selected_statuses:
             return WorkloadBindingPage((), None, False)
-        current_at = _as_utc(now or datetime.now(timezone.utc))
+        current_at = ensure_utc(now or datetime.now(timezone.utc))
         clauses: list[str] = []
         params: list[Any] = list(self._workload_binding_freshness_parameters(current_at))
         if cluster is not None:
@@ -1126,7 +1265,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         cluster: str | None = None,
         now: datetime | None = None,
     ) -> WorkloadBindingCoverage:
-        current_at = _as_utc(now or datetime.now(timezone.utc))
+        current_at = ensure_utc(now or datetime.now(timezone.utc))
         status_expression = self._workload_binding_status_expression("b")
         clauses: list[str] = []
         params: list[Any] = list(self._workload_binding_freshness_parameters(current_at))
@@ -1180,6 +1319,66 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         actor: str = "system",
     ) -> Plan:
         return await self._save_plan(plan, policy_result=policy_result, insert_only=True, actor=actor)
+
+    async def save_plan_if_workload_idle(
+        self,
+        plan: Plan,
+        guard: WorkloadPlanGuard,
+        *,
+        policy_result: dict[str, Any] | None = None,
+        actor: str = "system",
+    ) -> Plan:
+        return await self._save_plan(plan, policy_result=policy_result, insert_only=True, actor=actor, guard=guard)
+
+    async def _lock_workload(self, connection: Any, identity: tuple[str, str, str, str]) -> None:
+        """Serialize plan writes of one workload until the transaction ends.
+
+        SQLite transactions are already serialized by the database manager's operation
+        lock; PostgreSQL takes a transaction-scoped advisory lock on the workload identity.
+        """
+        if not self._postgres:
+            return
+        key = "greenkube-plan-workload:" + "/".join(identity)
+        await self._fetchrow(connection, "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", (key,))
+
+    async def _raise_if_workload_busy_on_connection(
+        self,
+        connection: Any,
+        plan_id: str,
+        identity: tuple[str, str, str, str],
+        guard: WorkloadPlanGuard,
+    ) -> None:
+        statuses = sorted(guard.blocking_statuses, key=lambda status: status.value)
+        if not statuses:
+            return
+        if self._postgres:
+            identity_columns = (
+                "source_snapshot->>'cluster'",
+                "source_snapshot->>'namespace'",
+                "source_snapshot->>'workload_kind'",
+                "source_snapshot->>'workload_name'",
+            )
+        else:
+            identity_columns = (
+                "json_extract(source_snapshot, '$.cluster')",
+                "json_extract(source_snapshot, '$.namespace')",
+                "json_extract(source_snapshot, '$.workload_kind')",
+                "json_extract(source_snapshot, '$.workload_name')",
+            )
+        clauses = [f"{column} = ?" for column in identity_columns]
+        clauses.append(f"status IN ({', '.join('?' for _ in statuses)})")
+        clauses.append("plan_id <> ?")
+        rows = await self._fetch(
+            connection,
+            "SELECT plan_id, status FROM automation_plans WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY created_at, plan_id",
+            [*identity, *(status.value for status in statuses), plan_id],
+        )
+        for row in rows:
+            status = PlanStatus(str(row["status"]))
+            if guard.blocks(str(row["plan_id"]), status):
+                raise WorkloadPlanConflictError(str(row["plan_id"]), status)
 
     async def set_plan_policy_result(
         self,
@@ -1265,14 +1464,18 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         policy_result: dict[str, Any] | None,
         insert_only: bool,
         actor: str,
+        guard: WorkloadPlanGuard | None = None,
     ) -> Plan:
         actor = _validated_audit_actor(actor)
         file_plan = plan.file_plan
+        file_summary = plan.file_plan_summary
         if file_plan is not None and plan.digest is not None and plan.digest != file_plan.digest:
             raise ValueError("plan digest must match its file plan digest")
-        digest = plan.digest if plan.digest is not None else (file_plan.digest if file_plan is not None else None)
-        validation = file_plan.validation.model_dump(mode="json") if file_plan is not None else {}
-        warnings = file_plan.warnings if file_plan is not None else []
+        rendered = file_plan if file_plan is not None else file_summary
+        digest = plan.digest if plan.digest is not None else (rendered.digest if rendered is not None else None)
+        validation = rendered.validation.model_dump(mode="json") if rendered is not None else {}
+        warnings = rendered.warnings if rendered is not None else []
+        summary_json = json_text(file_summary.model_dump(mode="json")) if file_summary is not None else None
         safe_source = plan.source.model_copy(update={"repo_url": sanitize_repository_url(plan.source.repo_url)})
         source_snapshot = safe_source.model_dump(mode="json")
         action_json = plan.action.model_dump(mode="json")
@@ -1297,18 +1500,26 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 validation = excluded.validation,
                 warnings = excluded.warnings,
                 policy_result = excluded.policy_result,
+                file_plan_summary = excluded.file_plan_summary,
+                committed_on_revision = excluded.committed_on_revision,
                 status = excluded.status,
                 expires_at = excluded.expires_at,
                 updated_at = excluded.updated_at
             """
         )
         async with self._transaction() as connection:
+            if guard is not None:
+                await self._lock_workload(connection, workload_identity(plan.source))
             row_lock = " FOR UPDATE" if self._postgres else ""
             existing_row = await self._fetchrow(
                 connection,
                 f"SELECT policy_result FROM automation_plans WHERE plan_id = ?{row_lock}",
                 (plan.plan_id,),
             )
+            if guard is not None and existing_row is None:
+                await self._raise_if_workload_busy_on_connection(
+                    connection, plan.plan_id, workload_identity(plan.source), guard
+                )
             policy_payload = dict(policy_result) if policy_result is not None else dict(plan.policy_result)
             if existing_row is not None:
                 existing_policy = json_value(existing_row["policy_result"], {})
@@ -1335,8 +1546,9 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 INSERT INTO automation_plans
                     (plan_id, source_id, provider_id, source_snapshot, action_json, change_set_id,
                      rollback_of_plan_id, base_revision, source_revision, renderer, diff, rendered_diff,
-                     digest, validation, warnings, policy_result, status, expires_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     digest, validation, warnings, policy_result, status, expires_at, created_at, updated_at,
+                     file_plan_summary, committed_on_revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 {conflict_clause}
                 """,
                 (
@@ -1347,9 +1559,9 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                     json_text(action_json),
                     plan.change_set_id,
                     plan.rollback_of_plan_id,
-                    file_plan.base_revision if file_plan is not None else None,
-                    file_plan.source_revision if file_plan is not None else None,
-                    file_plan.renderer.value if file_plan is not None else None,
+                    rendered.base_revision if rendered is not None else None,
+                    rendered.source_revision if rendered is not None else None,
+                    rendered.renderer.value if rendered is not None else None,
                     file_plan.diff if file_plan is not None else None,
                     file_plan.rendered_diff if file_plan is not None else None,
                     digest,
@@ -1360,8 +1572,10 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                     self._db_datetime(plan.expires_at),
                     self._db_datetime(plan.created_at),
                     self._db_datetime(now),
+                    summary_json,
+                    plan.committed_on_revision,
                 ),
-                json_positions=(4, 5, 14, 15, 16),
+                json_positions=(4, 5, 14, 15, 16, 21),
             )
             if not insert_only or inserted:
                 await self._execute(
@@ -1471,6 +1685,68 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                     return record.plan if record is not None else None
         raise RuntimeError("could not persist the immutable pre-apply workload baseline after concurrent updates")
 
+    async def set_plan_committed_on_revision(
+        self,
+        plan_id: str,
+        revision: str,
+        *,
+        expected_digest: str | None,
+    ) -> Plan | None:
+        """Record the moved branch head a plan is committed on, separately from its base (D7)."""
+        if not isinstance(revision, str) or not revision.strip():
+            raise ValueError("committed_on_revision must be a non-blank revision")
+        async with self._transaction() as connection:
+            updated = await self._execute(
+                connection,
+                f"""
+                UPDATE automation_plans
+                SET committed_on_revision = ?, updated_at = {self._now_expression}
+                WHERE plan_id = ? AND digest IS NOT DISTINCT FROM ?
+                """
+                if self._postgres
+                else f"""
+                UPDATE automation_plans
+                SET committed_on_revision = ?, updated_at = {self._now_expression}
+                WHERE plan_id = ? AND digest IS ?
+                """,
+                (revision, plan_id, expected_digest),
+            )
+            if not updated:
+                return None
+            record = await self._get_plan_record_on_connection(connection, plan_id)
+            return record.plan if record is not None else None
+
+    async def set_plan_delivery_mode(
+        self,
+        plan_id: str,
+        delivery_mode: str,
+        *,
+        expected_digest: str | None,
+        expected_statuses: Sequence[PlanStatus],
+    ) -> Plan | None:
+        """Record how an approved plan is delivered (F4), guarded by its digest and status."""
+        if delivery_mode not in ("direct", "patch", "ci"):
+            raise ValueError("delivery_mode must be direct, patch or ci")
+        statuses = tuple(dict.fromkeys(expected_statuses))
+        if not statuses:
+            raise ValueError("expected_statuses must not be empty")
+        placeholders = ", ".join("?" for _ in statuses)
+        digest_clause = "digest IS NOT DISTINCT FROM ?" if self._postgres else "digest IS ?"
+        async with self._transaction() as connection:
+            updated = await self._execute(
+                connection,
+                f"""
+                UPDATE automation_plans
+                SET delivery_mode = ?, updated_at = {self._now_expression}
+                WHERE plan_id = ? AND {digest_clause} AND status IN ({placeholders})
+                """,
+                (delivery_mode, plan_id, expected_digest, *(status.value for status in statuses)),
+            )
+            if not updated:
+                return None
+            record = await self._get_plan_record_on_connection(connection, plan_id)
+            return record.plan if record is not None else None
+
     async def _get_plan_record_on_connection(self, connection: Any, plan_id: str) -> AutomationPlanRecord | None:
         row = await self._fetchrow(connection, "SELECT * FROM automation_plans WHERE plan_id = ?", (plan_id,))
         if row is None:
@@ -1502,7 +1778,49 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         record = await self.get_plan_record(plan_id)
         return record.plan if record is not None else None
 
-    async def list_plans(self, *, status: PlanStatus | None = None, source_id: str | None = None) -> list[Plan]:
+    async def _plan_records_from_rows(self, connection: Any, rows: Sequence[Any]) -> list[AutomationPlanRecord]:
+        """Hydrate plan rows with two batched queries instead of two per plan (D15, BUG-57)."""
+        if not rows:
+            return []
+        plan_ids = [str(row["plan_id"]) for row in rows]
+        files_by_plan: dict[str, list[Any]] = {}
+        recommendations_by_plan: dict[str, list[int]] = {}
+        for start in range(0, len(plan_ids), _PLAN_HYDRATION_BATCH_SIZE):
+            chunk = plan_ids[start : start + _PLAN_HYDRATION_BATCH_SIZE]
+            placeholders = ", ".join("?" for _ in chunk)
+            for file_row in await self._fetch(
+                connection,
+                f"SELECT * FROM automation_plan_files WHERE plan_id IN ({placeholders}) ORDER BY plan_id, id",
+                chunk,
+            ):
+                files_by_plan.setdefault(str(file_row["plan_id"]), []).append(file_row)
+            for link_row in await self._fetch(
+                connection,
+                f"""
+                SELECT plan_id, recommendation_id FROM automation_plan_recommendations
+                WHERE plan_id IN ({placeholders}) ORDER BY plan_id, recommendation_id
+                """,
+                chunk,
+            ):
+                recommendations_by_plan.setdefault(str(link_row["plan_id"]), []).append(
+                    int(link_row["recommendation_id"])
+                )
+        return [
+            row_to_automation_plan_record(
+                row,
+                file_rows=files_by_plan.get(plan_id, []),
+                recommendation_ids=recommendations_by_plan.get(plan_id, []),
+            )
+            for row, plan_id in zip(rows, plan_ids, strict=True)
+        ]
+
+    async def list_plans(
+        self,
+        *,
+        status: PlanStatus | None = None,
+        source_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[Plan]:
         clauses: list[str] = []
         params: list[Any] = []
         if status is not None:
@@ -1511,18 +1829,17 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         if source_id is not None:
             clauses.append("source_id = ?")
             params.append(source_id)
-        query = "SELECT plan_id FROM automation_plans"
+        query = "SELECT * FROM automation_plans"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at, plan_id"
+        if limit is not None:
+            _validate_list_limit(limit)
+            query += " LIMIT ?"
+            params.append(limit)
         async with self.db_manager.connection_scope() as connection:
             rows = await self._fetch(connection, query, params)
-            plans = []
-            for row in rows:
-                record = await self._get_plan_record_on_connection(connection, str(row["plan_id"]))
-                if record is not None:
-                    plans.append(record.plan)
-            return plans
+            return [record.plan for record in await self._plan_records_from_rows(connection, rows)]
 
     async def list_plans_for_workload(
         self,
@@ -1532,7 +1849,29 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         workload_kind: str,
         workload_name: str,
         statuses: Sequence[PlanStatus] | None = None,
+        limit: int | None = None,
     ) -> list[Plan]:
+        records = await self.list_plan_records_for_workload(
+            cluster=cluster,
+            namespace=namespace,
+            workload_kind=workload_kind,
+            workload_name=workload_name,
+            statuses=statuses,
+            limit=limit,
+        )
+        return [record.plan for record in records]
+
+    async def list_plan_records_for_workload(
+        self,
+        *,
+        cluster: str,
+        namespace: str,
+        workload_kind: str,
+        workload_name: str,
+        statuses: Sequence[PlanStatus] | None = None,
+        limit: int | None = None,
+    ) -> list[AutomationPlanRecord]:
+        """Workload plan history with ``updated_at`` (policy cooldowns) via idx_automation_plans_workload."""
         if statuses is not None and not statuses:
             return []
         if self._postgres:
@@ -1554,18 +1893,61 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         if statuses is not None:
             clauses.append(f"status IN ({', '.join('?' for _ in statuses)})")
             params.extend(status.value for status in statuses)
-        query = "SELECT plan_id FROM automation_plans WHERE " + " AND ".join(clauses)
+        query = "SELECT * FROM automation_plans WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at, plan_id"
+        if limit is not None:
+            _validate_list_limit(limit)
+            query += " LIMIT ?"
+            params.append(limit)
         async with self.db_manager.connection_scope() as connection:
             rows = await self._fetch(connection, query, params)
-            plans = []
-            for row in rows:
-                record = await self._get_plan_record_on_connection(connection, str(row["plan_id"]))
-                if record is not None:
-                    plans.append(record.plan)
-            return plans
+            return await self._plan_records_from_rows(connection, rows)
+
+    async def list_expired_plans(
+        self,
+        *,
+        now: datetime,
+        statuses: Sequence[PlanStatus],
+        limit: int,
+    ) -> list[Plan]:
+        """Only the plans whose TTL elapsed, oldest expiry first (D15, BUG-57)."""
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("plan expiry time must be timezone-aware")
+        _validate_list_limit(limit)
+        if not statuses:
+            return []
+        from greenkube.automation.delivery import EXTERNAL_DELIVERY_GRACE
+
+        expired = "expires_at <= ?" if self._postgres else "julianday(expires_at) <= julianday(?)"
+        in_grace = "expires_at > ?" if self._postgres else "julianday(expires_at) > julianday(?)"
+        placeholders = ", ".join("?" for _ in statuses)
+        # Approved patch/ci plans wait EXTERNAL_DELIVERY_GRACE longer (F4, effective_expiry):
+        # they are excluded here, not after the LIMIT, so they cannot fill every batch.
+        query = f"""
+            SELECT * FROM automation_plans
+            WHERE status IN ({placeholders}) AND expires_at IS NOT NULL AND {expired}
+              AND NOT (status = ? AND COALESCE(delivery_mode, 'direct') IN ('patch', 'ci') AND {in_grace})
+            ORDER BY expires_at, plan_id
+            LIMIT ?
+        """
+        params: list[Any] = [
+            *(status.value for status in statuses),
+            self._db_datetime(now),
+            PlanStatus.APPROVED.value,
+            self._db_datetime(now - EXTERNAL_DELIVERY_GRACE),
+            limit,
+        ]
+        async with self.db_manager.connection_scope() as connection:
+            rows = await self._fetch(connection, query, params)
+            return [record.plan for record in await self._plan_records_from_rows(connection, rows)]
 
     async def prune_automation_history(self, *, cutoff: datetime) -> dict[str, int]:
+        """Prune expired rendered file contents and terminal outbox rows.
+
+        Plan rows, their recommendation links and the ``recommendation_events`` audit
+        trail are never deleted. Pruned plans keep a content-free ``file_plan_summary``
+        so they remain valid ``Plan`` objects (D2, BUG-44).
+        """
         if cutoff.tzinfo is None or cutoff.utcoffset() is None:
             raise ValueError("automation history cutoff must be timezone-aware")
         terminal_statuses = (
@@ -1576,22 +1958,17 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             PlanStatus.STALE.value,
             PlanStatus.SUPERSEDED.value,
             PlanStatus.SYNC_FAILED.value,
+            PlanStatus.CANCELLED.value,
         )
-        placeholders = ", ".join("?" for _ in terminal_statuses)
         updated_before = "updated_at < ?" if self._postgres else "julianday(updated_at) < julianday(?)"
         processed_before = "processed_at < ?" if self._postgres else "julianday(processed_at) < julianday(?)"
         cutoff_value = self._db_datetime(cutoff)
         async with self._transaction() as connection:
-            plan_files = await self._execute(
+            plan_files = await self._summarize_and_prune_plan_files(
                 connection,
-                f"""
-                DELETE FROM automation_plan_files
-                WHERE plan_id IN (
-                    SELECT plan_id FROM automation_plans
-                    WHERE status IN ({placeholders}) AND {updated_before}
-                )
-                """,
-                (*terminal_statuses, cutoff_value),
+                terminal_statuses=terminal_statuses,
+                updated_before=updated_before,
+                cutoff_value=cutoff_value,
             )
             operations = await self._execute(
                 connection,
@@ -1605,14 +1982,9 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 connection,
                 f"""
                 DELETE FROM webhook_deliveries
-                WHERE status IN ('processed', 'rejected') AND processed_at IS NOT NULL
+                WHERE status IN ('processed', 'rejected', 'ignored') AND processed_at IS NOT NULL
                   AND {processed_before}
                 """,
-                (cutoff_value,),
-            )
-            recommendation_events = await self._execute(
-                connection,
-                f"DELETE FROM recommendation_events WHERE {updated_before.replace('updated_at', 'created_at')}",
                 (cutoff_value,),
             )
             binding_events = await self._execute(
@@ -1624,9 +1996,82 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             "plan_files": plan_files,
             "operations": operations,
             "webhooks": webhooks,
-            "recommendation_events": recommendation_events,
             "binding_events": binding_events,
         }
+
+    async def _summarize_and_prune_plan_files(
+        self,
+        connection: Any,
+        *,
+        terminal_statuses: Sequence[str],
+        updated_before: str,
+        cutoff_value: Any,
+    ) -> int:
+        placeholders = ", ".join("?" for _ in terminal_statuses)
+        plan_rows = await self._fetch(
+            connection,
+            f"""
+            SELECT plan_id, base_revision, source_revision, renderer, diff, rendered_diff,
+                   digest, validation, warnings
+            FROM automation_plans
+            WHERE status IN ({placeholders}) AND {updated_before}
+              AND EXISTS (SELECT 1 FROM automation_plan_files f WHERE f.plan_id = automation_plans.plan_id)
+            ORDER BY plan_id
+            """,
+            (*terminal_statuses, cutoff_value),
+        )
+        pruned_at = datetime.now(timezone.utc)
+        deleted = 0
+        for start in range(0, len(plan_rows), _PRUNE_BATCH_SIZE):
+            batch = plan_rows[start : start + _PRUNE_BATCH_SIZE]
+            plan_ids = [str(row["plan_id"]) for row in batch]
+            batch_placeholders = ", ".join("?" for _ in plan_ids)
+            file_rows = await self._fetch(
+                connection,
+                f"SELECT * FROM automation_plan_files WHERE plan_id IN ({batch_placeholders}) ORDER BY plan_id, id",
+                plan_ids,
+            )
+            files_by_plan: dict[str, list[Any]] = {}
+            for file_row in file_rows:
+                files_by_plan.setdefault(str(file_row["plan_id"]), []).append(file_row)
+            for row in batch:
+                plan_id = str(row["plan_id"])
+                summary = pruned_file_plan_summary_payload(row, files_by_plan.get(plan_id, []), pruned_at=pruned_at)
+                if summary is not None:
+                    # updated_at is deliberately preserved: it is the plan's last lifecycle activity.
+                    await self._execute(
+                        connection,
+                        "UPDATE automation_plans SET file_plan_summary = ? WHERE plan_id = ?",
+                        (json_text(summary), plan_id),
+                        json_positions=(1,),
+                    )
+            deleted += await self._execute(
+                connection,
+                f"DELETE FROM automation_plan_files WHERE plan_id IN ({batch_placeholders})",
+                plan_ids,
+            )
+        return deleted
+
+    async def set_plan_status_if_workload_idle(
+        self,
+        plan_id: str,
+        status: PlanStatus,
+        guard: WorkloadPlanGuard,
+        *,
+        expected_statuses: Sequence[PlanStatus] | None = None,
+        expected_digest: str | None = None,
+        actor: str = "system",
+        reason_code: str | None = None,
+    ) -> Plan | None:
+        return await self.set_plan_status(
+            plan_id,
+            status,
+            expected_statuses=expected_statuses,
+            expected_digest=expected_digest,
+            actor=actor,
+            reason_code=reason_code,
+            _guard=guard,
+        )
 
     async def set_plan_status(
         self,
@@ -1637,10 +2082,11 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         expected_digest: str | None = None,
         actor: str = "system",
         reason_code: str | None = None,
+        _guard: WorkloadPlanGuard | None = None,
     ) -> Plan | None:
         actor = _validated_audit_actor(actor)
         conditions = ["plan_id = ?"]
-        params: list[Any] = [status.value, plan_id]
+        params: list[Any] = [status.value, reason_code, plan_id]
         expected = tuple(dict.fromkeys(expected_statuses or ()))
         if expected_statuses is not None:
             if not expected:
@@ -1653,11 +2099,28 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             params.append(expected_digest)
 
         async with self._transaction() as connection:
+            identity: tuple[str, str, str, str] | None = None
+            if _guard is not None:
+                # Take the workload lock before the row lock (same order as plan creation).
+                snapshot_row = await self._fetchrow(
+                    connection, "SELECT source_snapshot FROM automation_plans WHERE plan_id = ?", (plan_id,)
+                )
+                if snapshot_row is None:
+                    return None
+                snapshot = json_value(snapshot_row["source_snapshot"], {})
+                snapshot = snapshot if isinstance(snapshot, dict) else {}
+                identity = (
+                    str(snapshot.get("cluster")),
+                    str(snapshot.get("namespace")),
+                    str(snapshot.get("workload_kind")),
+                    str(snapshot.get("workload_name")),
+                )
+                await self._lock_workload(connection, identity)
             row_lock = " FOR UPDATE" if self._postgres else ""
             previous = await self._fetchrow(
                 connection,
                 f"""
-                SELECT status, digest, source_id, provider_id
+                SELECT status, status_reason, digest, source_id, provider_id
                 FROM automation_plans
                 WHERE plan_id = ?{row_lock}
                 """,
@@ -1665,16 +2128,21 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             )
             if previous is None:
                 return None
+            if _guard is not None and identity is not None:
+                await self._raise_if_workload_busy_on_connection(connection, plan_id, identity, _guard)
             previous_status = str(previous["status"])
             if expected and previous_status not in {item.value for item in expected}:
                 return None
             if expected_digest is not None and previous["digest"] != expected_digest:
                 return None
+            if reason_code is None and previous_status == status.value:
+                # A same-status write keeps the reason of the change that set the status.
+                params[1] = previous["status_reason"]
             updated = await self._execute(
                 connection,
                 f"""
                 UPDATE automation_plans
-                SET status = ?, updated_at = {self._now_expression}
+                SET status = ?, status_reason = ?, updated_at = {self._now_expression}
                 WHERE {" AND ".join(conditions)}
                 """,
                 params,
@@ -1711,34 +2179,18 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             record = await self._get_plan_record_on_connection(connection, plan_id)
             return record.plan if record is not None else None
 
-    async def list_recommendation_ids_for_plan(self, plan_id: str) -> list[int]:
-        async with self.db_manager.connection_scope() as connection:
-            rows = await self._fetch(
-                connection,
-                """
-                SELECT recommendation_id FROM automation_plan_recommendations
-                WHERE plan_id = ? ORDER BY recommendation_id
-                """,
-                (plan_id,),
-            )
-            return [int(row["recommendation_id"]) for row in rows]
-
     async def list_plans_for_recommendation(self, recommendation_id: int) -> list[Plan]:
         async with self.db_manager.connection_scope() as connection:
             rows = await self._fetch(
                 connection,
                 """
-                SELECT plan_id FROM automation_plan_recommendations
-                WHERE recommendation_id = ? ORDER BY plan_id
+                SELECT plan.* FROM automation_plan_recommendations link
+                JOIN automation_plans plan ON plan.plan_id = link.plan_id
+                WHERE link.recommendation_id = ? ORDER BY plan.plan_id
                 """,
                 (recommendation_id,),
             )
-            plans = []
-            for row in rows:
-                record = await self._get_plan_record_on_connection(connection, str(row["plan_id"]))
-                if record is not None:
-                    plans.append(record.plan)
-            return plans
+            return [record.plan for record in await self._plan_records_from_rows(connection, rows)]
 
     async def set_recommendation_action_status(
         self,
@@ -1770,7 +2222,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             rows = await self._fetch(
                 connection,
                 f"""
-                SELECT id, action_status FROM recommendation_history
+                SELECT id, action_status, status FROM recommendation_history
                 WHERE id IN ({id_placeholders}){row_lock}
                 """,
                 ids,
@@ -1812,7 +2264,53 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                         "new_action_status": status.value,
                     },
                 )
+                await self._sync_recommendation_pr_status(connection, row, status, actor=actor, plan_ids=plan_ids)
             return updated
+
+    async def _sync_recommendation_pr_status(
+        self,
+        connection: Any,
+        row: Any,
+        action_status: ActionStatus,
+        *,
+        actor: str,
+        plan_ids: list[str],
+    ) -> None:
+        """Keep the recommendation lifecycle status in step with its pull request.
+
+        ``active`` becomes ``pr_open`` while a PR is open, merged or syncing, so
+        scans can no longer rewrite its baseline and proposal, and it returns to
+        ``active`` when the PR is closed unmerged or the action fails. Other
+        statuses (applied, rollback review, ...) are owned by the lifecycle and
+        never changed here. Written in the action-status transaction.
+        """
+        current = row["status"]
+        if action_status in _PR_IN_FLIGHT_ACTION_STATUSES and current == "active":
+            target, event_type = "pr_open", RecommendationEventType.PR_OPENED.value
+        elif action_status in _PR_RELEASED_ACTION_STATUSES and current == "pr_open":
+            target, event_type = "active", RecommendationEventType.PR_CLOSED.value
+        else:
+            return
+        recommendation_id = int(row["id"])
+        changed = await self._execute(
+            connection,
+            "UPDATE recommendation_history SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+            (target, self._db_datetime(datetime.now(timezone.utc)), recommendation_id, current),
+        )
+        if not changed:
+            return
+        await self._record_recommendation_audit_event(
+            connection,
+            recommendation_id,
+            event_type=event_type,
+            actor=actor,
+            details={
+                "plan_ids": plan_ids,
+                "previous_status": current,
+                "new_status": target,
+                "action_status": action_status.value,
+            },
+        )
 
     async def get_recommendation_action_status(self, recommendation_id: int) -> ActionStatus | None:
         async with self.db_manager.connection_scope() as connection:
@@ -1822,18 +2320,6 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 (recommendation_id,),
             )
             return ActionStatus(row["action_status"]) if row is not None else None
-
-    async def list_recommendations_by_action_status(self, status: ActionStatus) -> list[int]:
-        async with self.db_manager.connection_scope() as connection:
-            rows = await self._fetch(
-                connection,
-                """
-                SELECT id FROM recommendation_history
-                WHERE action_status = ? ORDER BY id
-                """,
-                (status.value,),
-            )
-            return [int(row["id"]) for row in rows]
 
     async def record_webhook_delivery(
         self, event: PullRequestEvent, *, event_type: str = "pull_request"
@@ -1979,48 +2465,6 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             )
             return [row_to_webhook_delivery(row) for row in rows]
 
-    async def upsert_worker_heartbeat(self, heartbeat: WorkerHeartbeat) -> WorkerHeartbeat:
-        async with self._transaction() as connection:
-            await self._execute(
-                connection,
-                """
-                INSERT INTO automation_worker_heartbeats
-                    (worker_id, status, heartbeat_at, lease_id, lease_owner, lease_expires_at,
-                     lease_operation_id, lease_plan_operation_id, metadata, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (worker_id) DO UPDATE SET
-                    status = excluded.status,
-                    heartbeat_at = excluded.heartbeat_at,
-                    lease_id = excluded.lease_id,
-                    lease_owner = excluded.lease_owner,
-                    lease_expires_at = excluded.lease_expires_at,
-                    lease_operation_id = excluded.lease_operation_id,
-                    lease_plan_operation_id = excluded.lease_plan_operation_id,
-                    metadata = excluded.metadata,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    heartbeat.worker_id,
-                    heartbeat.status,
-                    self._db_datetime(heartbeat.heartbeat_at),
-                    heartbeat.lease_id,
-                    heartbeat.lease_owner,
-                    self._db_datetime(heartbeat.lease_expires_at),
-                    heartbeat.lease_operation_id,
-                    heartbeat.lease_plan_operation_id,
-                    json_text(heartbeat.metadata),
-                    self._db_datetime(datetime.now(timezone.utc)),
-                ),
-                json_positions=(9,),
-            )
-            row = await self._fetchrow(
-                connection,
-                "SELECT * FROM automation_worker_heartbeats WHERE worker_id = ?",
-                (heartbeat.worker_id,),
-            )
-            assert row is not None
-            return row_to_worker_heartbeat(row)
-
     async def get_worker_heartbeat(self, worker_id: str) -> WorkerHeartbeat | None:
         async with self.db_manager.connection_scope() as connection:
             row = await self._fetchrow(
@@ -2029,17 +2473,6 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 (worker_id,),
             )
             return row_to_worker_heartbeat(row) if row is not None else None
-
-    async def list_worker_heartbeats(self, *, status: str | None = None) -> list[WorkerHeartbeat]:
-        query = "SELECT * FROM automation_worker_heartbeats"
-        params: tuple[Any, ...] = ()
-        if status is not None:
-            query += " WHERE status = ?"
-            params = (status,)
-        query += " ORDER BY worker_id"
-        async with self.db_manager.connection_scope() as connection:
-            rows = await self._fetch(connection, query, params)
-            return [row_to_worker_heartbeat(row) for row in rows]
 
     async def get_automation_backlog_summary(self, *, stale_before: datetime) -> AutomationBacklogSummary:
         if stale_before.tzinfo is None or stale_before.utcoffset() is None:
@@ -2268,7 +2701,3 @@ def _same_binding_material_state(left: WorkloadBinding, right: WorkloadBinding) 
         and left.candidates_truncated == right.candidates_truncated
         and left_candidates == right_candidates
     )
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)

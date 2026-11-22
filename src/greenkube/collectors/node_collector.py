@@ -7,8 +7,10 @@ from kubernetes_asyncio.client.rest import ApiException
 
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api
+from greenkube.energy.embodied import parse_embodied_annotation
 
 from .base_collector import BaseCollector
+from .k8s_errors import KubernetesListError, list_all_pages
 
 if False:  # TYPE_CHECKING
     pass
@@ -22,6 +24,56 @@ def _k8s_timeout() -> int | None:
     """Return the configured Kubernetes request timeout, or None to disable."""
     t = global_config.K8S_REQUEST_TIMEOUT
     return t if t > 0 else None
+
+
+def _boot_id(node) -> str | None:
+    """``status.nodeInfo.bootID``: nodes sharing it run on one host (NRG-15)."""
+    node_info = getattr(getattr(node, "status", None), "node_info", None)
+    boot_id = getattr(node_info, "boot_id", None)
+    return boot_id if isinstance(boot_id, str) and boot_id else None
+
+
+def _provider_id(node) -> str | None:
+    """``spec.providerID`` (``kind://...`` groups container nodes of one host, NRG-15)."""
+    provider_id = getattr(getattr(node, "spec", None), "provider_id", None)
+    return provider_id if isinstance(provider_id, str) and provider_id else None
+
+
+#: Extended resources of GPU device plugins (NRG-13).
+_GPU_RESOURCES = ("nvidia.com/gpu", "amd.com/gpu")
+_GPU_RESOURCE_PREFIX = "gpu.intel.com/"
+
+
+def _gpu_count(node) -> int | None:
+    """GPUs declared in the node capacity, or ``None`` when it declares none."""
+    capacity = getattr(getattr(node, "status", None), "capacity", None)
+    if not isinstance(capacity, dict):
+        return None
+    total = 0
+    for resource, quantity in capacity.items():
+        if resource in _GPU_RESOURCES or str(resource).startswith(_GPU_RESOURCE_PREFIX):
+            try:
+                total += int(float(str(quantity)))
+            except ValueError:
+                continue
+    return total or None
+
+
+#: ``spec.providerID`` schemes of the providers GreenKube has profiles for (COL-15).
+_PROVIDER_ID_SCHEMES: tuple[tuple[str, str], ...] = (
+    ("aws://", "aws"),
+    ("gce://", "gcp"),
+    ("azure://", "azure"),
+    ("scaleway://", "scaleway"),
+    ("ovhcloud://", "ovh"),
+)
+#: Provider-specific node label prefixes, used when the providerID is absent or not recognised.
+_PROVIDER_LABEL_PREFIXES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("kubernetes.azure.com/",), "azure"),
+    (("eks.amazonaws.com/", "karpenter.k8s.aws/", "k8s.amazonaws.com/"), "aws"),
+    (("cloud.google.com/",), "gcp"),
+    (("k8s.scaleway.com/",), "scaleway"),
+)
 
 
 class NodeCollector(BaseCollector):
@@ -40,13 +92,15 @@ class NodeCollector(BaseCollector):
         self._api = await get_core_v1_api()
         return self._api
 
-    async def collect(self) -> dict:  # type: ignore[override]
+    async def collect(self, *, raise_on_error: bool = False) -> dict:  # type: ignore[override]
         """
         Collects comprehensive node information from Kubernetes.
 
         Returns:
             dict: A dictionary mapping node names to NodeInfo objects containing
                   zone, region, cloud provider, instance type, architecture, and node pool.
+                  A failed node list returns ``{}``, or raises :class:`KubernetesListError`
+                  when ``raise_on_error`` is true (COL-07).
         """
         from greenkube.models.node import NodeInfo
 
@@ -59,12 +113,12 @@ class NodeCollector(BaseCollector):
         try:
             # Async call — pass a request timeout so the collector never hangs
             # indefinitely if the API server is slow or unreachable.
-            nodes = await api.list_node(watch=False, _request_timeout=_k8s_timeout())
-            if not nodes.items:
+            nodes = await list_all_pages(api.list_node, watch=False, _request_timeout=_k8s_timeout())
+            if not nodes:
                 logger.warning("No nodes found in the cluster.")
                 return nodes_info
 
-            for node in nodes.items:
+            for node in nodes:
                 node_name = node.metadata.name
                 labels = node.metadata.labels or {}
 
@@ -91,6 +145,12 @@ class NodeCollector(BaseCollector):
                     node_pool=node_pool,
                     cpu_capacity_cores=cpu_capacity,
                     memory_capacity_bytes=memory_capacity,
+                    # Operator embodied emissions (NRG-01); the only value node snapshots carry (NRG-07).
+                    embodied_emissions_kg=parse_embodied_annotation(getattr(node.metadata, "annotations", None)),
+                    host_id=_boot_id(node),
+                    provider_id=_provider_id(node),
+                    gpu_count=_gpu_count(node),
+                    gpu_model=labels.get("nvidia.com/gpu.product") if isinstance(labels, dict) else None,
                     timestamp=datetime.now(timezone.utc),
                 )
 
@@ -109,9 +169,13 @@ class NodeCollector(BaseCollector):
 
         except ApiException as e:
             logger.error("Kubernetes API error while listing nodes: %s", e)
+            if raise_on_error:
+                raise KubernetesListError(f"Kubernetes node list failed: {e}") from e
             return {}
         except Exception as e:
             logger.error("An unexpected error occurred while collecting nodes: %s", e)
+            if raise_on_error:
+                raise KubernetesListError(f"Kubernetes node list failed: {e}") from e
             return {}
         finally:
             # We should close the api client to avoid resource leak?
@@ -156,45 +220,39 @@ class NodeCollector(BaseCollector):
         }
 
     def _detect_cloud_provider(self, labels: dict, node=None) -> str:
+        """Detect the cloud provider of a node (COL-15).
+
+        The node's ``spec.providerID`` scheme decides, then provider-specific
+        label prefixes; ``CLOUD_PROVIDER`` only fills in nodes without any providerID,
+        so a hybrid or mixed cluster keeps each node's real provider.  Region names are never
+        used: GKE ``us-central1``, Linode
+        ``us-east`` or OCI ``eu-frankfurt-1`` look like AWS regions.  Providers
+        without a GreenKube profile (Linode, Oracle, IBM, Alibaba, bare
+        OpenStack) stay ``unknown``, so their PUE and power are flagged defaults.
         """
-        Detect the cloud provider from node labels and, optionally, providerID.
-        """
-        # Check for OVH-specific labels.
-        # OVH Managed Kubernetes Service (MKS) uses two label prefixes depending
-        # on the cluster generation:
-        #   - k8s.ovh.net/  (legacy clusters)
-        #   - node.k8s.ovh/ (current MKS — e.g. node.k8s.ovh/type=standard)
-        if any(key.startswith(("k8s.ovh.net/", "node.k8s.ovh/")) for key in labels.keys()):
+        has_label = lambda *prefixes: any(key.startswith(prefixes) for key in labels)  # noqa: E731
+        # OVH MKS nodes report an OpenStack providerID: its labels decide first.
+        # OVH uses two label prefixes depending on the cluster generation:
+        # k8s.ovh.net/ (legacy) and node.k8s.ovh/ (current MKS).
+        if has_label("k8s.ovh.net/", "node.k8s.ovh/"):
             return "ovh"
 
-        # Check for Azure-specific labels
-        if any(key.startswith("kubernetes.azure.com/") for key in labels.keys()):
-            return "azure"
-
-        # Check for AWS-specific labels
-        if any(key.startswith("eks.amazonaws.com/") for key in labels.keys()):
-            return "aws"
-        if "node.kubernetes.io/instance-type" in labels and labels.get("topology.kubernetes.io/region", "").startswith(
-            ("us-", "eu-", "ap-", "ca-", "sa-")
-        ):
-            # AWS regions typically start with these prefixes
-            return "aws"
-
-        # Check for GCP-specific labels
-        if any(key.startswith("cloud.google.com/") for key in labels.keys()):
-            return "gcp"
-
-        # Check for Scaleway Kapsule labels (k8s.scaleway.com/* prefix)
-        if any(key.startswith("k8s.scaleway.com/") for key in labels.keys()):
-            return "scaleway"
-
-        # Fallback: inspect node.spec.provider_id for Scaleway's "scaleway://" scheme
+        provider_id = ""
         if node is not None:
-            provider_id = getattr(getattr(node, "spec", None), "provider_id", None) or ""
-            if provider_id.startswith("scaleway://"):
-                return "scaleway"
+            provider_id = str(getattr(getattr(node, "spec", None), "provider_id", None) or "").lower()
+        for prefix, provider in _PROVIDER_ID_SCHEMES:
+            if provider_id.startswith(prefix):
+                return provider
 
-        return "unknown"
+        for prefixes, provider in _PROVIDER_LABEL_PREFIXES:
+            if has_label(*prefixes):
+                return provider
+        # Only nodes without any providerID take the configured provider (hybrid clusters): an
+        # unrecognised scheme (k3s://, kind://, openstack://) names a known non-cloud or other setup.
+        if provider_id:
+            return "unknown"
+        configured = str(getattr(global_config, "CLOUD_PROVIDER", "") or "").strip().lower()
+        return configured or "unknown"
 
     def _extract_instance_type(self, labels: dict, node, cloud_provider: str) -> str:
         """
@@ -276,12 +334,12 @@ class NodeCollector(BaseCollector):
             return node_instance_map
 
         try:
-            nodes = await api.list_node(watch=False, _request_timeout=_k8s_timeout())
-            if not nodes.items:
+            nodes = await list_all_pages(api.list_node, watch=False, _request_timeout=_k8s_timeout())
+            if not nodes:
                 logger.debug("No nodes found when collecting instance types.")
                 return node_instance_map
 
-            for node in nodes.items:
+            for node in nodes:
                 node_name = node.metadata.name
                 labels = node.metadata.labels or {}
                 instance_type = labels.get(label_key)

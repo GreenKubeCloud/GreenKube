@@ -2,6 +2,12 @@
 
 Thank you for your interest in GreenKube! We welcome contributions of all kinds — bug reports, feature requests, documentation improvements, and code.
 
+GreenKube is an optimization loop for Kubernetes clusters run with GitOps. It aggregates recommendations, delivers them as pull requests, and measures the savings they produce (see [Concepts](docs/concepts.md)). These contributions are especially valuable:
+
+- **Recommendation sources:** most tools can push their advice through the [push API](docs/sources/push.md) with no code in GreenKube; a plugin source starts from the [Source SDK](docs/sources.md).
+- **GitOps layouts and action kinds:** more repository layouts, and more kinds of changes that can become a pull request.
+- **Measurement methodology:** reviews of how costs, emissions and realized savings are estimated and verified.
+
 ## Getting Started
 
 ### Prerequisites
@@ -101,9 +107,11 @@ git merge --no-ff dev -m "chore: merge dev into main for release ${RELEASE_VERSI
 
 The script will:
 1. Bump the version in `pyproject.toml` and all synced files (`Chart.yaml`, `values.yaml`, `__init__.py`, …)
-2. Move the `[Unreleased]` section in `CHANGELOG.md` to a dated `[<version>]` header
+2. Move the `[Unreleased]` section in `CHANGELOG.md` to a dated `[<version>]` header and regenerate the Helm chart's Artifact Hub changes list from it (`scripts/artifacthub_changes.py`)
 3. Commit everything as `chore: release v<version>`
 4. Create an annotated git tag `v<version>`
+
+`pyproject.toml` is the single source of truth for the version. The API version (shown by the UI banner), the chart `version` and `appVersion`, the chart image tag and the frontend package are copied from it. `python scripts/sync_version.py --check` (also run by `tests/scripts/test_sync_version.py`) fails when one of them diverges.
 
 Then review the commit and push:
 
@@ -112,9 +120,9 @@ git push origin main --tags
 ```
 
 Pushing the `vX.Y.Z` tag triggers the `release.yml` workflow which:
-- Runs the full test + lint suite (gate)
-- Builds and pushes `greenkube/greenkube:<version>` + `:latest` to Docker Hub
-- Packages and publishes the Helm chart to GitHub Pages
+- Runs the full test + lint suite, the 80% coverage gate, the Helm checks and the frontend tests and build (gates)
+- Builds and pushes `greenkube/greenkube:<version>` to Docker Hub, plus `:latest` when the tag is the highest release
+- Regenerates the chart's `artifacthub.io/changes` from the CHANGELOG, then packages and publishes the Helm chart to GitHub Pages
 - Creates a GitHub Release with the changelog notes extracted automatically
 
 ### Docker Tag Summary
@@ -124,7 +132,7 @@ Pushing the `vX.Y.Z` tag triggers the `release.yml` workflow which:
 | `dev-<sha>` | Every push to `dev` | Staging / testing latest dev work |
 | `dev-latest` | Every push to `dev` | Stable pointer to latest dev |
 | `<version>` | Push of `v<version>` tag | Pinned production image |
-| `latest` | Push of any vX.Y.Z tag | Latest stable release |
+| `latest` | Push of the highest vX.Y.Z tag | Latest stable release |
 
 ### Code Style
 

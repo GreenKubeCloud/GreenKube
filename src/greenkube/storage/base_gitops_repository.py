@@ -23,6 +23,7 @@ from greenkube.gitops.contracts import (
     WorkloadSource,
     configured_binding_ttl,
 )
+from greenkube.utils.time import ensure_utc
 
 MAX_PULL_REQUEST_POLLING_LEASE_SECONDS = 86_400
 MAX_WORKLOAD_BINDING_PAGE_SIZE = 500
@@ -60,16 +61,12 @@ def _binding_status_at(
 ) -> tuple[BindingStatus, str | None]:
     if status not in {BindingStatus.RESOLVED, BindingStatus.AMBIGUOUS}:
         return status, None
-    current = _as_utc(now)
-    if expires_at is not None and _as_utc(expires_at) <= current:
+    current = ensure_utc(now)
+    if expires_at is not None and ensure_utc(expires_at) <= current:
         return BindingStatus.STALE, "source-expired"
-    if current - _as_utc(observed_at) >= configured_binding_ttl():
+    if current - ensure_utc(observed_at) >= configured_binding_ttl():
         return BindingStatus.STALE, "source-observation-expired"
     return status, None
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +178,7 @@ class WorkloadBindingCoverage:
         for binding in bindings:
             total += 1
             counts[binding.status] += 1
-            observed_at = _as_utc(binding.observed_at)
+            observed_at = ensure_utc(binding.observed_at)
             latest = observed_at if latest is None else max(latest, observed_at)
         return cls(
             total=total,
@@ -497,7 +494,7 @@ class WorkloadBindingRepository(ABC):
         selected_statuses = None if statuses is None else {BindingStatus(status) for status in statuses}
         if selected_statuses is not None and not selected_statuses:
             return WorkloadBindingPage((), None, False)
-        current_at = _as_utc(now or datetime.now(timezone.utc))
+        current_at = ensure_utc(now or datetime.now(timezone.utc))
         bindings = [
             freshen_workload_binding(binding, now=current_at)
             for binding in await self.list_workload_bindings(cluster=cluster)
@@ -549,7 +546,7 @@ class WorkloadBindingRepository(ABC):
         now: datetime | None = None,
     ) -> WorkloadBindingCoverage:
         """Return freshness-aware status counts; SQL adapters should aggregate in storage."""
-        current_at = _as_utc(now or datetime.now(timezone.utc))
+        current_at = ensure_utc(now or datetime.now(timezone.utc))
         bindings = [
             freshen_workload_binding(binding, now=current_at)
             for binding in await self.list_workload_bindings(cluster=cluster)
@@ -586,8 +583,90 @@ def _workload_binding_identity(binding: WorkloadBinding) -> tuple[str, str, str,
     return binding.cluster, binding.namespace, binding.workload_kind, binding.workload_name
 
 
+@dataclass(frozen=True)
+class WorkloadPlanGuard:
+    """One plan per workload: refuse a plan write while another plan of the workload is busy.
+
+    Another plan of the same workload (cluster, namespace, kind, name) in
+    ``blocking_statuses`` refuses the write, unless its ID is in ``tolerated_plan_ids``
+    and its status in ``tolerated_statuses`` (a preview the caller supersedes, or the
+    original plan of a rollback).
+    """
+
+    blocking_statuses: frozenset[PlanStatus]
+    tolerated_plan_ids: frozenset[str] = frozenset()
+    tolerated_statuses: frozenset[PlanStatus] = frozenset()
+
+    def blocks(self, plan_id: str, status: PlanStatus) -> bool:
+        if status not in self.blocking_statuses:
+            return False
+        return not (plan_id in self.tolerated_plan_ids and status in self.tolerated_statuses)
+
+
+class WorkloadPlanConflictError(RuntimeError):
+    """Another plan of the same workload holds it (raised atomically with the plan write)."""
+
+    def __init__(self, plan_id: str, status: PlanStatus) -> None:
+        super().__init__(f"another plan of this workload is {status.value} ({plan_id})")
+        self.plan_id = plan_id
+        self.status = status
+
+
+def workload_identity(source: Any) -> tuple[str, str, str, str]:
+    return source.cluster, source.namespace, source.workload_kind, source.workload_name
+
+
 class AutomationPlanRepository(ABC):
     """Persistence port for automation plans, recommendation joins and action status."""
+
+    async def save_plan_if_workload_idle(
+        self,
+        plan: Plan,
+        guard: WorkloadPlanGuard,
+        *,
+        policy_result: dict[str, Any] | None = None,
+        actor: str = "system",
+    ) -> Plan:
+        """Insert a new plan only while ``guard`` finds no busy plan of its workload.
+
+        SQL repositories check and insert in one serialized transaction; this fallback for
+        in-memory adapters checks first.
+        """
+        if await self.get_plan(plan.plan_id) is None:
+            await self._raise_if_workload_busy(plan.plan_id, plan.source, guard)
+        return await self.save_plan_if_absent(plan, policy_result=policy_result, actor=actor)
+
+    async def set_plan_status_if_workload_idle(
+        self,
+        plan_id: str,
+        status: PlanStatus,
+        guard: WorkloadPlanGuard,
+        *,
+        expected_statuses: Sequence[PlanStatus] | None = None,
+        expected_digest: str | None = None,
+        actor: str = "system",
+        reason_code: str | None = None,
+    ) -> Plan | None:
+        """``set_plan_status`` that refuses while ``guard`` finds a busy plan of the same workload."""
+        plan = await self.get_plan(plan_id)
+        if plan is None:
+            return None
+        await self._raise_if_workload_busy(plan_id, plan.source, guard)
+        return await self.set_plan_status(
+            plan_id,
+            status,
+            expected_statuses=expected_statuses,
+            expected_digest=expected_digest,
+            actor=actor,
+            reason_code=reason_code,
+        )
+
+    async def _raise_if_workload_busy(self, plan_id: str, source: Any, guard: WorkloadPlanGuard) -> None:
+        identity = workload_identity(source)
+        for other in await self.list_plans():
+            if other.plan_id != plan_id and workload_identity(other.source) == identity:
+                if guard.blocks(other.plan_id, other.status):
+                    raise WorkloadPlanConflictError(other.plan_id, other.status)
 
     async def prune_automation_history(self, *, cutoff: datetime) -> dict[str, int]:
         """Prune retained payloads when supported by a durable backend."""
@@ -629,6 +708,20 @@ class AutomationPlanRepository(ABC):
         if existing is None or existing.pre_apply_baseline is not None:
             return existing
         return await self.save_plan(existing.model_copy(update={"pre_apply_baseline": baseline}))
+
+    async def set_plan_delivery_mode(
+        self,
+        plan_id: str,
+        delivery_mode: str,
+        *,
+        expected_digest: str | None,
+        expected_statuses: Sequence[PlanStatus],
+    ) -> Plan | None:
+        """Record how an approved plan is delivered (F4); SQL repositories update one column."""
+        plan = await self.get_plan(plan_id)
+        if plan is None or plan.digest != expected_digest or plan.status not in expected_statuses:
+            return None
+        return await self.save_plan(plan.model_copy(update={"delivery_mode": delivery_mode}))
 
     @abstractmethod
     async def get_plan(self, plan_id: str) -> Plan | None: ...
@@ -690,9 +783,6 @@ class AutomationPlanRepository(ABC):
     ) -> Plan | None: ...
 
     @abstractmethod
-    async def list_recommendation_ids_for_plan(self, plan_id: str) -> list[int]: ...
-
-    @abstractmethod
     async def list_plans_for_recommendation(self, recommendation_id: int) -> list[Plan]: ...
 
     @abstractmethod
@@ -708,9 +798,6 @@ class AutomationPlanRepository(ABC):
 
     @abstractmethod
     async def get_recommendation_action_status(self, recommendation_id: int) -> ActionStatus | None: ...
-
-    @abstractmethod
-    async def list_recommendations_by_action_status(self, status: ActionStatus) -> list[int]: ...
 
 
 class WebhookDeliveryRepository(ABC):
@@ -758,13 +845,7 @@ class AutomationWorkerRepository(ABC):
     """Persistence port for worker heartbeats and leases."""
 
     @abstractmethod
-    async def upsert_worker_heartbeat(self, heartbeat: WorkerHeartbeat) -> WorkerHeartbeat: ...
-
-    @abstractmethod
     async def get_worker_heartbeat(self, worker_id: str) -> WorkerHeartbeat | None: ...
-
-    @abstractmethod
-    async def list_worker_heartbeats(self, *, status: str | None = None) -> list[WorkerHeartbeat]: ...
 
     @abstractmethod
     async def prune_worker_heartbeats(self, *, cutoff: datetime) -> int: ...

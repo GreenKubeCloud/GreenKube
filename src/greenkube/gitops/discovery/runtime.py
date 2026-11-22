@@ -9,7 +9,7 @@ import math
 import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 
@@ -48,6 +48,7 @@ from greenkube.storage.base_gitops_repository import (
     WorkloadBinding,
     WorkloadBindingRepository,
 )
+from greenkube.utils.time import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,11 @@ class ConfiguredKubernetesDiscoverySource:
             resources=resources,
         )
         candidates = await self._provider_resolver.resolve_candidates(discovery.candidates)
-        return KubernetesDiscoveryResult(candidates=candidates, availability=dict(discovery.availability))
+        return KubernetesDiscoveryResult(
+            candidates=candidates,
+            availability=dict(discovery.availability),
+            resource_index=getattr(discovery, "resource_index", None),
+        )
 
 
 class GitOpsDiscoveryRuntime:
@@ -238,6 +243,16 @@ class GitOpsDiscoveryRuntime:
                     refreshed_at_timestamp=result.refreshed_at.timestamp(),
                 )
 
+    async def run_once(self) -> DiscoveryRefreshResult:
+        """One logged refresh; a failure is logged and re-raised (controller loop registry, M8)."""
+        try:
+            result = await self.refresh()
+        except Exception as error:
+            _log_refresh_failure(error, self.interval_seconds)
+            raise
+        _log_refresh_success(result)
+        return result
+
     async def run_periodic(
         self,
         *,
@@ -249,11 +264,9 @@ class GitOpsDiscoveryRuntime:
         while not stop.is_set():
             if should_run is None or should_run():
                 try:
-                    result = await self.refresh()
-                except Exception as error:
-                    _log_refresh_failure(error, self.interval_seconds)
-                else:
-                    _log_refresh_success(result)
+                    await self.run_once()
+                except Exception:
+                    pass
             else:
                 logger.debug("Skipping GitOps discovery refresh while this controller is not the Lease holder.")
 
@@ -300,9 +313,9 @@ async def create_gitops_discovery_runtime(
 
     await _ensure_unresolved_provider(repository)
 
+    shared_custom_objects_api = custom_objects_api if custom_objects_api is not None else _LazyCustomObjectsApi()
     if discovery_source is None:
-        selected_api = custom_objects_api if custom_objects_api is not None else _LazyCustomObjectsApi()
-        discovery_source = KubernetesDiscoverySource(selected_api)
+        discovery_source = KubernetesDiscoverySource(shared_custom_objects_api)
 
     if workload_inventory_reader is None:
         if apps_v1_api is not None:
@@ -312,6 +325,7 @@ async def create_gitops_discovery_runtime(
                 _LazyAppsV1Api(),
                 autoscaling_v2_api=_LazyAutoscalingV2Api(),
                 policy_v1_api=_LazyPolicyV1Api(),
+                custom_objects_api=shared_custom_objects_api,
             )
 
     configured_source = ConfiguredKubernetesDiscoverySource(
@@ -324,12 +338,18 @@ async def create_gitops_discovery_runtime(
         else (config.gitops_discovery_interval_seconds if config is not None else DEFAULT_DISCOVERY_INTERVAL_SECONDS)
     )
     selected_ttl = config.gitops_binding_ttl if config is not None else DEFAULT_BINDING_TTL
+    resource_repository = None
+    if db_manager is not None:
+        from greenkube.storage.resource_binding_repository import ResourceBindingRepository
+
+        resource_repository = ResourceBindingRepository(db_manager)
     service = GitOpsDiscoveryService(
         configured_source,
         cast(WorkloadBindingRepository, repository),
         cluster=cluster or (config.CLUSTER_NAME if config is not None else "") or "default",
         provider_id=_DISCOVERY_PROVIDER_ID,
         binding_ttl=selected_ttl,
+        resource_repository=resource_repository,
     )
     return GitOpsDiscoveryRuntime(
         service,
@@ -572,21 +592,15 @@ def _provider_candidate_id(candidate: WorkloadSource, provider_id: str) -> str:
 
 def _source_age_seconds(result: DiscoveryRefreshResult) -> float:
     observed_at = [
-        _as_utc_datetime(candidate.observed_at)
+        ensure_utc(candidate.observed_at)
         for binding in result.bindings
         for candidate in binding.candidates
         if isinstance(candidate.observed_at, datetime)
     ]
     if not observed_at:
         return 0.0
-    refreshed_at = _as_utc_datetime(result.refreshed_at)
+    refreshed_at = ensure_utc(result.refreshed_at)
     return max(0.0, (refreshed_at - min(observed_at)).total_seconds())
-
-
-def _as_utc_datetime(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def _log_refresh_success(result: DiscoveryRefreshResult) -> None:

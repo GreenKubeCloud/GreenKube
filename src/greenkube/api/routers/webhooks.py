@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Protocol, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from greenkube.api.dependencies import get_gitops_binding_repository
 from greenkube.automation.webhooks import (
@@ -30,6 +30,7 @@ from greenkube.storage.base_gitops_repository import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+WEBHOOK_IGNORED_STATUS = "ignored"
 
 _SIGNATURE_HEADERS = {
     "github": "x-hub-signature-256",
@@ -57,6 +58,7 @@ class _WebhookLifecycleReconciler(Protocol):
 async def process_webhook(
     provider_id: str,
     request: Request,
+    response: Response,
     provider_repository: GitOpsProviderRepository = Depends(get_gitops_binding_repository),
 ) -> dict[str, Any]:
     """Record bounded webhook status and ingress-to-response lag."""
@@ -75,11 +77,14 @@ async def process_webhook(
         raise
     else:
         metric_status = _webhook_metric_status(result.get("status"), result.get("duplicate"))
+        if result.get("status") == WEBHOOK_IGNORED_STATUS:
+            # Accepted but not about a GreenKube pull request: terminal, never retried (D11).
+            response.status_code = 202
         return result
     finally:
         if metric_status is not None:
             record_webhook_delivery(metric_status, elapsed(timer))
-            if metric_status not in {"received", "processed", "duplicate"}:
+            if metric_status not in {"received", "processed", "duplicate", WEBHOOK_IGNORED_STATUS}:
                 record_automation_failure("webhook")
 
 
@@ -194,16 +199,17 @@ async def _process_webhook(
             metric_state = lifecycle_outcome if lifecycle_outcome in {"merged", "closed"} else "unchanged"
             record_pull_request_state(metric_state, provider.provider_type)
         if lifecycle_outcome == "unlinked":
-            await _update_delivery_status(
+            # The PR is unknown to GreenKube; the poller still covers a PR recorded later.
+            delivery_status = await _update_delivery_status(
                 service,
                 event.provider_id,
                 event.delivery_id,
-                status="retryable",
+                status=WEBHOOK_IGNORED_STATUS,
+                processed_at=datetime.now(timezone.utc),
                 error_code="pull_request_unlinked",
                 expected_statuses=("processing",),
             )
-            raise HTTPException(status_code=503, detail="webhook_lifecycle_unavailable")
-        if lifecycle_outcome == "mismatched":
+        elif lifecycle_outcome == "mismatched":
             delivery_status = await _update_delivery_status(
                 service,
                 event.provider_id,
@@ -249,6 +255,7 @@ def _webhook_metric_status(status: object, duplicate: object) -> str:
         "retryable",
         "reconcile_unavailable",
         "rejected",
+        WEBHOOK_IGNORED_STATUS,
     }:
         return status
     return "error"

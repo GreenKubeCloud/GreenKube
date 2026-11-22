@@ -44,6 +44,23 @@ class ProposedChange(BaseModel):
     change_ratio: Optional[float] = None
 
 
+class LimitChange(BaseModel):
+    """A container limit change a rightsizing proposal carries into its pull request (H1).
+
+    ``set`` writes ``proposed`` (millicores or bytes); ``remove`` deletes the limit.
+    GreenKube never lowers a limit below the proposed request and never removes a
+    memory limit.
+    """
+
+    resource: Literal["cpu", "memory"]
+    action: Literal["set", "remove"]
+    current: Optional[int] = None
+    proposed: Optional[int] = None
+    #: Why: ``below_request``, ``throttling``, ``below_floor``, ``policy``, ``oom_headroom`` (an OOM-driven
+    #: memory increase lifts the limit above the new request) or ``request_reaches_limit``.
+    reason: str = ""
+
+
 class RollbackCondition(BaseModel):
     """A condition that should trigger review or rollback after apply."""
 
@@ -97,6 +114,9 @@ class RecommendationEvidence(BaseModel):
     observation_window_start: Optional[datetime] = None
     observation_window_end: Optional[datetime] = None
     observation_window_seconds: Optional[float] = None
+    #: First sample of the target inside the observation window (H1: exposure of the OOM baseline);
+    #: None when unknown (evidence stored before it was recorded).
+    first_observed_at: Optional[datetime] = None
     sample_count: int = 0
     coverage_ratio: float = 1.0
     current: ResourceSnapshot = Field(default_factory=ResourceSnapshot)
@@ -104,8 +124,12 @@ class RecommendationEvidence(BaseModel):
     changes: List[ProposedChange] = Field(default_factory=list)
     cpu_usage: Optional[UtilizationStats] = None
     memory_usage: Optional[UtilizationStats] = None
+    #: Restarts inside the observation window: increases of the lifetime counter between rows (COL-20).
     restart_count: Optional[int] = None
+    #: OOM kills of the target container over the observation window (None: not observed).
     oom_events: Optional[int] = None
+    #: Share of CPU periods throttled over the observation window (None: not observed).
+    cpu_throttling_ratio: Optional[float] = None
     cost_per_hour_before: Optional[float] = None
     co2e_grams_per_hour_before: Optional[float] = None
     proposed_patch: Optional[PatchV2] = None
@@ -120,3 +144,10 @@ class RecommendationEvidence(BaseModel):
     rollback_conditions: List[RollbackCondition] = Field(default_factory=list)
     expires_at: Optional[datetime] = None
     generated_by: str = "greenkube"
+    #: Consensus across sources (roadmap E6): policy, agreement, contested flag and per-source spread.
+    consensus: Optional[dict[str, Any]] = None
+    #: Limit changes delivered with the request change (H1); empty: limits stay as they are.
+    limit_changes: List[LimitChange] = Field(default_factory=list)
+    #: Pod-spec list of the container (H1): ``container``, ``sidecar`` (native sidecar) or ``init``;
+    #: None when the scan did not read the pod spec (treated as ``container``).
+    container_kind: Optional[Literal["container", "sidecar", "init"]] = None

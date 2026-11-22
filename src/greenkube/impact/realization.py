@@ -1,0 +1,812 @@
+# src/greenkube/impact/realization.py
+"""``RealizationContext``: how much released capacity becomes removed node-hours (roadmap B6).
+
+Request cuts lower a workload's *allocated* cost and CO2e at once, but the
+bill only shrinks when nodes go away. The realization factor estimates that
+share per node pool from what the cluster can actually do:
+
+=====================================================================  ======
+Situation                                                               Factor
+=====================================================================  ======
+No autoscaler (fixed nodes: allocated savings only)                     0.0
+Karpenter ``WhenEmptyOrUnderutilized``/``WhenUnderutilized``/``Balanced`` 0.8
+Karpenter ``WhenEmpty`` (nodes are removed only once empty)             0.3
+Cluster Autoscaler                                                      0.6
+Karpenter disruption budget of zero nodes, always active                0.0
+Any of the above with blockers                                          × 0.5
+=====================================================================  ======
+
+Blockers are ``karpenter.sh/do-not-disrupt`` (or the legacy
+``karpenter.sh/do-not-evict``) and ``cluster-autoscaler.kubernetes.io/safe-to-evict: "false"``
+on pods, ``karpenter.sh/do-not-disrupt`` and
+``cluster-autoscaler.kubernetes.io/scale-down-disabled`` on nodes,
+PodDisruptionBudgets that allow no disruption, scheduled zero budgets, Karpenter
+``DisruptionBlocked`` events and an unhealthy Cluster Autoscaler. Karpenter
+``Unconsolidatable`` events are reported as reasons without changing the factor.
+
+Karpenter's Prometheus metrics (roadmap G5), when Prometheus exports them, say
+whether consolidation actually happens: ``karpenter_voluntary_disruption_decisions_total``
+over :data:`KARPENTER_METRICS_WINDOW` counts the consolidation decisions and
+``karpenter_voluntary_disruption_eligible_nodes`` the nodes Karpenter considers
+removable now. No consolidation decision over the window while nodes are
+eligible is a blocker of every consolidating pool; decisions are reported as
+evidence. ``karpenter_nodepools_cost_total`` is reported per pool. Metrics that
+are not exported change nothing; metrics that cannot be read are noted.
+
+Everything here is pure except :func:`refresh_realization_context`, which
+reads the cluster (through :class:`~greenkube.collectors.autoscaler_collector.AutoscalerCollector`)
+from the controller's collection cycle and caches the result in the process.
+Projections read the cache synchronously through :func:`current_realization_context`,
+so analyzers and connectors need no change. ``IMPACT_REALIZATION_FACTOR``, when
+set, overrides the context for every projection.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
+
+FACTOR_NO_AUTOSCALER = 0.0
+FACTOR_KARPENTER_CONSOLIDATING = 0.8
+FACTOR_KARPENTER_WHEN_EMPTY = 0.3
+FACTOR_CLUSTER_AUTOSCALER = 0.6
+BLOCKER_MULTIPLIER = 0.5
+
+#: Karpenter consolidation policies that consolidate under-utilized nodes.
+CONSOLIDATING_POLICIES = frozenset({"WhenEmptyOrUnderutilized", "WhenUnderutilized", "Balanced"})
+
+#: Realization sources recorded as ``assumptions.realization_factor_source``.
+SOURCE_CONTEXT = "realization_context"
+SOURCE_UNOBSERVED = "realization_context:unobserved"
+SOURCE_CONFIG = "config:IMPACT_REALIZATION_FACTOR"
+
+#: Factor used until the controller has observed the cluster once (no change from v1).
+UNOBSERVED_FACTOR = 1.0
+
+#: How long an observed context is reused before the cluster is read again.
+REFRESH_INTERVAL = timedelta(minutes=10)
+
+KARPENTER_POOL_LABELS = ("karpenter.sh/nodepool", "karpenter.sh/provisioner-name")
+POD_BLOCKING_ANNOTATIONS = {
+    "karpenter.sh/do-not-disrupt": "true",
+    "karpenter.sh/do-not-evict": "true",
+    "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
+}
+NODE_BLOCKING_ANNOTATIONS = {
+    "karpenter.sh/do-not-disrupt": "true",
+    "cluster-autoscaler.kubernetes.io/scale-down-disabled": "true",
+}
+#: Pool of nodes managed by the Cluster Autoscaler (or by nothing).
+CLUSTER_POOL = "__cluster__"
+
+#: ``IMPACT_AUTOSCALER_HINT`` values (IMP-12) and the factor each declares for nodes outside Karpenter pools.
+HINT_NONE = "none"
+HINT_CLUSTER_AUTOSCALER = "cluster_autoscaler"
+HINT_KARPENTER = "karpenter"
+HINT_FACTORS = {
+    HINT_NONE: FACTOR_NO_AUTOSCALER,
+    HINT_CLUSTER_AUTOSCALER: FACTOR_CLUSTER_AUTOSCALER,
+    HINT_KARPENTER: FACTOR_KARPENTER_CONSOLIDATING,
+}
+
+#: ``RealizationInputs.unavailable`` names of the inputs that decide a pool's autoscaler.
+UNAVAILABLE_CLUSTER_AUTOSCALER = "Cluster Autoscaler status"
+UNAVAILABLE_KARPENTER_POOLS = "Karpenter NodePools"
+
+
+# --------------------------------------------------------------------------- #
+# Observations (plain values filled by the collector)                         #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class NodeObservation:
+    name: str
+    labels: Mapping[str, str] = field(default_factory=dict)
+    annotations: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PodObservation:
+    namespace: str
+    name: str
+    node: Optional[str]
+    labels: Mapping[str, str] = field(default_factory=dict)
+    annotations: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PdbObservation:
+    namespace: str
+    name: str
+    match_labels: Mapping[str, str] = field(default_factory=dict)
+    #: ``(key, operator, values)`` of ``matchExpressions``.
+    match_expressions: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = ()
+    disruptions_allowed: Optional[int] = None
+    expected_pods: Optional[int] = None
+
+    @property
+    def blocks(self) -> bool:
+        """True when the budget currently allows no voluntary disruption of a non-empty selection."""
+        return self.disruptions_allowed == 0 and (self.expected_pods or 0) > 0
+
+    def selects(self, pod: PodObservation) -> bool:
+        if pod.namespace != self.namespace:
+            return False
+        if not self.match_labels and not self.match_expressions:
+            return True
+        for key, value in self.match_labels.items():
+            if pod.labels.get(key) != value:
+                return False
+        for key, operator, values in self.match_expressions:
+            present = key in pod.labels
+            value = pod.labels.get(key)
+            if operator == "In" and value not in values:
+                return False
+            if operator == "NotIn" and present and value in values:
+                return False
+            if operator == "Exists" and not present:
+                return False
+            if operator == "DoesNotExist" and present:
+                return False
+        return True
+
+
+@dataclass(frozen=True)
+class KarpenterPoolObservation:
+    name: str
+    consolidation_policy: Optional[str] = None
+    #: ``spec.disruption.budgets`` as returned by the API.
+    budgets: Tuple[Mapping[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class KarpenterEventObservation:
+    """A Karpenter disruption event (``DisruptionBlocked``, ``Unconsolidatable``) on a NodePool, NodeClaim or Node.
+
+    ``pool`` is resolved by the collector for NodePools and NodeClaims; events
+    on a Node are mapped through the node's pool label.
+    """
+
+    reason: str
+    kind: str
+    name: str
+    pool: Optional[str] = None
+    message: str = ""
+
+
+#: Lookback of the Karpenter metrics (PromQL range).
+KARPENTER_METRICS_WINDOW = "7d"
+#: ``reason`` label values of consolidation decisions (Karpenter v1; ``drifted`` and others are not consolidation).
+CONSOLIDATION_REASONS = frozenset({"underutilized", "empty"})
+UNAVAILABLE_KARPENTER_METRICS = "Karpenter metrics"
+
+
+@dataclass(frozen=True)
+class KarpenterMetricsObservation:
+    """Karpenter's Prometheus metrics over :data:`KARPENTER_METRICS_WINDOW` (roadmap G5).
+
+    ``None`` members are metrics Prometheus does not export (another Karpenter
+    version or provider): they are never read as zero.
+    """
+
+    #: ``increase(karpenter_voluntary_disruption_decisions_total)`` summed by ``reason`` (lowercase).
+    decisions: Optional[Mapping[str, float]] = None
+    #: ``karpenter_voluntary_disruption_eligible_nodes`` summed by ``reason`` (lowercase).
+    eligible_nodes: Optional[Mapping[str, float]] = None
+    #: ``increase(karpenter_nodepools_cost_total)`` per NodePool.
+    pool_costs: Optional[Mapping[str, float]] = None
+    window: str = KARPENTER_METRICS_WINDOW
+
+    @property
+    def consolidations(self) -> Optional[float]:
+        if self.decisions is None:
+            return None
+        return sum(value for reason, value in self.decisions.items() if reason in CONSOLIDATION_REASONS)
+
+    @property
+    def eligible(self) -> Optional[float]:
+        if self.eligible_nodes is None:
+            return None
+        return sum(value for reason, value in self.eligible_nodes.items() if reason in CONSOLIDATION_REASONS)
+
+
+#: Karpenter events that block consolidation of their pool (a blocker, factor × 0.5).
+BLOCKING_KARPENTER_EVENTS = frozenset({"DisruptionBlocked"})
+#: Karpenter events reported as reasons only (nodes Karpenter cannot consolidate right now).
+NOTED_KARPENTER_EVENTS = frozenset({"Unconsolidatable"})
+
+
+@dataclass(frozen=True)
+class ClusterAutoscalerObservation:
+    """The ``kube-system/cluster-autoscaler-status`` ConfigMap (loosely structured text or YAML)."""
+
+    status_text: str = ""
+
+    @property
+    def health(self) -> Optional[str]:
+        """``Healthy``/``Unhealthy`` from the cluster-wide section, when it can be parsed."""
+        match = re.search(r"(?im)^\s*health\s*:\s*(?:status\s*:\s*)?([A-Za-z]+)", self.status_text or "")
+        if match is None:
+            # YAML status (Cluster Autoscaler >= 1.30): clusterWide.health.status.
+            match = re.search(r"(?is)health\s*:\s*\n\s*status\s*:\s*([A-Za-z]+)", self.status_text or "")
+        return match.group(1) if match else None
+
+
+@dataclass(frozen=True)
+class RealizationInputs:
+    """Everything read from the cluster; ``None`` members could not be read (RBAC, API errors)."""
+
+    nodes: Sequence[NodeObservation] = ()
+    pods: Optional[Sequence[PodObservation]] = ()
+    pdbs: Optional[Sequence[PdbObservation]] = ()
+    karpenter_pools: Optional[Sequence[KarpenterPoolObservation]] = ()
+    cluster_autoscaler: Optional[ClusterAutoscalerObservation] = None
+    #: Karpenter disruption events (roadmap G5); None when they could not be read.
+    karpenter_events: Optional[Sequence[KarpenterEventObservation]] = ()
+    #: Karpenter Prometheus metrics (roadmap G5); None when not read (no Prometheus, no Karpenter).
+    karpenter_metrics: Optional[KarpenterMetricsObservation] = None
+    #: Inputs that could not be read; reported as reasons, never silently ignored.
+    unavailable: Tuple[str, ...] = ()
+
+
+# --------------------------------------------------------------------------- #
+# Context                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class PoolRealization:
+    """Realization factor of one node pool and why."""
+
+    pool: str
+    factor: float
+    autoscaler: str
+    reasons: Tuple[str, ...]
+    nodes: Tuple[str, ...] = ()
+    consolidation_policy: Optional[str] = None
+    blocked: bool = False
+    #: ``increase(karpenter_nodepools_cost_total)`` over the metrics window, when exported.
+    observed_cost: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "pool": self.pool,
+            "factor": self.factor,
+            "autoscaler": self.autoscaler,
+            "consolidation_policy": self.consolidation_policy,
+            "blocked": self.blocked,
+            "reasons": list(self.reasons),
+        }
+        if self.observed_cost is not None:
+            data["observed_cost"] = self.observed_cost
+        return data
+
+
+@dataclass(frozen=True)
+class RealizationContext:
+    """Realization factors per node pool, and the node → pool mapping."""
+
+    pools: Mapping[str, PoolRealization]
+    node_pools: Mapping[str, str]
+    #: Pool applied to nodes the context does not know (new nodes, unresolved samples).
+    default_pool: str
+    observed_at: datetime
+    notes: Tuple[str, ...] = ()
+
+    def pool_for(self, node: Optional[str]) -> PoolRealization:
+        name = self.node_pools.get(node or "", self.default_pool)
+        return self.pools.get(name) or self.pools[self.default_pool]
+
+    def factor_for(self, node: Optional[str]) -> float:
+        return self.pool_for(node).factor
+
+
+def _budget_blocks(budget: Mapping[str, Any]) -> Optional[str]:
+    """``always`` when a budget forbids consolidation at all times, ``scheduled`` when sometimes."""
+    nodes = str(budget.get("nodes", "")).strip()
+    if nodes not in ("0", "0%"):
+        return None
+    reasons = budget.get("reasons") or []
+    if reasons and not any(str(reason) in ("Underutilized", "Empty") for reason in reasons):
+        return None
+    return "scheduled" if budget.get("schedule") else "always"
+
+
+def _pod_blocks(pod: PodObservation) -> Optional[str]:
+    for key, value in POD_BLOCKING_ANNOTATIONS.items():
+        if str(pod.annotations.get(key, "")).strip().lower() == value:
+            return f"pod {pod.namespace}/{pod.name} has {key}={value}"
+    return None
+
+
+def _node_blocks(node: NodeObservation) -> Optional[str]:
+    for key, value in NODE_BLOCKING_ANNOTATIONS.items():
+        if str(node.annotations.get(key, "")).strip().lower() == value:
+            return f"node {node.name} has {key}={value}"
+    return None
+
+
+def _karpenter_pool_of(node: NodeObservation, known: Iterable[str]) -> Optional[str]:
+    names = set(known)
+    for label in KARPENTER_POOL_LABELS:
+        value = node.labels.get(label)
+        if value and (value in names or not names):
+            return value
+    return None
+
+
+def _unread_pool(
+    name: str, members: Sequence[str], what: str, previous: Optional[RealizationContext]
+) -> PoolRealization:
+    """Pool whose autoscaler input could not be read: never mistaken for "no autoscaler".
+
+    The previous observation of the pool is kept when there is one; otherwise
+    the pool keeps the unobserved factor, as before the first observation.
+    """
+    nodes = tuple(sorted(members))
+    kept = previous.pools.get(name) if previous is not None else None
+    if kept is not None and kept.autoscaler != "unknown":
+        reason = f"{what} could not be read; the previous observation of this pool is kept"
+        return replace(kept, nodes=nodes, reasons=(*kept.reasons, reason))
+    return PoolRealization(
+        pool=name,
+        factor=UNOBSERVED_FACTOR,
+        autoscaler="unknown",
+        reasons=(f"{what} could not be read; the factor stays at the unobserved default {UNOBSERVED_FACTOR:g}",),
+        nodes=nodes,
+    )
+
+
+def resolve_realization(
+    inputs: RealizationInputs,
+    now: Optional[datetime] = None,
+    *,
+    previous: Optional[RealizationContext] = None,
+    autoscaler_hint: Optional[str] = None,
+) -> RealizationContext:
+    """Computes the per-pool realization factors (pure).
+
+    An autoscaler input that could not be read (RBAC, timeout) does not count
+    as "no autoscaler": the affected pools keep their ``previous`` observation
+    or the unobserved factor. ``autoscaler_hint`` (``IMPACT_AUTOSCALER_HINT``,
+    IMP-12) declares the autoscaler of the nodes outside Karpenter pools when
+    detection does not see it (a Cluster Autoscaler with another status
+    ConfigMap, a managed autoscaler that publishes nothing).
+    """
+    hint = (autoscaler_hint or "").strip().lower() or None
+    now = now or datetime.now(timezone.utc)
+    karpenter = {pool.name: pool for pool in inputs.karpenter_pools or ()}
+    node_pools: Dict[str, str] = {}
+    members: Dict[str, List[str]] = {}
+    for node in inputs.nodes:
+        pool = _karpenter_pool_of(node, karpenter) or CLUSTER_POOL
+        node_pools[node.name] = pool
+        members.setdefault(pool, []).append(node.name)
+
+    # Blockers per pool, with their first few explanations.
+    blockers: Dict[str, List[str]] = {}
+
+    def _block(pool: str, reason: str) -> None:
+        blockers.setdefault(pool, []).append(reason)
+
+    for node in inputs.nodes:
+        reason = _node_blocks(node)
+        if reason:
+            _block(node_pools[node.name], reason)
+    pods = list(inputs.pods or ())
+    for pod in pods:
+        reason = _pod_blocks(pod)
+        if reason and pod.node:
+            _block(node_pools.get(pod.node, CLUSTER_POOL), reason)
+    for pdb in inputs.pdbs or ():
+        if not pdb.blocks:
+            continue
+        pools_hit = {node_pools.get(pod.node, CLUSTER_POOL) for pod in pods if pod.node and pdb.selects(pod)}
+        for pool in pools_hit:
+            _block(pool, f"PodDisruptionBudget {pdb.namespace}/{pdb.name} allows no disruption")
+
+    # Karpenter events (G5): DisruptionBlocked blocks the pool, Unconsolidatable is reported.
+    unconsolidatable: Dict[str, set] = {}
+    for event in inputs.karpenter_events or ():
+        pool_name = event.pool or (node_pools.get(event.name) if event.kind == "Node" else None)
+        if not pool_name:
+            continue
+        if event.reason in BLOCKING_KARPENTER_EVENTS:
+            detail = f": {event.message[:120]}" if event.message else ""
+            _block(pool_name, f"Karpenter reports {event.reason} on {event.kind} {event.name}{detail}")
+        elif event.reason in NOTED_KARPENTER_EVENTS:
+            unconsolidatable.setdefault(pool_name, set()).add(f"{event.kind}/{event.name}")
+
+    notes = tuple(f"{name} could not be read" for name in inputs.unavailable)
+    metrics = inputs.karpenter_metrics
+    metric_reason, metric_blocker = _metric_evidence(metrics)
+    ca = inputs.cluster_autoscaler
+    pools: Dict[str, PoolRealization] = {}
+
+    for name, pool in karpenter.items():
+        policy = pool.consolidation_policy
+        reasons: List[str] = []
+        if policy in CONSOLIDATING_POLICIES:
+            factor = FACTOR_KARPENTER_CONSOLIDATING
+            reasons.append(f"Karpenter NodePool {name} consolidates with {policy}")
+        elif policy == "WhenEmpty":
+            factor = FACTOR_KARPENTER_WHEN_EMPTY
+            reasons.append(f"Karpenter NodePool {name} removes nodes only when empty (WhenEmpty)")
+        else:
+            factor = FACTOR_KARPENTER_WHEN_EMPTY
+            reasons.append(f"Karpenter NodePool {name} has an unknown consolidation policy {policy!r}")
+        if unconsolidatable.get(name):
+            reasons.append(
+                f"Karpenter reports {len(unconsolidatable[name])} object(s) of NodePool {name} as Unconsolidatable"
+            )
+        consolidating = policy in CONSOLIDATING_POLICIES
+        if consolidating and metric_reason:
+            reasons.append(metric_reason)
+        cost = metrics.pool_costs.get(name) if metrics is not None and metrics.pool_costs is not None else None
+        if cost is not None and metrics is not None:
+            reasons.append(f"karpenter_nodepools_cost_total of NodePool {name} rose by {cost:g} over {metrics.window}")
+        budget_states = {_budget_blocks(budget) for budget in pool.budgets}
+        blocked = False
+        if "always" in budget_states:
+            factor = 0.0
+            reasons.append(f"Karpenter NodePool {name} has a disruption budget of zero nodes")
+        else:
+            pool_blockers = list(blockers.get(name, []))
+            if consolidating and metric_blocker:
+                pool_blockers.append(metric_blocker)
+            if "scheduled" in budget_states:
+                pool_blockers.append(f"Karpenter NodePool {name} has a scheduled zero disruption budget")
+            if pool_blockers:
+                blocked = True
+                factor *= BLOCKER_MULTIPLIER
+                reasons.extend(_summarize(pool_blockers))
+        pools[name] = PoolRealization(
+            pool=name,
+            factor=factor,
+            autoscaler="karpenter",
+            reasons=tuple(reasons),
+            nodes=tuple(sorted(members.get(name, []))),
+            consolidation_policy=policy,
+            blocked=blocked,
+            observed_cost=cost,
+        )
+
+    # Nodes labeled with a Karpenter pool while the NodePools could not be read.
+    if UNAVAILABLE_KARPENTER_POOLS in inputs.unavailable:
+        for name, names in members.items():
+            if name != CLUSTER_POOL and name not in pools:
+                pools[name] = _unread_pool(name, names, UNAVAILABLE_KARPENTER_POOLS, previous)
+
+    # Nodes outside Karpenter pools: Cluster Autoscaler, or fixed nodes.
+    if ca is None and hint in (HINT_CLUSTER_AUTOSCALER, HINT_KARPENTER):
+        hinted = HINT_FACTORS[hint]
+        hinted_blockers = list(blockers.get(CLUSTER_POOL, []))
+        hinted_reasons = [f"IMPACT_AUTOSCALER_HINT={hint}: autoscaler declared by the configuration, not detected"]
+        if hinted_blockers:
+            hinted *= BLOCKER_MULTIPLIER
+            hinted_reasons.extend(_summarize(hinted_blockers))
+        pools[CLUSTER_POOL] = PoolRealization(
+            pool=CLUSTER_POOL,
+            factor=hinted,
+            autoscaler=hint,
+            reasons=tuple(hinted_reasons),
+            nodes=tuple(sorted(members.get(CLUSTER_POOL, []))),
+            blocked=bool(hinted_blockers),
+        )
+        return RealizationContext(
+            pools=pools, node_pools=node_pools, default_pool=CLUSTER_POOL, observed_at=now, notes=notes
+        )
+    if ca is None and UNAVAILABLE_CLUSTER_AUTOSCALER in inputs.unavailable:
+        pools[CLUSTER_POOL] = _unread_pool(
+            CLUSTER_POOL, members.get(CLUSTER_POOL, []), UNAVAILABLE_CLUSTER_AUTOSCALER, previous
+        )
+        return RealizationContext(
+            pools=pools, node_pools=node_pools, default_pool=CLUSTER_POOL, observed_at=now, notes=notes
+        )
+    reasons = []
+    blocked = False
+    if ca is not None:
+        factor = FACTOR_CLUSTER_AUTOSCALER
+        autoscaler = "cluster_autoscaler"
+        reasons.append("Cluster Autoscaler is running (kube-system/cluster-autoscaler-status)")
+        cluster_blockers = list(blockers.get(CLUSTER_POOL, []))
+        health = ca.health
+        if health and health.lower() != "healthy":
+            cluster_blockers.append(f"Cluster Autoscaler reports {health}")
+        if cluster_blockers:
+            blocked = True
+            factor *= BLOCKER_MULTIPLIER
+            reasons.extend(_summarize(cluster_blockers))
+    else:
+        factor = FACTOR_NO_AUTOSCALER
+        autoscaler = "none"
+        if inputs.karpenter_pools:
+            reasons.append("Node is not managed by a Karpenter NodePool and no Cluster Autoscaler runs")
+        else:
+            reasons.append("No Cluster Autoscaler or Karpenter: fixed nodes, savings stay allocated, not billed")
+    pools[CLUSTER_POOL] = PoolRealization(
+        pool=CLUSTER_POOL,
+        factor=factor,
+        autoscaler=autoscaler,
+        reasons=tuple(reasons),
+        nodes=tuple(sorted(members.get(CLUSTER_POOL, []))),
+        blocked=blocked,
+    )
+    return RealizationContext(
+        pools=pools,
+        node_pools=node_pools,
+        default_pool=CLUSTER_POOL,
+        observed_at=now,
+        notes=notes,
+    )
+
+
+def _metric_evidence(metrics: Optional[KarpenterMetricsObservation]) -> Tuple[Optional[str], Optional[str]]:
+    """``(reason, blocker)`` the cluster-wide Karpenter metrics add to consolidating pools."""
+    if metrics is None:
+        return None, None
+    consolidations, eligible = metrics.consolidations, metrics.eligible
+    if consolidations is None:
+        return None, None
+    if consolidations > 0:
+        return (
+            f"Karpenter made {consolidations:g} consolidation decision(s) over the last {metrics.window} "
+            "(karpenter_voluntary_disruption_decisions_total)",
+            None,
+        )
+    if eligible:
+        return None, (
+            f"Karpenter made no consolidation decision over the last {metrics.window} although "
+            f"{eligible:g} node(s) are eligible (karpenter_voluntary_disruption_*)"
+        )
+    return (
+        f"Karpenter made no consolidation decision over the last {metrics.window}; no node is eligible now",
+        None,
+    )
+
+
+def _summarize(reasons: Sequence[str], limit: int = 3) -> List[str]:
+    unique = list(dict.fromkeys(reasons))
+    if len(unique) <= limit:
+        return [f"blocker: {reason}" for reason in unique]
+    return [f"blocker: {reason}" for reason in unique[:limit]] + [f"blocker: {len(unique) - limit} more"]
+
+
+# --------------------------------------------------------------------------- #
+# Projection-side view                                                        #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class RealizationResolution:
+    """Realization of one projection: the factor, its source and why."""
+
+    factor: float
+    source: str
+    reasons: Tuple[str, ...] = ()
+    pools: Tuple[Dict[str, Any], ...] = ()
+
+
+def realization_for_nodes(context: RealizationContext, weights: Mapping[Optional[str], float]) -> RealizationResolution:
+    """Hours-weighted realization factor over the nodes a workload ran on."""
+    total = sum(max(weight, 0.0) for weight in weights.values())
+    used: Dict[str, PoolRealization] = {}
+    if total <= 0:
+        pool = context.pools[context.default_pool]
+        used[pool.pool] = pool
+        factor = pool.factor
+    else:
+        factor = 0.0
+        for node, weight in weights.items():
+            pool = context.pool_for(node)
+            used[pool.pool] = pool
+            factor += pool.factor * max(weight, 0.0) / total
+    reasons: List[str] = []
+    for pool in used.values():
+        reasons.extend(pool.reasons)
+    reasons.extend(context.notes)
+    return RealizationResolution(
+        factor=min(max(factor, 0.0), 1.0),
+        source=SOURCE_CONTEXT,
+        reasons=tuple(dict.fromkeys(reasons)),
+        pools=tuple(pool.to_dict() for pool in used.values()),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Process cache, refreshed by the controller                                  #
+# --------------------------------------------------------------------------- #
+
+
+class RealizationCollector(Protocol):
+    async def collect(self) -> Optional[RealizationInputs]: ...
+
+
+#: A stored context older than this is not restored after a restart (IMP-12).
+STORED_CONTEXT_MAX_AGE = timedelta(hours=24)
+
+
+def context_to_dict(context: RealizationContext) -> Dict[str, Any]:
+    """JSON form of a realization context (stored in ``realization_context``, IMP-12)."""
+    return {
+        "pools": {name: {**pool.to_dict(), "nodes": list(pool.nodes)} for name, pool in sorted(context.pools.items())},
+        "node_pools": dict(sorted(context.node_pools.items())),
+        "default_pool": context.default_pool,
+        "observed_at": context.observed_at.isoformat(),
+        "notes": list(context.notes),
+    }
+
+
+def context_from_dict(data: Mapping[str, Any], observed_at: datetime) -> Optional[RealizationContext]:
+    """The context stored by :func:`context_to_dict`; ``None`` when it cannot be read back."""
+    try:
+        pools = {
+            str(name): PoolRealization(
+                pool=str(values["pool"]),
+                factor=float(values["factor"]),
+                autoscaler=str(values.get("autoscaler") or "none"),
+                reasons=tuple(str(reason) for reason in values.get("reasons") or ()),
+                nodes=tuple(str(node) for node in values.get("nodes") or ()),
+                consolidation_policy=values.get("consolidation_policy"),
+                blocked=bool(values.get("blocked")),
+                observed_cost=values.get("observed_cost"),
+            )
+            for name, values in (data.get("pools") or {}).items()
+        }
+        default_pool = str(data["default_pool"])
+        if default_pool not in pools:
+            return None
+        return RealizationContext(
+            pools=pools,
+            node_pools={str(node): str(pool) for node, pool in (data.get("node_pools") or {}).items()},
+            default_pool=default_pool,
+            observed_at=observed_at,
+            notes=tuple(str(note) for note in data.get("notes") or ()),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+class RealizationContextStore(Protocol):
+    async def save_context(self, observed_at: datetime, payload: Dict[str, Any]) -> None: ...
+
+    async def load_context(self) -> Optional[Tuple[datetime, Dict[str, Any]]]: ...
+
+
+@dataclass
+class _State:
+    context: Optional[RealizationContext] = None
+    refreshed_at: Optional[datetime] = None
+
+
+_STATE = _State()
+_STORE: Dict[str, Any] = {"store": None}
+
+
+def register_realization_store(store: Optional[RealizationContextStore]) -> None:
+    """Where refreshed contexts are persisted and restored from (IMP-12); ``None`` disables it."""
+    _STORE["store"] = store
+
+
+async def restore_realization_context(
+    store: Optional[RealizationContextStore] = None, *, now: Optional[datetime] = None
+) -> Optional[RealizationContext]:
+    """Loads the stored context when this process has not observed the cluster yet (IMP-12).
+
+    A context younger than :data:`STORED_CONTEXT_MAX_AGE` replaces the
+    unobserved factor 1.0 after a restart; its pools say it was restored. The
+    next refresh still reads the cluster. Read failures are logged and keep the
+    process state.
+    """
+    if _STATE.context is not None:
+        return _STATE.context
+    store = store or _STORE["store"]
+    if store is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    try:
+        stored = await store.load_context()
+    except Exception as error:
+        logger.warning("Could not read the stored realization context: %s", error)
+        return None
+    if stored is None:
+        return None
+    observed_at, payload = stored
+    if now - observed_at > STORED_CONTEXT_MAX_AGE:
+        logger.info("Stored realization context from %s is older than 24 h: not restored.", observed_at)
+        return None
+    context = context_from_dict(payload, observed_at)
+    if context is None:
+        logger.warning("The stored realization context could not be read back: not restored.")
+        return None
+    note = f"restored after a restart from the context observed at {observed_at.isoformat()}"
+    context = replace(
+        context,
+        pools={name: replace(pool, reasons=(*pool.reasons, note)) for name, pool in context.pools.items()},
+    )
+    if _STATE.context is None:
+        _STATE.context = context
+    logger.info("Realization context restored from %s.", observed_at.isoformat())
+    return _STATE.context
+
+
+async def _persist(context: RealizationContext) -> None:
+    store = _STORE["store"]
+    if store is None:
+        return
+    try:
+        await store.save_context(context.observed_at, context_to_dict(context))
+    except Exception as error:
+        logger.warning("Could not store the realization context: %s", error)
+
+
+def current_realization_context() -> Optional[RealizationContext]:
+    """The last observed context of this process, or None before the first observation."""
+    return _STATE.context
+
+
+def set_realization_context(context: Optional[RealizationContext]) -> None:
+    """Replaces the cached context (tests and one-shot commands)."""
+    _STATE.context = context
+    _STATE.refreshed_at = context.observed_at if context is not None else None
+
+
+def realization_override(config: Any) -> Optional[float]:
+    """``IMPACT_REALIZATION_FACTOR`` when it is set to a number in [0, 1]."""
+    value = getattr(config, "IMPACT_REALIZATION_FACTOR", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return min(max(float(value), 0.0), 1.0)
+
+
+async def refresh_realization_context(
+    config: Any,
+    *,
+    collector: Optional[RealizationCollector] = None,
+    now: Optional[datetime] = None,
+    force: bool = False,
+) -> Optional[RealizationContext]:
+    """Reads the cluster and caches a fresh context, at most every :data:`REFRESH_INTERVAL`.
+
+    Runs only inside a cluster (``KUBERNETES_SERVICE_HOST``) unless a
+    collector is given, and never when ``IMPACT_REALIZATION_FACTOR`` pins the
+    factor. Failures keep the previous context.
+    """
+    if realization_override(config) is not None:
+        return _STATE.context
+    if collector is None and not os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return _STATE.context
+    now = now or datetime.now(timezone.utc)
+    if not force and _STATE.refreshed_at is not None and now - _STATE.refreshed_at < REFRESH_INTERVAL:
+        return _STATE.context
+    if collector is None:
+        from greenkube.collectors.autoscaler_collector import AutoscalerCollector
+
+        collector = AutoscalerCollector()
+    # Mark the attempt first: one slow or failing read is not retried by every caller.
+    _STATE.refreshed_at = now
+    try:
+        inputs = await collector.collect()
+    except Exception as error:  # pragma: no cover - collectors degrade on their own
+        logger.warning("Could not read the realization context: %s", error)
+        inputs = None
+    if inputs is None:
+        return _STATE.context
+    hint = getattr(config, "IMPACT_AUTOSCALER_HINT", None) if config is not None else None
+    context = resolve_realization(
+        inputs, now, previous=_STATE.context, autoscaler_hint=hint if isinstance(hint, str) else None
+    )
+    _STATE.context = context
+    await _persist(context)
+    logger.info(
+        "Realization context: %s",
+        ", ".join(f"{name}={pool.factor:g}" for name, pool in sorted(context.pools.items())),
+    )
+    return context

@@ -1,0 +1,29 @@
+{{- /*
+0.3.x SQLite installs (config.persistence.enabled) stored their database on the
+claim "<fullname>". The chart no longer runs SQLite, but it keeps rendering
+that claim while the deprecated value is set, with helm.sh/resource-policy:
+keep, so an upgrade never deletes the data before `greenkube db copy` moved it
+to PostgreSQL (F17, docs/upgrading.md). Delete the claim yourself afterwards.
+*/ -}}
+{{- $_ := include "greenkube.values" . }}
+{{- $persistence := (.Values.config | default dict).persistence | default dict }}
+{{- if $persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "greenkube.fullname" . }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: legacy-sqlite
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ $persistence.accessMode | default "ReadWriteOnce" | quote }}
+  resources:
+    requests:
+      storage: {{ $persistence.size | default "10Gi" | quote }}
+  {{- if $persistence.storageClassName }}
+  storageClassName: {{ $persistence.storageClassName | quote }}
+  {{- end }}
+{{- end }}

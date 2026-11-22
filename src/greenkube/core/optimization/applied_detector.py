@@ -2,10 +2,18 @@
 """Detects applied recommendations from the live cluster state (Phase 3).
 
 Apply detection uses the Kubernetes API: when a targeted container's live
-request matches the recommendation within the configured tolerance and an
-active recommendation existed for that target, the recommendation transitions
-to ``applied``. Ambiguous workload-level aggregates are never used to infer a
-multi-container target.
+request moved away from the recommendation's baseline (``current_*``) to the
+proposed value, within the configured tolerance, the recommendation
+transitions to ``applied``. A live value that still equals the baseline is
+never an applied change, even when the proposal lies within the tolerance of
+it, and neither is a rollout that completed before the recommendation existed.
+Ambiguous workload-level aggregates are never used to infer a multi-container
+target.
+
+A change counts as applied only once its rollout has completed (every replica
+updated and available, ``observedGeneration >= generation``); ``applied_at`` is
+the rollout completion time, so the verification after-window never includes
+old pods (C0.12, BUG-38).
 """
 
 from __future__ import annotations
@@ -13,15 +21,18 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import TYPE_CHECKING, Dict, List, Optional, Protocol, Sequence, Tuple
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
+from greenkube.automation.actions import ACTION_KINDS, action_kind_of
+from greenkube.automation.actions.delete_resource import DELETABLE_TARGETS, deletion_target_for
+from greenkube.core.recommendation_realization import RECORDED_CHANGE_STATUSES
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     ActionStatus,
     PlanStatus,
     PreApplyWorkloadBaseline,
-    SetContainerResources,
+    ResourceTarget,
 )
 from greenkube.models.metrics import (
     ApplicationMethod,
@@ -29,6 +40,7 @@ from greenkube.models.metrics import (
     RecommendationStatus,
     RecommendationType,
 )
+from greenkube.verify.digest import hpa_digest, image_digest, pod_template_digest, resources_digest
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -42,6 +54,9 @@ RIGHTSIZING_TYPES = {
 }
 
 _APPS_READ_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"}
+
+#: Action states of a recommendation with a typed action and no plan in flight.
+_NO_PLAN_IN_FLIGHT = frozenset({None, ActionStatus.NONE, ActionStatus.FAILED, ActionStatus.CLOSED})
 
 
 @dataclass
@@ -59,6 +74,27 @@ class WorkloadSnapshot:
     observed_generation: int | None = None
     container_request_values: Dict[str, Tuple[int | None, int | None]] = field(default_factory=dict)
     container_request_values_valid: bool = True
+    #: Per-container limits (CPU millicores, memory bytes), recorded with spec observations (WP-08.1).
+    container_limit_values: Dict[str, Tuple[int | None, int | None]] = field(default_factory=dict)
+    #: ``container``, ``sidecar`` (native sidecar) or ``init`` per container name (WP-08.1).
+    container_kinds: Dict[str, str] = field(default_factory=dict)
+    # Rollout state; ``None`` means the reader does not report it (legacy/fake readers).
+    desired_replicas: int | None = None
+    current_replicas: int | None = None
+    updated_replicas: int | None = None
+    available_replicas: int | None = None
+    current_revision: str | None = None
+    update_revision: str | None = None
+    rollout_completed_at: datetime | None = None
+    # Change measurement (C1): pod-template and HPA digests, custom load-driver PromQL.
+    spec_digest: str | None = None
+    hpa_digest: str | None = None
+    # MEA-08: digests of the containers' requests/limits and of their images (what a saving depends on).
+    resources_digest: str | None = None
+    image_digest: str | None = None
+    # False when HPAs could not be listed: ``hpa_digest`` is then unknown, not "no HPA".
+    hpa_observed: bool = True
+    load_metric: str | None = None
 
 
 class WorkloadReader(Protocol):
@@ -94,6 +130,33 @@ class ActionStatusRepository(Protocol):
         actor: str = "system",
         reason_code: str | None = None,
     ) -> "SyncPlanStatus | None": ...
+
+
+class ChangeRecorder(Protocol):
+    """Records applied changes and workload revisions (C1).
+
+    Implemented by :class:`greenkube.verify.service.ChangeMeasurementService`.
+    """
+
+    async def needs_observations(self) -> bool: ...
+
+    async def observe_workloads(
+        self, snapshots: Mapping[Tuple[str, str, str], Any], now: datetime | None = None
+    ) -> int: ...
+
+    async def change_id_for(
+        self, plan_id: str | None, snapshot: "WorkloadSnapshot | ResourceChangeSnapshot", completed_at: datetime
+    ) -> str | None: ...
+
+    async def record_change(
+        self,
+        change_id: str,
+        records: Sequence[RecommendationRecord],
+        *,
+        snapshot: "WorkloadSnapshot | ResourceChangeSnapshot | None" = None,
+        plan: Any = None,
+        now: datetime | None = None,
+    ) -> Any: ...
 
 
 class SyncPlanStatus(Protocol):
@@ -149,9 +212,25 @@ def _resource_field(value, name: str, camel_case: str | None = None):
     return result if result is not None or camel_case is None else getattr(value, camel_case, None)
 
 
+def _container_kinds(containers, init_containers) -> Dict[str, str]:
+    """``container``, ``sidecar`` (init container with ``restartPolicy: Always``) or ``init`` per name."""
+    kinds: Dict[str, str] = {}
+    for container in containers or []:
+        name = _resource_field(container, "name")
+        if isinstance(name, str) and name:
+            kinds[name] = "container"
+    for container in init_containers or []:
+        name = _resource_field(container, "name")
+        if isinstance(name, str) and name and name not in kinds:
+            policy = _resource_field(container, "restart_policy", "restartPolicy")
+            kinds[name] = "sidecar" if policy == "Always" else "init"
+    return kinds
+
+
 def _read_container_request_values(
-    containers,
+    containers, field_name: str = "requests"
 ) -> tuple[Dict[str, Tuple[int | None, int | None]], bool]:
+    """Per-container ``(cpu millicores, memory bytes)`` of ``resources.<field_name>`` and whether all parsed."""
     values: Dict[str, Tuple[int | None, int | None]] = {}
     valid = True
     from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
@@ -162,7 +241,7 @@ def _read_container_request_values(
             valid = False
             continue
         resources = _resource_field(container, "resources")
-        requests = _resource_field(resources, "requests") if resources else None
+        requests = _resource_field(resources, field_name) if resources else None
         if requests is None:
             requests = {}
         elif not isinstance(requests, Mapping):
@@ -212,6 +291,149 @@ def _parse_memory(value) -> int:
         return 0
 
 
+def _int_field(value, name: str, camel_case: str | None = None) -> int | None:
+    raw = _resource_field(value, name, camel_case) if value is not None else None
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_time(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _deployment_completed_at(status) -> datetime | None:
+    """Last update of the ``Progressing`` condition once the new ReplicaSet is available."""
+    conditions = _resource_field(status, "conditions") if status is not None else None
+    for condition in conditions or []:
+        if (
+            _resource_field(condition, "type") == "Progressing"
+            and str(_resource_field(condition, "status")) == "True"
+            and _resource_field(condition, "reason") == "NewReplicaSetAvailable"
+        ):
+            return _parse_time(_resource_field(condition, "last_update_time", "lastUpdateTime"))
+    return None
+
+
+def _rollout_fields(kind: str, spec, status) -> dict[str, Any]:
+    """Normalize rollout progress across Deployment, StatefulSet and DaemonSet."""
+    if kind == "DaemonSet":
+        return {
+            "desired_replicas": _int_field(status, "desired_number_scheduled", "desiredNumberScheduled") or 0,
+            "current_replicas": _int_field(status, "current_number_scheduled", "currentNumberScheduled") or 0,
+            "updated_replicas": _int_field(status, "updated_number_scheduled", "updatedNumberScheduled") or 0,
+            "available_replicas": _int_field(status, "number_available", "numberAvailable") or 0,
+        }
+    desired = _int_field(spec, "replicas")
+    fields: dict[str, Any] = {
+        "desired_replicas": 1 if desired is None else desired,
+        "current_replicas": _int_field(status, "replicas") or 0,
+        "updated_replicas": _int_field(status, "updated_replicas", "updatedReplicas") or 0,
+    }
+    available = _int_field(status, "available_replicas", "availableReplicas")
+    if kind == "StatefulSet":
+        if available is None:
+            available = _int_field(status, "ready_replicas", "readyReplicas")
+        fields["current_revision"] = _resource_field(status, "current_revision", "currentRevision") if status else None
+        fields["update_revision"] = _resource_field(status, "update_revision", "updateRevision") if status else None
+    else:
+        fields["rollout_completed_at"] = _deployment_completed_at(status)
+    fields["available_replicas"] = available or 0
+    return fields
+
+
+def rollout_complete(snapshot: WorkloadSnapshot) -> bool:
+    """True when every replica runs the current template and is available.
+
+    Readers that do not report rollout progress (``desired_replicas is None``)
+    are trusted on ``observedGeneration`` alone.
+    """
+    generation = snapshot.generation
+    observed = snapshot.observed_generation
+    if (
+        isinstance(generation, int)
+        and isinstance(observed, int)
+        and not isinstance(generation, bool)
+        and not isinstance(observed, bool)
+        and observed < generation
+    ):
+        return False
+    desired = snapshot.desired_replicas
+    if desired is None:
+        return True
+    updated = snapshot.updated_replicas if snapshot.updated_replicas is not None else desired
+    available = snapshot.available_replicas if snapshot.available_replicas is not None else desired
+    current = snapshot.current_replicas if snapshot.current_replicas is not None else updated
+    if updated < desired or available < desired or current != updated:
+        return False
+    if snapshot.current_revision and snapshot.update_revision and snapshot.current_revision != snapshot.update_revision:
+        return False
+    return True
+
+
+def rollout_completion_time(snapshot: WorkloadSnapshot, now: datetime) -> tuple[datetime, str]:
+    """Best known rollout completion time, never later than ``now``.
+
+    Deployments report it through their ``Progressing`` condition; otherwise the
+    detection time is used, which is a conservative (late) bound.
+    """
+    completed = snapshot.rollout_completed_at
+    if completed is not None and completed <= now:
+        return completed, "progressing_condition"
+    return now, "detection_time"
+
+
+def _load_metric_annotation(metadata) -> str | None:
+    from greenkube.verify.load_driver import LOAD_METRIC_ANNOTATION
+
+    annotations = _resource_field(metadata, "annotations")
+    if not isinstance(annotations, Mapping):
+        return None
+    value = annotations.get(LOAD_METRIC_ANNOTATION)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+async def _read_hpa_digests() -> Optional[Dict[Tuple[str, str, str], str]]:
+    """Digest of the HPA spec targeting each workload; ``None`` when HPAs cannot be listed.
+
+    ``None`` (unknown) is distinct from an empty mapping (no HPA): a failed
+    listing must not look like every HPA was removed and re-added.
+    """
+    digests: Dict[Tuple[str, str, str], str] = {}
+    try:
+        from greenkube.core.k8s_client import get_autoscaling_v2_api
+
+        api = await get_autoscaling_v2_api()
+        if api is None:
+            return None
+        result = await api.list_horizontal_pod_autoscaler_for_all_namespaces()
+    except Exception as exc:
+        logger.debug("Apply detection: could not list HPAs: %s", exc)
+        return None
+    for item in getattr(result, "items", []) or []:
+        metadata = _resource_field(item, "metadata")
+        spec = _resource_field(item, "spec")
+        ref = _resource_field(spec, "scale_target_ref", "scaleTargetRef") if spec is not None else None
+        namespace = _resource_field(metadata, "namespace") if metadata is not None else None
+        kind = _resource_field(ref, "kind") if ref is not None else None
+        name = _resource_field(ref, "name") if ref is not None else None
+        digest = hpa_digest(spec)
+        if isinstance(namespace, str) and isinstance(kind, str) and isinstance(name, str) and digest:
+            digests[(namespace, kind, name)] = digest
+    return digests
+
+
 class K8sWorkloadReader:
     """Reads Deployment/StatefulSet/DaemonSet requests via the Kubernetes API."""
 
@@ -229,6 +451,7 @@ class K8sWorkloadReader:
             logger.warning("Apply detection: no Kubernetes configuration available.")
             return snapshots
 
+        hpas = await _read_hpa_digests()
         readers = (
             ("Deployment", api.list_deployment_for_all_namespaces),
             ("StatefulSet", api.list_stateful_set_for_all_namespaces),
@@ -249,7 +472,16 @@ class K8sWorkloadReader:
                     continue
                 containers = _resource_field(pod_spec, "containers")
                 cpu, memory, container_requests = _sum_requests(containers)
-                request_values, request_values_valid = _read_container_request_values(containers)
+                # Native sidecars and classic init containers can be rightsized too (H1): their
+                # requests are recorded per container (names are unique across both lists) so
+                # their changes are detected as applied. Only regular containers enter the sums.
+                init_containers = list(_resource_field(pod_spec, "init_containers", "initContainers") or [])
+                request_values, request_values_valid = _read_container_request_values(
+                    [*(containers or []), *init_containers]
+                )
+                limit_values, limit_values_valid = _read_container_request_values(
+                    [*(containers or []), *init_containers], "limits"
+                )
                 status = _resource_field(item, "status")
                 namespace = _resource_field(metadata, "namespace")
                 name = _resource_field(metadata, "name")
@@ -267,8 +499,100 @@ class K8sWorkloadReader:
                     observed_generation=_resource_field(status, "observed_generation", "observedGeneration"),
                     container_request_values=request_values,
                     container_request_values_valid=request_values_valid,
+                    container_limit_values=limit_values if limit_values_valid else {},
+                    container_kinds=_container_kinds(containers, init_containers),
+                    spec_digest=pod_template_digest(template),
+                    resources_digest=resources_digest(template),
+                    image_digest=image_digest(template),
+                    hpa_digest=hpas.get((namespace, kind, name)) if hpas is not None else None,
+                    hpa_observed=hpas is not None,
+                    load_metric=_load_metric_annotation(metadata),
+                    **_rollout_fields(kind, spec, status),
                 )
         return snapshots
+
+
+class ResourceReadError(RuntimeError):
+    """The live state of a resource could not be read (never mistaken for "absent")."""
+
+
+class ResourceReader(Protocol):
+    """Reads one live resource; ``None`` when the API answers that it does not exist."""
+
+    async def read_resource(self, ref: ResourceTarget) -> Optional[Mapping[str, Any]]: ...
+
+
+class K8sResourceReader:
+    """Reads the non-workload resources action kinds target (Services, PersistentVolumes).
+
+    Only a ``404`` means "absent"; any other failure raises ``ResourceReadError`` so apply
+    detection and baselines fail closed instead of recording a deletion that did not happen.
+    """
+
+    def __init__(self, core_v1_api: Any = None) -> None:
+        self._api = core_v1_api
+
+    async def _core(self) -> Any:
+        if self._api is None:
+            from greenkube.core.k8s_client import get_core_v1_api
+
+            self._api = await get_core_v1_api()
+            if self._api is None:
+                raise ResourceReadError("no Kubernetes configuration is available")
+        return self._api
+
+    async def read_resource(self, ref: ResourceTarget) -> Optional[Mapping[str, Any]]:
+        if (ref.api_version, ref.kind) == ("v1", "Service") and ref.namespace:
+            reader = "read_namespaced_service"
+            kwargs: Dict[str, Any] = {"name": ref.name, "namespace": ref.namespace}
+        elif (ref.api_version, ref.kind) == ("v1", "PersistentVolume") and not ref.namespace:
+            reader = "read_persistent_volume"
+            kwargs = {"name": ref.name}
+        else:
+            raise ResourceReadError(f"reading {ref.api_version}/{ref.kind} resources is not supported")
+        api = await self._core()
+        try:
+            item = await getattr(api, reader)(**kwargs)
+        except Exception as exc:
+            if getattr(exc, "status", None) == 404:
+                return None
+            raise ResourceReadError(f"could not read {ref.kind} {ref.name!r}: {type(exc).__name__}") from exc
+        return _plain_object(api, item)
+
+
+def _plain_object(api: Any, item: Any) -> Mapping[str, Any]:
+    if isinstance(item, Mapping):
+        return item
+    api_client = getattr(api, "api_client", None)
+    sanitize = getattr(api_client, "sanitize_for_serialization", None)
+    if callable(sanitize):
+        plain = sanitize(item)
+        if isinstance(plain, Mapping):
+            return plain
+    to_dict = getattr(item, "to_dict", None)
+    if callable(to_dict):
+        plain = to_dict()
+        if isinstance(plain, Mapping):
+            return plain
+    return {"metadata": {}}
+
+
+@dataclass(frozen=True)
+class ResourceChangeSnapshot:
+    """The identity of a non-workload change target, as the change recorder reads a snapshot."""
+
+    namespace: str
+    kind: str
+    name: str
+    action_kind: str
+    uid: str | None = None
+    generation: int | None = None
+    spec_digest: str | None = None
+    load_metric: str | None = None
+
+
+#: Recommendation types whose application is the absence of a resource (H6).
+DELETION_APPLY_TYPES = frozenset(DELETABLE_TARGETS)
 
 
 class AppliedDetector:
@@ -280,13 +604,21 @@ class AppliedDetector:
         reader: Optional[WorkloadReader] = None,
         config: Optional["Config"] = None,
         action_status_repository: Optional[ActionStatusRepository] = None,
+        change_recorder: Optional[ChangeRecorder] = None,
+        resource_reader: Optional[ResourceReader] = None,
     ):
         from greenkube.core.config import get_config
 
         self.lifecycle = lifecycle
+        # The production readers read the cluster; an injected workload reader (tests) never
+        # brings a live resource reader along implicitly.
+        self.resource_reader = (
+            resource_reader if resource_reader is not None else (K8sResourceReader() if reader is None else None)
+        )
         self.reader = reader if reader is not None else K8sWorkloadReader()
         self.config = config if config is not None else get_config()
         self.action_status_repository = action_status_repository
+        self.change_recorder = change_recorder
 
     def _target_key(self, record: RecommendationRecord) -> Optional[Tuple[str, str, str]]:
         namespace = record.namespace
@@ -305,32 +637,155 @@ class AppliedDetector:
         """Returns True when the live value shows the change landed.
 
         A decrease alone is not evidence of this recommendation being applied;
-        the live request must match the proposed value within tolerance.
+        the live request must match the proposed value within tolerance and
+        must have moved from the baseline toward it. A live value still equal
+        to the baseline is not a change: a 20Mi -> 23Mi proposal is within 25%
+        of the untouched 20Mi request, which used to be recorded as an applied
+        change with identical before and after values.
         """
         # A missing request (0) is not an applied change: it means the workload
         # declares no requests, not that the recommendation was implemented.
         if observed is None or observed <= 0 or current is None or current <= 0:
             return False
-        if recommended is not None and recommended > 0:
-            return abs(observed - recommended) <= recommended * tolerance
-        return False
+        if recommended is None or recommended <= 0 or observed == current:
+            return False
+        distance = abs(observed - recommended)
+        return distance <= recommended * tolerance and distance < abs(current - recommended)
 
     async def detect(self) -> List[RecommendationRecord]:
-        """Detects and records applied rightsizing recommendations."""
+        """Detects and records applied rightsizing recommendations and resource deletions."""
         records = await self.lifecycle.repo.get_recommendations_by_statuses(
             ["active", "pr_open", RecommendationStatus.ROLLBACK_REVIEW.value]
         )
+        applied = await self._detect_rightsizing(records)
+        applied.extend(await self._detect_deletions(records))
+        return applied
+
+    async def _detect_deletions(self, records: Sequence[RecommendationRecord]) -> List[RecommendationRecord]:
+        """Deletions are applied once the resource is absent from the cluster (H6).
+
+        A deletion merged through a pull request counts once its plan synced; a resource
+        deleted by hand (manual mode, H9) counts when no plan is in flight. An unreadable
+        resource is never taken for an absent one.
+        """
+        reader = self.resource_reader
+        candidates = [
+            record
+            for record in records
+            if _type_value(record) in DELETION_APPLY_TYPES
+            and record.id is not None
+            and record.status in (RecommendationStatus.ACTIVE, RecommendationStatus.PR_OPEN)
+        ]
+        if reader is None or not candidates:
+            return []
+        applied: List[RecommendationRecord] = []
+        recorder = self.change_recorder
+        for record in candidates:
+            assert record.id is not None
+            target = deletion_target_for(record)
+            if target is None:
+                continue
+            spec = action_kind_of(record.action) or ACTION_KINDS.get("delete_resource")
+            if spec is None:
+                continue
+            action_status: ActionStatus | None = None
+            synced_plan: SyncPlanStatus | None = None
+            if self.action_status_repository is not None:
+                try:
+                    raw_status = await self.action_status_repository.get_recommendation_action_status(record.id)
+                    action_status = ActionStatus(raw_status) if raw_status is not None else None
+                except Exception as exc:
+                    logger.warning("Deletion detection skipped recommendation %s: %s", record.id, exc)
+                    continue
+                if action_status is ActionStatus.SYNC_PENDING:
+                    synced_plan = await self._synced_forward_plan(record.id)
+                    if synced_plan is None:
+                        continue
+                elif action_status in _NO_PLAN_IN_FLIGHT and record.status is RecommendationStatus.ACTIVE:
+                    action_status = None
+                else:
+                    continue
+            elif record.status is not RecommendationStatus.ACTIVE:
+                continue
+            try:
+                live = await reader.read_resource(target)
+            except Exception as exc:
+                logger.info("Deletion detection could not read %s %s: %s", target.kind, target.name, exc)
+                continue
+            if not spec.is_resource_applied(live, target).applied:
+                continue
+            detected_at = datetime.now(timezone.utc)
+            plan_id = synced_plan.plan_id if synced_plan is not None else None
+            snapshot = ResourceChangeSnapshot(
+                namespace=target.namespace, kind=target.kind, name=target.name, action_kind=spec.kind
+            )
+            change_id: Optional[str] = None
+            if recorder is not None:
+                change_id = await recorder.change_id_for(plan_id, snapshot, detected_at)
+            try:
+                updated = await self.lifecycle.apply(
+                    record.id,
+                    application_method=(
+                        ApplicationMethod.PR_MERGE.value
+                        if synced_plan is not None
+                        else ApplicationMethod.DETECTED.value
+                    ),
+                    actor="detector",
+                    applied_at=detected_at,
+                    plan_id=plan_id,
+                    rollout={"completed_at": detected_at.isoformat(), "completion_source": "resource_absent"},
+                    change_id=change_id,
+                )
+                if synced_plan is not None and self.action_status_repository is not None:
+                    updated_count = await self.action_status_repository.set_recommendation_action_status(
+                        [record.id],
+                        ActionStatus.APPLIED,
+                        expected_statuses=(ActionStatus.SYNC_PENDING,),
+                        actor="apply-detector",
+                        plan_id=plan_id,
+                    )
+                    if updated_count != 1:
+                        raise RuntimeError("GitOps action state did not transition to applied.")
+                    await self._mark_completed_plans(record.id)
+            except Exception as exc:
+                logger.warning("Deletion detection failed for recommendation %s: %s", record.id, exc)
+                continue
+            applied.append(updated)
+            logger.info(
+                "Deletion detected for recommendation %d: %s %s is absent.", record.id, target.kind, target.name
+            )
+            if recorder is not None and change_id is not None:
+                try:
+                    await recorder.record_change(
+                        change_id, [updated], snapshot=snapshot, plan=synced_plan, now=detected_at
+                    )
+                except Exception as exc:
+                    logger.warning("Could not record change %s: %s", change_id, exc)
+        return applied
+
+    async def _detect_rightsizing(self, records: Sequence[RecommendationRecord]) -> List[RecommendationRecord]:
+        """Detects and records applied rightsizing recommendations."""
         candidates = [r for r in records if r.type in RIGHTSIZING_TYPES]
-        if not candidates:
+        recorder = self.change_recorder
+        if not candidates and (recorder is None or not await recorder.needs_observations()):
             return []
 
         snapshots = await self.reader.read()
         if not snapshots:
             return []
+        detected_at = datetime.now(timezone.utc)
+        if recorder is not None:
+            # Pod-template revisions give changes their "before" digest and reveal later edits (C1, C4).
+            await recorder.observe_workloads(snapshots, detected_at)
 
         tolerance = float(getattr(self.config, "RECOMMENDATION_APPLY_TOLERANCE", 0.25))
         applied: List[RecommendationRecord] = []
         processed_rollbacks: set[str] = set()
+        #: Changes applied in this pass: change_id -> (records, workload snapshot, synced plan).
+        changes: Dict[str, Tuple[List[RecommendationRecord], WorkloadSnapshot, Any]] = {}
+        pass_change_ids: Dict[tuple, Optional[str]] = {}
+        #: Changes already recorded, by target identity; loaded on first use.
+        recorded_changes: Optional[Dict[tuple, List[RecommendationRecord]]] = None
 
         for record in candidates:
             if record.status is RecommendationStatus.ROLLBACK_REVIEW:
@@ -348,6 +803,7 @@ class AppliedDetector:
 
             action_status: ActionStatus | None = None
             synced_plan: SyncPlanStatus | None = None
+            out_of_band = False
             if record.action is not None:
                 if self.action_status_repository is None or record.id is None:
                     continue
@@ -359,11 +815,19 @@ class AppliedDetector:
                         "Apply detection skipped recommendation %s with an invalid action status.", record.id
                     )
                     continue
-                if action_status is not ActionStatus.SYNC_PENDING:
+                if action_status in _NO_PLAN_IN_FLIGHT and record.status is RecommendationStatus.ACTIVE:
+                    # No plan or pull request is in flight, yet the cluster may
+                    # already run the proposed request (applied by hand, or by a
+                    # plan that failed closed with no_effective_change): record it
+                    # as applied instead of offering the recommendation again.
+                    out_of_band = True
+                    action_status = None
+                elif action_status is not ActionStatus.SYNC_PENDING:
                     continue
-                synced_plan = await self._synced_forward_plan(record.id)
-                if synced_plan is None:
-                    continue
+                else:
+                    synced_plan = await self._synced_forward_plan(record.id)
+                    if synced_plan is None:
+                        continue
             elif self.action_status_repository is not None and record.id is not None:
                 try:
                     raw_status = await self.action_status_repository.get_recommendation_action_status(record.id)
@@ -401,10 +865,14 @@ class AppliedDetector:
             snapshot = snapshots.get(key)
             if snapshot is None:
                 continue
-            if record.action is not None and (
-                synced_plan is None
-                or not _workload_reconciled_after_baseline(snapshot, synced_plan.pre_apply_baseline)
-                or not self._matches_plan_target(record, synced_plan, snapshot, tolerance)
+            if (
+                record.action is not None
+                and not out_of_band
+                and (
+                    synced_plan is None
+                    or not _workload_reconciled_after_baseline(snapshot, synced_plan.pre_apply_baseline)
+                    or not self._matches_plan_target(record, synced_plan, snapshot, tolerance)
+                )
             ):
                 continue
 
@@ -423,6 +891,57 @@ class AppliedDetector:
 
             if record.id is None or not self._decreased(observed, current, recommended, tolerance):
                 continue
+            if not rollout_complete(snapshot):
+                logger.info(
+                    "Apply detection deferred for recommendation %d: rollout of %s/%s/%s is still in progress.",
+                    record.id,
+                    snapshot.namespace,
+                    snapshot.kind,
+                    snapshot.name,
+                )
+                continue
+            applied_at, completion_source = rollout_completion_time(snapshot, datetime.now(timezone.utc))
+            if synced_plan is None:
+                if recorded_changes is None:
+                    recorded_changes = await self._recorded_changes()
+                recorded = _recorded_change_for(recorded_changes, record, observed)
+                if recorded is not None:
+                    # The live request is a change already recorded on another
+                    # recommendation of this target (this one was regenerated from
+                    # the lagging hourly rollup): never record it a second time.
+                    await self._retire_no_effective_change(
+                        record,
+                        observed,
+                        {"recorded_recommendation_id": recorded.id, "recorded_status": _status_text(recorded)},
+                    )
+                    continue
+            if completion_source == "progressing_condition" and _completed_before_recommendation(record, applied_at):
+                # The live request predates the recommendation (for example a
+                # recommendation built from a lagging hourly rollup): it is not
+                # this recommendation's application, and offering it again would
+                # only open a no-op pull request.
+                logger.info(
+                    "Apply detection skipped recommendation %d: the rollout of %s/%s/%s completed at %s, "
+                    "before the recommendation was created.",
+                    record.id,
+                    snapshot.namespace,
+                    snapshot.kind,
+                    snapshot.name,
+                    applied_at.isoformat(),
+                )
+                await self._retire_no_effective_change(
+                    record, observed, {"rollout_completed_at": applied_at.isoformat()}
+                )
+                continue
+            change_id: Optional[str] = None
+            if recorder is not None:
+                plan_id = synced_plan.plan_id if synced_plan is not None else None
+                identity = (plan_id, key, snapshot.uid, snapshot.generation, snapshot.spec_digest)
+                if identity in pass_change_ids:
+                    change_id = pass_change_ids[identity]
+                else:
+                    change_id = await recorder.change_id_for(plan_id, snapshot, applied_at)
+                    pass_change_ids[identity] = change_id
 
             method = (
                 ApplicationMethod.PR_MERGE.value
@@ -440,7 +959,21 @@ class AppliedDetector:
                     actual_memory=actual_memory,
                     application_method=method,
                     actor="detector",
+                    applied_at=applied_at,
+                    plan_id=synced_plan.plan_id if synced_plan is not None else None,
+                    rollout={
+                        "completed_at": applied_at.isoformat(),
+                        "completion_source": completion_source,
+                        "generation": snapshot.generation,
+                        "observed_generation": snapshot.observed_generation,
+                        "desired_replicas": snapshot.desired_replicas,
+                        "updated_replicas": snapshot.updated_replicas,
+                        "available_replicas": snapshot.available_replicas,
+                    },
+                    change_id=change_id,
                 )
+                if change_id is not None:
+                    changes.setdefault(change_id, ([], snapshot, synced_plan))[0].append(updated)
                 if action_status is not None and self.action_status_repository is not None:
                     updated_count = await self.action_status_repository.set_recommendation_action_status(
                         [record.id],
@@ -463,7 +996,43 @@ class AppliedDetector:
                 )
             except Exception as exc:
                 logger.warning("Apply detection failed for recommendation %s: %s", record.id, exc)
+        if recorder is not None:
+            for change_id, (members, snapshot, plan) in changes.items():
+                try:
+                    await recorder.record_change(change_id, members, snapshot=snapshot, plan=plan, now=detected_at)
+                except Exception as exc:
+                    # The lifecycle job records it later from the recommendations' change_id.
+                    logger.warning("Could not record change %s: %s", change_id, exc)
         return applied
+
+    async def _recorded_changes(self) -> Dict[tuple, List[RecommendationRecord]]:
+        """Rightsizing changes already recorded (applied or measured), by target identity."""
+        try:
+            records = await self.lifecycle.repo.get_recommendations_by_statuses(list(RECORDED_CHANGE_STATUSES))
+        except Exception as exc:
+            logger.warning("Apply detection could not read recorded changes: %s", exc)
+            return {}
+        by_identity: Dict[tuple, List[RecommendationRecord]] = {}
+        for record in records or []:
+            if record.type in RIGHTSIZING_TYPES:
+                by_identity.setdefault(_change_identity(record), []).append(record)
+        return by_identity
+
+    async def _retire_no_effective_change(
+        self, record: RecommendationRecord, observed: Optional[int], payload: dict
+    ) -> None:
+        """Take an active recommendation whose proposal is already live out of the active set."""
+        if record.id is None or record.status is not RecommendationStatus.ACTIVE:
+            return
+        try:
+            await self.lifecycle.mark_no_effective_change(record.id, payload={"observed_request": observed, **payload})
+            logger.info(
+                "Recommendation %d retired: its proposal is already live (%s), no effective change.",
+                record.id,
+                observed,
+            )
+        except Exception as exc:
+            logger.warning("Could not retire recommendation %s with no effective change: %s", record.id, exc)
 
     @staticmethod
     def _matches_plan_target(
@@ -486,23 +1055,17 @@ class AppliedDetector:
         ):
             return False
 
-        operations = [
-            operation
-            for operation in plan.action.operations
-            if isinstance(operation, SetContainerResources) and operation.container == record.container_name
-        ]
-        if len(operations) != 1:
+        spec = action_kind_of(plan.action)
+        if spec is None:
             return False
         resource = "cpu" if record.type is RecommendationType.RIGHTSIZING_CPU else "memory"
-        target_value = operations[0].resources.requests.get(resource)
-        if target_value is None:
-            return False
-        if resource == "cpu":
-            expected = _parse_cpu(target_value)
-        else:
-            expected = _parse_memory(target_value)
-        observed = _observed_request(snapshot, record.container_name, resource)
-        return observed is not None and expected > 0 and abs(observed - expected) <= expected * tolerance
+        return spec.is_applied(
+            plan.action.operations,
+            subject=record.container_name,
+            field_name=resource,
+            observed=_observed_request(snapshot, record.container_name, resource),
+            tolerance=tolerance,
+        ).applied
 
     async def _latest_rollback_plan(self, recommendation_id: int) -> SyncPlanStatus | None:
         if self.action_status_repository is None:
@@ -547,11 +1110,10 @@ class AppliedDetector:
             return []
 
         operations = rollback_plan.action.operations
-        if not operations or any(not isinstance(operation, SetContainerResources) for operation in operations):
+        spec = action_kind_of(rollback_plan.action)
+        if spec is None or not spec.supports_rollback(operations):
             return []
-        operation_containers = {
-            operation.container for operation in operations if isinstance(operation, SetContainerResources)
-        }
+        operation_containers = spec.subjects(operations)
 
         records: list[RecommendationRecord] = []
         observations: dict[int, tuple[int | None, int | None]] = {}
@@ -685,6 +1247,58 @@ class AppliedDetector:
                     raise RuntimeError("fully applied GitOps plan did not transition to applied")
 
 
+def _change_identity(record: RecommendationRecord) -> tuple:
+    """Target identity of a rightsizing change: workload (or pod), container and resource."""
+    return (
+        record.namespace,
+        record.owner_kind or ("Pod" if record.pod_name else None),
+        record.owner_name or record.pod_name,
+        record.container_name,
+        record.type,
+    )
+
+
+def _recorded_request(record: RecommendationRecord) -> tuple[Optional[int], Optional[int]]:
+    """``(actual, recommended)`` request of a recorded change, for the record's resource."""
+    if record.type == RecommendationType.RIGHTSIZING_CPU:
+        return record.actual_cpu_request_millicores, record.recommended_cpu_request_millicores
+    return record.actual_memory_request_bytes, record.recommended_memory_request_bytes
+
+
+def _recorded_change_for(
+    recorded_changes: Dict[tuple, List[RecommendationRecord]],
+    record: RecommendationRecord,
+    observed: Optional[int],
+) -> Optional[RecommendationRecord]:
+    """A recorded change of the same target whose request is the live one, if any.
+
+    The recorded ``actual_*`` is the request detected after that change; when
+    it is unknown, its proposal stands in for it.
+    """
+    if observed is None:
+        return None
+    for candidate in recorded_changes.get(_change_identity(record), ()):
+        if candidate.id == record.id:
+            continue
+        actual, recommended = _recorded_request(candidate)
+        if observed == (actual if actual is not None else recommended):
+            return candidate
+    return None
+
+
+def _status_text(record: RecommendationRecord) -> str:
+    status = record.status
+    return status.value if isinstance(status, RecommendationStatus) else str(status)
+
+
+def _completed_before_recommendation(record: RecommendationRecord, completed_at: datetime) -> bool:
+    created_at = record.created_at
+    if created_at is None:
+        return False
+    created = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+    return completed_at < created
+
+
 def _observed_request(snapshot: WorkloadSnapshot, container_name: str | None, resource: str) -> int | None:
     """Use a container's live request when available; never infer across sidecars."""
     if container_name:
@@ -766,3 +1380,8 @@ def _matches_pre_apply_requests(
         elif current_value != baseline_value:
             return False
     return True
+
+
+def _type_value(record: RecommendationRecord) -> str:
+    value = record.type
+    return str(getattr(value, "value", value) or "")

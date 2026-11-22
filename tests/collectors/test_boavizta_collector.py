@@ -18,7 +18,7 @@ async def test_get_server_impact_cloud_instance(collector):
     provider = "aws"
     instance_type = "m5.large"
 
-    mock_response = {"impacts": {"gwp": {"manufacture": 1500.0, "unit": "kgCO2eq"}}}
+    mock_response = {"impacts": {"gwp": {"unit": "kgCO2eq", "embedded": {"value": 1500.0}, "use": {"value": 9.0}}}}
 
     with respx.mock(base_url=config.BOAVIZTA_API_URL) as respx_mock:
         respx_mock.get("/v1/cloud/instance").mock(return_value=Response(200, json=mock_response))
@@ -26,14 +26,14 @@ async def test_get_server_impact_cloud_instance(collector):
         result = await collector.get_server_impact(provider=provider, instance_type=instance_type, verbose=True)
 
         assert result is not None
-        assert result.impacts.gwp.manufacture == 1500.0
+        assert result.embedded_kg() == 1500.0
 
 
 @pytest.mark.asyncio
 async def test_get_server_impact_archetype(collector):
     archetype = "dell_r740"
 
-    mock_response = {"impacts": {"gwp": {"manufacture": 2000.0, "unit": "kgCO2eq"}}}
+    mock_response = {"impacts": {"gwp": {"unit": "kgCO2eq", "embedded": {"value": 2000.0}, "use": {"value": 9.0}}}}
 
     with respx.mock(base_url=config.BOAVIZTA_API_URL) as respx_mock:
         respx_mock.get("/v1/server/").mock(return_value=Response(200, json=mock_response))
@@ -41,7 +41,7 @@ async def test_get_server_impact_archetype(collector):
         result = await collector.get_server_impact(model=archetype, verbose=True)
 
         assert result is not None
-        assert result.impacts.gwp.manufacture == 2000.0
+        assert result.embedded_kg() == 2000.0
 
 
 @pytest.mark.asyncio
@@ -109,3 +109,40 @@ async def test_client_reuse_and_close(collector):
     collector._client = closed_client
     await collector.close()
     closed_client.aclose.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_lookups_each_report_their_own_error(collector):
+    """The error of a failed lookup is not overwritten by a concurrent successful one."""
+    import asyncio
+
+    import httpx
+
+    async def get(url, params: dict):
+        if params["instance_type"] == "bad.type":
+            await asyncio.sleep(0)
+            raise httpx.ConnectError("refused")
+        await asyncio.sleep(0.01)
+        return Response(
+            200,
+            json={"impacts": {"gwp": {"unit": "kgCO2eq", "embedded": {"value": 24.0}}}},
+            request=httpx.Request("GET", url),
+        )
+
+    client = MagicMock()
+    client.get = get
+    collector._get_client = AsyncMock(return_value=client)
+    bad, good = await asyncio.gather(
+        collector.lookup_server_impact(provider="aws", instance_type="bad.type"),
+        collector.lookup_server_impact(provider="aws", instance_type="m5.large"),
+    )
+    assert bad.response is None and "refused" in (bad.error or "")
+    assert good.error is None and good.response is not None and good.response.embedded_kg() == 24.0
+
+
+def test_a_non_numeric_use_value_keeps_the_embedded_value():
+    from greenkube.models.boavizta import BoaviztaResponse
+
+    for use in ("not implemented", {"value": "n/a"}):
+        payload = {"impacts": {"gwp": {"unit": "kgCO2eq", "embedded": {"value": 24.0}, "use": use}}}
+        assert BoaviztaResponse.model_validate(payload).embedded_kg() == 24.0

@@ -2,11 +2,12 @@
  * Tests for GitOps discovery, manual binding resolution, and automation operations.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import AutomationPage from '../../src/routes/automation/+page.svelte';
-import * as api from '$lib/api.js';
+import * as api from '#lib/api.js';
+import { currentUser } from '#lib/stores.js';
 
-vi.mock('$lib/api.js', () => ({
+vi.mock('#lib/api.js', () => ({
 	getGitOpsStatus: vi.fn(),
 	getGitOpsCoverage: vi.fn(),
 	getGitOpsBindings: vi.fn(),
@@ -149,13 +150,14 @@ describe('AutomationPage', () => {
 		]);
 	});
 
-	it('shows safe discovery, coverage, provider readiness, and pending/open PR metadata', async () => {
+	it('shows safe discovery, coverage and provider readiness without a pull-request list', async () => {
 		const { container } = render(AutomationPage);
 
 		expect(await screen.findByRole('heading', { name: 'GitOps discovery' })).toBeInTheDocument();
-		expect(screen.getByText('Argo CD')).toBeInTheDocument();
-		expect(screen.getByText('Flux Kustomization')).toBeInTheDocument();
-		expect(screen.getByText('CRD not detected')).toBeInTheDocument();
+		expect(screen.getByRole('heading', { level: 3, name: 'Argo CD' })).toBeInTheDocument();
+		expect(screen.getByRole('heading', { level: 3, name: 'Flux' })).toBeInTheDocument();
+		expect(screen.getByText('Kustomizations')).toBeInTheDocument();
+		expect(screen.getByText(/CRD not detected/)).toBeInTheDocument();
 		expect(screen.getByText('80%')).toBeInTheDocument();
 		expect(
 			screen.getByText(/Controller availability, workload bindings, and current discovery coverage/i)
@@ -168,14 +170,9 @@ describe('AutomationPage', () => {
 		expect(screen.getByText('GitOps plan automation is ready')).toBeInTheDocument();
 		expect(screen.getByText('Provider registry: Configured')).toBeInTheDocument();
 
-		expect(screen.getByText('plan-101')).toBeInTheDocument();
-		expect(screen.getByText('production-github')).toBeInTheDocument();
-		expect(screen.getAllByText('acme/platform-config')).toHaveLength(2);
-		expect(screen.getByText('a'.repeat(40))).toBeInTheDocument();
-		expect(screen.getByText('Reconciliation pending')).toBeInTheDocument();
-		expect(screen.getByText('Controller failed')).toBeInTheDocument();
-		expect(screen.getAllByText('Pending').length).toBeGreaterThan(0);
-		expect(screen.getAllByText('Open')).toHaveLength(2);
+		// Pull requests moved to the changes board (K4): no second list here.
+		expect(api.getOpenPullRequests).not.toHaveBeenCalled();
+		expect(screen.queryByText('plan-101')).not.toBeInTheDocument();
 
 		expect(container).not.toHaveTextContent('cluster-with-private-data');
 		expect(container).not.toHaveTextContent('legacy-secret');
@@ -188,6 +185,39 @@ describe('AutomationPage', () => {
 		expect(container).not.toHaveTextContent('revision-secret');
 		expect(container).not.toHaveTextContent('raw-error-secret');
 		expect(container).not.toHaveTextContent('unsafe provider detail');
+	});
+
+	it('renders exactly one card per GitOps controller family with grouped Flux resource kinds', async () => {
+		render(AutomationPage);
+
+		const controllers = await screen.findByRole('list', { name: 'GitOps controllers' });
+		const cards = within(controllers).getAllByRole('article');
+		expect(cards).toHaveLength(2);
+		expect(cards.map((card) => card.getAttribute('data-family'))).toEqual(['argocd', 'flux']);
+
+		const argo = within(controllers).getByRole('article', { name: 'Argo CD' });
+		expect(within(argo).getByLabelText('Argo CD status: Detected')).toBeInTheDocument();
+
+		const flux = within(controllers).getByRole('article', { name: 'Flux' });
+		expect(within(flux).getByLabelText('Flux status: Degraded')).toBeInTheDocument();
+		expect(within(flux).getByText(/2 of 6 resource kinds available/)).toBeInTheDocument();
+		expect(within(flux).getAllByRole('listitem')).toHaveLength(6);
+		expect(within(flux).getByRole('list', { name: 'Reconcilers' })).toHaveTextContent('HelmReleases');
+		expect(within(flux).getByRole('list', { name: 'Sources' })).toHaveTextContent('GitRepositories');
+		expect(screen.queryByText('Flux Kustomization')).not.toBeInTheDocument();
+	});
+
+	it('summarises workload coverage in one panel instead of one card per status', async () => {
+		render(AutomationPage);
+
+		const coverageSection = await screen.findByRole('region', { name: 'Workload coverage' });
+		expect(within(coverageSection).getByRole('progressbar', { name: 'Workload coverage' })).toHaveAttribute(
+			'aria-valuenow',
+			'80'
+		);
+		const breakdown = within(coverageSection).getByRole('list', { name: 'Workload bindings by status' });
+		expect(within(breakdown).getAllByRole('listitem')).toHaveLength(6);
+		expect(within(breakdown).getByText('Resolved').closest('li')).toHaveTextContent('8');
 	});
 
 	it('shows a loading state while the read-only status requests are pending', () => {
@@ -216,12 +246,13 @@ describe('AutomationPage', () => {
 		expect(container).not.toHaveTextContent('server-secret');
 	});
 
-	it('shows an empty state when no pending or open pull requests are returned', async () => {
-		api.getOpenPullRequests.mockResolvedValue([]);
-
+	it('links to the changes board instead of listing pull requests (K4)', async () => {
 		render(AutomationPage);
 
-		expect(await screen.findByText('No pending or open pull requests.')).toBeInTheDocument();
+		const section = await screen.findByTestId('changes-board-link');
+		expect(within(section).getByRole('heading', { level: 2, name: 'Pull requests and changes' })).toBeInTheDocument();
+		expect(within(section).getByRole('link', { name: /Open the changes board/ })).toHaveAttribute('href', '/changes');
+		expect(screen.queryByText('No pending or open pull requests.')).not.toBeInTheDocument();
 	});
 
 	it('requires explicit confirmation, resolves only a listed candidate, and refreshes coverage', async () => {
@@ -406,7 +437,25 @@ describe('AutomationPage', () => {
 			expect(api.getGitOpsCoverage).toHaveBeenCalledTimes(2);
 			expect(api.getGitOpsBindings).toHaveBeenCalledTimes(2);
 			expect(api.getAutomationStatus).toHaveBeenCalledTimes(2);
-			expect(api.getOpenPullRequests).toHaveBeenCalledTimes(2);
 		});
+		expect(api.getOpenPullRequests).not.toHaveBeenCalled();
+	});
+
+	it('gives a viewer a read-only reload and no binding resolution (no 403 actions)', async () => {
+		currentUser.set({ kind: 'user', name: 'vera', role: 'viewer', scopes: ['read'] });
+		api.getGitOpsBindings.mockResolvedValue({ items: [actionableBinding] });
+		render(AutomationPage);
+
+		expect(await screen.findByTestId('read-only-hint')).toHaveTextContent('Read-only access (viewer)');
+		expect(await screen.findByTestId('resolve-read-only')).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Resolve binding' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Refresh discovery & operations' })).not.toBeInTheDocument();
+
+		const reload = screen.getByRole('button', { name: 'Reload' });
+		await waitFor(() => expect(reload).toBeEnabled());
+		await fireEvent.click(reload);
+
+		await waitFor(() => expect(api.getGitOpsStatus).toHaveBeenCalledTimes(2));
+		expect(api.refreshGitOpsDiscovery).not.toHaveBeenCalled();
 	});
 });

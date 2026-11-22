@@ -1,0 +1,271 @@
+suite: install notes
+templates:
+  - templates/NOTES.txt
+release:
+  name: gk
+  namespace: greenkube
+
+tests:
+  - it: prints the exact command that reads the generated API key in api_key mode
+    set:
+      config.apiAuthMode: api_key
+    asserts:
+      - matchRegexRaw:
+          pattern: "kubectl -n greenkube get secret gk-greenkube -o jsonpath='\\{\\.data\\.GREENKUBE_API_KEY\\}' \\| base64 -d; echo"
+      - matchRegexRaw:
+          pattern: generated once by the gk-greenkube-credentials-bootstrap hook
+      - notMatchRegexRaw:
+          pattern: SECURITY WARNING
+
+  - it: names the scrape token and no bootstrap key on a new session install
+    asserts:
+      - matchRegexRaw:
+          pattern: metrics:read scrape token GREENKUBE_METRICS_TOKEN
+      - notMatchRegexRaw:
+          pattern: GREENKUBE_API_KEY
+      - notMatchRegexRaw:
+          pattern: SECURITY WARNING
+
+  - it: warns about a bootstrap admin key kept from an earlier install
+    kubernetesProvider:
+      scheme:
+        "v1/Secret":
+          gvr:
+            version: "v1"
+            resource: "secrets"
+          namespaced: true
+      objects:
+        - kind: Secret
+          apiVersion: v1
+          metadata:
+            name: gk-greenkube
+            namespace: greenkube
+          data:
+            GREENKUBE_API_KEY: a2V5
+    asserts:
+      - matchRegexRaw:
+          pattern: "jsonpath='\\{\\.data\\.GREENKUBE_API_KEY\\}'"
+      - matchRegexRaw:
+          pattern: "SECURITY WARNING: a deprecated, non-expiring full-admin bootstrap key"
+
+  - it: does not warn once the bootstrap key is restricted to metrics
+    set:
+      secrets.apiKey: supplied
+      auth.legacyApiKey: metrics
+    asserts:
+      - notMatchRegexRaw:
+          pattern: full-admin bootstrap key
+
+  - it: warns when an Ingress is enabled without trusted proxies
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+    asserts:
+      - matchRegexRaw:
+          pattern: "config.trustedProxyIps is empty"
+
+  - it: does not warn about proxies once they are trusted
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+      config.trustedProxyIps: 10.244.0.0/16
+    asserts:
+      - notMatchRegexRaw:
+          pattern: "config.trustedProxyIps is empty"
+
+  - it: warns that the ledger chain key is not generated without RBAC
+    set:
+      rbac.create: false
+      secrets.apiKey: supplied
+    asserts:
+      - matchRegex:
+          path: raw
+          pattern: "Savings ledger chain key: not configured"
+
+  - it: does not warn about the ledger chain key when the chart generates it
+    asserts:
+      - notMatchRegex:
+          path: raw
+          pattern: "Savings ledger chain key"
+
+  - it: prints the dashboard and setup URLs
+    asserts:
+      - matchRegexRaw:
+          pattern: kubectl -n greenkube port-forward svc/gk-greenkube-api 8000:8000
+      - matchRegexRaw:
+          pattern: "Setup checklist:  http://localhost:8000/setup"
+
+  - it: reads a values-supplied API key from the values Secret
+    set:
+      secrets.apiKey: supplied
+    asserts:
+      - matchRegexRaw:
+          pattern: get secret gk-greenkube-values -o jsonpath
+      - matchRegexRaw:
+          pattern: The key is the value of secrets.apiKey.
+
+  - it: reads the API key from secrets.existingSecret
+    set:
+      secrets.existingSecret: gitops-credentials
+    asserts:
+      - matchRegexRaw:
+          pattern: get secret gitops-credentials -o jsonpath
+      - notMatchRegexRaw:
+          pattern: credentials-bootstrap
+
+  - it: prints the one-Secret Git connection step (F12)
+    asserts:
+      - matchRegexRaw:
+          pattern: kubectl -n greenkube create secret generic greenkube-git-credentials
+      - notMatchRegexRaw:
+          pattern: pauseDelivery is true
+
+  - it: names a custom credentials Secret
+    set:
+      automation.credentialsSecret: my-git
+    asserts:
+      - matchRegexRaw:
+          pattern: create secret generic my-git
+
+  - it: describes the single topology and lists no deprecation by default
+    asserts:
+      - matchRegexRaw:
+          pattern: "One topology: api \\(1\\), controller \\(1\\, Lease gk-greenkube-leader\\), renderer and PostgreSQL"
+      - notMatchRegexRaw:
+          pattern: DEPRECATED VALUES
+
+  - it: lists nothing for values of removed features left in an old values file
+    set:
+      sources.priority: vpa,greenkube
+      sources.krr.job.enabled: true
+      sources.polaris.job.enabled: true
+      sources.settings:
+        kubecost:
+          url: http://kubecost
+        greenkube.nodepool:
+          enabled: auto
+      config.recommendations.consensusPolicy: median
+      config.recommendations.karpenterEnabled: false
+      config.recommendations.zombieCostThreshold: 0.5
+    asserts:
+      - notMatchRegexRaw:
+          pattern: DEPRECATED VALUES
+      - notMatchRegexRaw:
+          pattern: zombieCostThreshold
+
+  - it: reports every mapped 0.3.x value (F17)
+    set:
+      profile: production
+      replicaCount: 2
+      automation.enabled: false
+      automation.mode: worker
+      production.components.api.replicas: 3
+    asserts:
+      - matchRegexRaw:
+          pattern: DEPRECATED VALUES
+      - matchRegexRaw:
+          pattern: profile=production is ignored
+      - matchRegexRaw:
+          pattern: replicaCount is mapped to api.replicas
+      - matchRegexRaw:
+          pattern: automation.enabled=false is mapped to automation.policy.pauseDelivery=true
+      - matchRegexRaw:
+          pattern: automation.mode=worker is removed
+      - matchRegexRaw:
+          pattern: production.\* is mapped
+      - matchRegexRaw:
+          pattern: pauseDelivery is true
+
+  - it: keeps the dashboard URLs when the deprecated config.api.enabled is false
+    set:
+      config.api.enabled: false
+    asserts:
+      - matchRegexRaw:
+          pattern: port-forward
+      - matchRegexRaw:
+          pattern: config.api.enabled is ignored
+
+  - it: reminds to back up before every upgrade
+    asserts:
+      - matchRegexRaw:
+          pattern: "Back up the database before every upgrade: migrations only move forward and a helm rollback"
+      - notMatchRegexRaw:
+          pattern: Scheduled backups
+
+  - it: names the backup CronJob when scheduled backups are on
+    set:
+      postgres.backup.enabled: true
+    asserts:
+      - matchRegexRaw:
+          pattern: "Scheduled backups: CronJob gk-greenkube-postgres-backup \\(17 3 \\* \\* \\*\\)"
+
+  - it: gives separate time-to-first-recommendation estimates for increases and decreases
+    asserts:
+      - matchRegexRaw:
+          pattern: "request increases and the other sources need\\s+36 samples"
+      - matchRegexRaw:
+          pattern: "decreases need 7 days of history"
+
+  - it: names the ServiceMonitor namespace, the release namespace by default
+    set:
+      monitoring.serviceMonitor.enabled: true
+    asserts:
+      - matchRegexRaw:
+          pattern: "ServiceMonitors: namespace greenkube;"
+      - notMatchRegexRaw:
+          pattern: scrape-token
+
+  - it: names the scrape token copy for ServiceMonitors in another namespace
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: monitoring
+    asserts:
+      - matchRegexRaw:
+          pattern: "Secret gk-greenkube-scrape-token\\s+\\(namespace monitoring, key \"token\"\\), written by the gk-greenkube-credentials-bootstrap hook"
+
+  - it: warns when nothing can be copied into the ServiceMonitor namespace
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: monitoring
+      secrets.existingSecret: my-creds
+    asserts:
+      - matchRegexRaw:
+          pattern: "Create Secret my-creds \\(key GREENKUBE_API_KEY\\) in namespace monitoring"
+
+  - it: warns that a post-window below five days is raised to five days (MEA-10)
+    set:
+      config.recommendations.changeMeasurement.postWindowDays: 3
+    asserts:
+      - matchRegexRaw:
+          pattern: postWindowDays=3 is below 5 days
+
+  - it: does not warn about the default post-window
+    asserts:
+      - notMatchRegexRaw:
+          pattern: is below 5 days
+
+  - it: explains the auto-detected cluster name when config.clusterName is empty
+    asserts:
+      - matchRegexRaw:
+          pattern: "config.clusterName is empty"
+
+  - it: says nothing about the cluster name when it is set
+    set:
+      config.clusterName: prod-eu
+    asserts:
+      - notMatchRegexRaw:
+          pattern: "config.clusterName is empty"
+
+  - it: does not suggest the default Git credentials Secret when providers are configured
+    set:
+      automation.providers:
+        - id: gitlab-main
+          type: gitlab
+          apiBaseUrl: https://gitlab.example.com/api/v4
+          secretName: gitlab-token
+          secretKey: token
+    asserts:
+      - notMatchRegexRaw:
+          pattern: create secret generic greenkube-git-credentials
+      - matchRegexRaw:
+          pattern: "gitlab-main \\(gitlab\\): Secret gitlab-token, key token"

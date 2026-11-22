@@ -4,28 +4,160 @@ Welcome to
 | |  _| '__/ _ \/ _ \ '_ \| ' / | | | '_ \ / _ \
 | |_| | | |  __/  __/ | | | . \ |_| | |_) |  __/
  \____|_|  \___|\___|_| |_|_|\_\__,_|_.__/ \___|  v{{ .Chart.AppVersion }}
+{{- $v := include "greenkube.values" . | fromYaml }}
+{{- $apiKeySecret := include "greenkube.secretNameFor" (dict "context" . "key" "GREENKUBE_API_KEY") }}
+{{- $admin := (.Values.auth | default dict).admin | default dict }}
+{{- $initialAdmin := include "greenkube.initialAdminSecretName" . }}
+{{- $port := $v.api.port }}
+{{- $mode := .Values.config.apiAuthMode | default "session" }}
+{{- $auth := .Values.auth | default dict }}
+{{- $adminName := $admin.username | default "admin" }}
+{{- /* N11: once the initial password is used, GreenKube erases it and annotates the
+  Secret. NOTES is never applied to the cluster, so this read-only lookup is safe; under
+  `helm template` / Argo CD it returns nothing and the generic text is printed. */}}
+{{- $initialConsumed := false }}
+{{- if $initialAdmin }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $initialAdmin }}
+{{- if $existing }}
+{{- $annotations := ($existing.metadata | default dict).annotations | default dict }}
+{{- if or (eq (index $annotations "greenkube.cloud/initial-admin" | default "") "consumed") (not (index ($existing.data | default dict) "password")) }}
+{{- $initialConsumed = true }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $reset := printf "kubectl -n %s exec deploy/%s-api -- greenkube auth reset-password %s" .Release.Namespace (include "greenkube.fullname" .) $adminName }}
 
-{{- if .Values.config.api.enabled }}
+1. Open the dashboard:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "greenkube.fullname" . }}-api {{ $port }}:{{ $port }}
+   Then visit:
+     Dashboard:        http://localhost:{{ $port }}/
+     Setup checklist:  http://localhost:{{ $port }}/setup
 
-* Dashboard & API:
-  kubectl port-forward svc/{{ include "greenkube.fullname" . }}-api {{ .Values.config.api.port }}:{{ .Values.config.api.port }} -n {{ .Release.Namespace }}
-  → http://localhost:{{ .Values.config.api.port }}
+{{ if eq $mode "session" -}}
+2. Sign in as "{{ $adminName }}" on the dashboard.
+{{- else if eq $mode "oidc" -}}
+2. Sign in with "{{ (($auth.oidc | default dict).providerName) | default "SSO" }}" (OpenID Connect, {{ ($auth.oidc | default dict).issuer }}).
+   Register this redirect URI at the provider:
+     {{ ($auth.oidc | default dict).redirectUrl | default (printf "%s/api/v1/auth/oidc/callback" (.Values.config.externalUrl | default "<config.externalUrl>" | trimSuffix "/")) }}
+   Roles come from IdP groups (auth.roles); others get "{{ (($auth.roles | default dict).defaultRole) | default "viewer" }}".
+{{- else if eq $mode "proxy" -}}
+2. Open GreenKube through your authentication proxy: it signs you in from the
+   identity headers it sends, accepted only from config.trustedProxyIps ({{ .Values.config.trustedProxyIps }}).
+   Roles come from IdP groups (auth.roles); others get "{{ (($auth.roles | default dict).defaultRole) | default "viewer" }}".
+{{- else -}}
+2. Authenticate with the API key (config.apiAuthMode=api_key; the UI also signs in with it):
+{{- end }}
+{{- if ne $mode "api_key" }}
+{{- if and (ne $mode "session") (eq $auth.localLogin false) }}
+   Password sign-in is disabled (auth.localLogin=false): the local "{{ $adminName }}" account cannot sign in.
+{{- else }}
+{{- if ne $mode "session" }}
+   Break-glass: the local admin "{{ $adminName }}" still signs in with a password.
+{{- end }}
+{{- if $admin.existingSecret }}
+   The password is the "{{ $admin.existingSecretKey | default "password" }}" key of your Secret {{ $admin.existingSecret }} (auth.admin.existingSecret).
+{{- else if and $initialAdmin $initialConsumed }}
+   The initial admin password was already used and erased from Secret {{ $initialAdmin }}:
+   sign in with the password chosen at the first sign-in. Forgotten? Reset it with:
+     {{ $reset }}
+{{- else if $initialAdmin }}
+   Initial admin password (you choose a new one at the first sign-in; GreenKube
+   then erases it from the Secret):
+     kubectl -n {{ .Release.Namespace }} get secret {{ $initialAdmin }} -o jsonpath='{.data.password}' | base64 -d; echo
+   If this prints nothing, the password was already used. Forgotten? Reset it with:
+     {{ $reset }}
+{{- else }}
+   rbac.create=false: no initial admin password can be generated. Set
+   auth.admin.existingSecret to a Secret holding the first admin password.
+{{- end }}
+{{- end }}
+   Behind an Ingress, serve GreenKube over HTTPS so the session cookie is Secure
+   (set config.trustedProxyIps to the Ingress controller addresses).
+
+3. Machines (CI, scripts) use scoped API keys: Settings > API keys.
+{{- if include "greenkube.dedicatedScrapeToken" . }}
+   Prometheus scrapes with the metrics:read scrape token GREENKUBE_METRICS_TOKEN
+   (Secret {{ include "greenkube.secretNameFor" (dict "context" . "key" "GREENKUBE_METRICS_TOKEN") }}), which the ServiceMonitors use.
+{{- end }}
+{{- end }}
+{{- /* The deprecated full-admin bootstrap key: printed in api_key mode, and in the other
+  modes only when one is configured (values, an existing Secret, or a key kept from an
+  earlier install, found by a read-only lookup that returns nothing under helm template). */}}
+{{- $generatedSecret := lookup "v1" "Secret" .Release.Namespace (include "greenkube.secretName" .) }}
+{{- $keptKey := and (not .Values.secrets.existingSecret) $generatedSecret (index (($generatedSecret | default dict).data | default dict) "GREENKUBE_API_KEY") }}
+{{- $legacyKey := or (eq $mode "api_key") .Values.secrets.apiKey .Values.secrets.existingSecret $keptKey }}
+{{- if $legacyKey }}
+{{- if ne $mode "api_key" }}
+   The bootstrap API key below is deprecated and kept for one more minor release:
+{{- end }}
+     kubectl -n {{ .Release.Namespace }} get secret {{ $apiKeySecret }} -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d; echo
+{{- if .Values.secrets.existingSecret }}
+   The key comes from your Secret {{ .Values.secrets.existingSecret }} (secrets.existingSecret), if it holds GREENKUBE_API_KEY.
+{{- else if .Values.secrets.apiKey }}
+   The key is the value of secrets.apiKey.
+{{- else }}
+   The key was generated once by the {{ include "greenkube.credentialsBootstrapName" . }} hook.
+   Secret {{ include "greenkube.secretName" . }} is not part of the Helm release, so upgrades and
+   Argo CD/Flux syncs never rotate it and `helm uninstall` keeps it, like the
+   PostgreSQL volume. For a fully declarative (GitOps) setup, create your own
+   Secret and set secrets.existingSecret instead.
+{{- end }}
 {{- end }}
 
-* API authentication:
-  Protected API routes require a bearer key. The chart-managed Secret
-  {{ include "greenkube.secretName" . }} stores it in GREENKUBE_API_KEY.
-  The key is generated unless secrets.apiKey is explicitly supplied.
+{{- $gitProviders := (.Values.automation | default dict).providers | default list }}
+{{- if $gitProviders }}
 
-{{- if eq .Values.profile "production" }}
-* Production profile:
-  API, controller, and automation worker run as separate Deployments.
-  Database migrations run as a post-install/post-upgrade Job before the API
-  readiness check; bundled PostgreSQL is awaited before migration starts. The
-  controller uses the {{ include "greenkube.leaseName" . }} Lease for active/standby coordination.
+{{ if ne $mode "api_key" }}4{{ else }}3{{ end }}. Git delivery uses the providers listed in automation.providers. Each one reads
+   its own Secret in namespace {{ .Release.Namespace }}; create it if it does not exist yet:
+{{- range $gitProviders }}
+     {{ .id }} ({{ .type }}): Secret {{ .secretName }}, key {{ .secretKey | default "token" }}
+{{- end }}
 {{- else }}
-* Standalone profile:
-  Collector and API run together in one replica for simple installations.
+
+{{ if ne $mode "api_key" }}4{{ else }}3{{ end }}. Connect Git (optional): GitOps discovery is already running. To let
+   GreenKube open pull requests, create one Secret; delivery activates within
+   one to two minutes, with no upgrade and no restart:
+     kubectl -n {{ .Release.Namespace }} create secret generic {{ include "greenkube.gitCredentialsSecretName" . }} \
+       --from-literal=token=<token with write access to your GitOps repositories> \
+       --from-literal=host=<the Git host of that token, e.g. github.com>
+{{- end }}
+{{- if $v.pauseDelivery }}
+   automation.policy.pauseDelivery is true: no pull request is opened until you set it to false.
+{{- end }}
+
+{{- $recs := (.Values.config | default dict).recommendations | default dict }}
+
+* First recommendations: request increases and the other sources need
+  {{ $recs.minSamples | default 36 }} samples (about 3 hours at the default 5-minute step); request
+  decreases need {{ $recs.minDecreaseCoverageDays | default 7 }} days of history. The setup checklist shows both estimates.
+
+* One topology: api ({{ $v.api.replicas }}), controller ({{ $v.controller.replicas }}, Lease {{ include "greenkube.leaseName" . }}), renderer
+{{- if gt (int ($v.worker.replicas | default 0)) 0 }}, worker ({{ $v.worker.replicas }}){{ end }}
+{{- if include "greenkube.bundledPostgres" . }} and PostgreSQL{{ end }}.
+  The controller migrates the database at startup; the API is ready once the schema is current.
+{{- with $v.deprecations }}
+
+* DEPRECATED VALUES (accepted for this minor release only, see docs/upgrading.md):
+{{- range . }}
+  - {{ . }}
+{{- end }}
+{{- end }}
+
+{{- /* Security warnings (security hardening, docs/security-model.md). */}}
+{{- if and $legacyKey (ne $mode "api_key") (eq (include "greenkube.legacyApiKeyAccess" .) "admin") }}
+
+* SECURITY WARNING: a deprecated, non-expiring full-admin bootstrap key
+  (GREENKUBE_API_KEY) is accepted (auth.legacyApiKey=admin). Move scripts to scoped
+  API keys (Settings > API keys), then set auth.legacyApiKey=metrics or disabled.
+  See docs/authentication.md#the-bootstrap-api-key.
+{{- end }}
+{{- if and (or (.Values.ingress | default dict).enabled (.Values.httpRoute | default dict).enabled) (not .Values.config.trustedProxyIps) }}
+
+* SECURITY WARNING: GreenKube is exposed through an Ingress or HTTPRoute but
+  config.trustedProxyIps is empty. Every request then appears to come from the
+  ingress controller: sign-in lockouts and API rate limits are shared by all users,
+  and one client can exhaust them for everyone. Set config.trustedProxyIps to the
+  ingress controller (or gateway) pod addresses, for example the pod CIDR.
 {{- end }}
 
 * Logs:
@@ -38,9 +170,49 @@ Welcome to
   If auto-discovery fails, set the URL manually:
     --set config.prometheus.url=http://prometheus-server.monitoring.svc.cluster.local:80
 {{- end }}
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+{{- $smNamespace := include "greenkube.serviceMonitorNamespace" . }}
+{{- $copy := include "greenkube.scrapeTokenCopy" . }}
+  ServiceMonitors: namespace {{ $smNamespace }}; Prometheus must select it (serviceMonitorNamespaceSelector).
+{{- if $copy }}
+  Their bearer token is the copy of the scrape token in Secret {{ include "greenkube.scrapeTokenCopyName" . }}
+  (namespace {{ $smNamespace }}, key "token"){{ if eq $copy "hook" }}, written by the {{ include "greenkube.credentialsBootstrapName" . }} hook
+  and kept outside the release (delete it by hand after uninstalling){{ end }}.
+{{- else if ne $smNamespace .Release.Namespace }}
+{{- $smCredentials := include "greenkube.scrapeCredentials" . | fromYaml }}
+  WARNING: Prometheus Operator reads a ServiceMonitor's bearer token Secret in the
+  ServiceMonitor's namespace, and the chart has no scrape token to copy there.
+  Create Secret {{ $smCredentials.name }} (key {{ $smCredentials.key }}) in namespace {{ $smNamespace }},
+  or leave monitoring.serviceMonitor.namespace empty (release namespace).
+{{- end }}
+{{- end }}
 
 * No Electricity Maps token? GreenKube uses default intensity ({{ .Values.config.defaultIntensity }} gCO₂e/kWh).
    For accurate data, set: secrets.electricityMapsToken
    Or switch the provider to Wattnet (EU-only, free): config.electricityProvider=wattnet + secrets.wattnetEmail/wattnetPassword
+
+{{- $cm := .Values.config.recommendations.changeMeasurement | default dict }}
+{{- if and (not $cm.accelerated) (lt (float64 ($cm.postWindowDays | default 7)) 5.0) }}
+* changeMeasurement.postWindowDays={{ $cm.postWindowDays }} is below 5 days: a verdict needs 5 complete days
+  of aligned hours, so GreenKube raises it to 5 days at startup (warning in the logs).
+{{- end }}
+{{- if not .Values.config.clusterName }}
+* config.clusterName is empty: the display name is auto-detected (the node name on a single-node
+  cluster, a cluster-name node label, else "default"). Set config.clusterName for a readable name on
+  multi-node clusters. Collection is keyed by the kube-system namespace UID, so renaming is safe.
+{{- end }}
+{{- if .Values.secrets.existingSecret }}
+* Savings ledger chain key: add LEDGER_CHAIN_KEY to Secret {{ .Values.secrets.existingSecret }} to key the
+  ledger hash chain; without it the chain uses plain sha256 (warning in the controller logs).
+{{- else if not (or .Values.secrets.ledgerChainKey .Values.rbac.create) }}
+* Savings ledger chain key: not configured (rbac.create=false, so it is not generated). Set
+  secrets.ledgerChainKey to key the ledger hash chain; without it the chain uses plain sha256.
+{{- end }}
+
+* Back up the database before every upgrade: migrations only move forward and a helm rollback
+  does not undo them (docs/operations/backup-restore.md).
+{{- if (.Values.postgres.backup | default dict).enabled }}
+  Scheduled backups: CronJob {{ include "greenkube.fullname" . }}-postgres-backup ({{ .Values.postgres.backup.schedule }}).
+{{- end }}
 
 * https://github.com/GreenKubeCloud/GreenKube

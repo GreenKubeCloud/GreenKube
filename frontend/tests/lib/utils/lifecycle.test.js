@@ -2,7 +2,7 @@
  * Tests for the recommendation lifecycle trail utilities.
  */
 import { describe, it, expect } from 'vitest';
-import { groupConsecutiveEvents } from '$lib/utils/lifecycle.js';
+import { groupConsecutiveEvents } from '#lib/utils/lifecycle.js';
 
 
 function event(event_type, created_at, actor = 'system') {

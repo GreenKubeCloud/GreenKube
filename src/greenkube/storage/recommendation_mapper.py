@@ -13,11 +13,12 @@ from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import (
     EffortLevel,
     RecommendationCapability,
+    RecommendationPatchV2,
     RecommendationRecord,
-    RecommendationSource,
     RecommendationStatus,
     RecommendationType,
     RiskLevel,
+    coerce_recommendation_source,
 )
 
 
@@ -74,11 +75,9 @@ def sources_from_json(value: Any) -> List[str]:
     return []
 
 
-def _as_source(value: Any) -> RecommendationSource:
-    try:
-        return RecommendationSource(value)
-    except ValueError:
-        return RecommendationSource.GREENKUBE
+def _as_source(value: Any) -> Any:
+    """A built-in source, or the id of a signal-only source chosen by consensus (E6)."""
+    return coerce_recommendation_source(value)
 
 
 def _as_capability(value: Any) -> Optional[RecommendationCapability]:
@@ -177,6 +176,8 @@ RECORD_COLUMNS: tuple = (
     "expires_at",
     "reversible",
     "requires_restart",
+    "impact",
+    "value_score",
     "applied_at",
     "actual_cpu_request_millicores",
     "actual_memory_request_bytes",
@@ -195,7 +196,19 @@ RECORD_COLUMNS: tuple = (
     "savings_realized",
     "created_at",
     "updated_at",
+    "target",
+    "proposal",
+    "consensus",
+    "revision",
+    "fingerprint_v4",
+    "previous_recommendation_id",
+    "previous_change_id",
+    "pending_revision",
 )
+
+#: Recommendation v2 columns refreshed with the proposal (E4, E6). ``revision``
+#: is only ever changed by the repository's revision logic (E7).
+V2_UPSERT_COLUMNS: tuple = ("target", "proposal", "consensus", "fingerprint_v4")
 
 #: Columns refreshed in place when an active recommendation is upserted.
 ACTIVE_UPSERT_COLUMNS: tuple = (
@@ -232,7 +245,21 @@ ACTIVE_UPSERT_COLUMNS: tuple = (
     "expires_at",
     "reversible",
     "requires_restart",
-)
+    "impact",
+    "value_score",
+    "pending_revision",
+) + V2_UPSERT_COLUMNS
+
+
+def _stored_patch(record: RecommendationRecord) -> Optional[RecommendationPatchV2]:
+    """The ``patch`` column: the typed action is stored inside it (``patch.action``).
+
+    A kind with no legacy patch view (``delete_resource``) keeps its action in a
+    patch without operations, so the action survives persistence.
+    """
+    if record.patch is None and record.action is not None:
+        return RecommendationPatchV2(action=record.action)
+    return record.patch
 
 
 def record_values(record: RecommendationRecord, encode_datetime=lambda value: value) -> dict:
@@ -285,10 +312,12 @@ def record_values(record: RecommendationRecord, encode_datetime=lambda value: va
         "effort": _enum(record.effort),
         "ranking_score": record.ranking_score,
         "ranking_factors": to_json(dict(record.ranking_factors)),
-        "patch": to_json(record.patch),
+        "patch": to_json(_stored_patch(record)),
         "expires_at": _dt(record.expires_at),
         "reversible": record.reversible,
         "requires_restart": record.requires_restart,
+        "impact": to_json(record.impact),
+        "value_score": to_json(record.value),
         "applied_at": _dt(record.applied_at),
         "actual_cpu_request_millicores": record.actual_cpu_request_millicores,
         "actual_memory_request_bytes": record.actual_memory_request_bytes,
@@ -307,6 +336,14 @@ def record_values(record: RecommendationRecord, encode_datetime=lambda value: va
         "savings_realized": record.savings_realized,
         "created_at": _dt(record.created_at),
         "updated_at": _dt(record.updated_at),
+        "target": to_json(record.target),
+        "proposal": to_json(record.proposal),
+        "consensus": to_json(record.consensus),
+        "revision": record.revision,
+        "fingerprint_v4": record.fingerprint_v4,
+        "previous_recommendation_id": record.previous_recommendation_id,
+        "previous_change_id": record.previous_change_id,
+        "pending_revision": to_json(record.pending_revision),
     }
 
 
@@ -355,6 +392,8 @@ def row_to_record(row: Any) -> RecommendationRecord:
         expires_at=_as_datetime(_get(row, "expires_at")),
         reversible=_as_bool(_get(row, "reversible")),
         requires_restart=_as_bool(_get(row, "requires_restart")),
+        impact=from_json(_get(row, "impact")),
+        value=from_json(_get(row, "value_score")),
         applied_at=_as_datetime(_get(row, "applied_at")),
         actual_cpu_request_millicores=_get(row, "actual_cpu_request_millicores"),
         actual_memory_request_bytes=_get(row, "actual_memory_request_bytes"),
@@ -373,4 +412,37 @@ def row_to_record(row: Any) -> RecommendationRecord:
         savings_realized=_as_bool(_get(row, "savings_realized")),
         created_at=_as_datetime(row["created_at"]) or datetime.now(timezone.utc),
         updated_at=_as_datetime(_get(row, "updated_at")),
+        target=_as_dict(_get(row, "target")),
+        proposal=_as_dict(_get(row, "proposal")),
+        consensus=_as_dict(_get(row, "consensus")),
+        revision=max(1, int(_get(row, "revision", 1) or 1)),
+        fingerprint_v4=_get(row, "fingerprint_v4"),
+        previous_recommendation_id=_get(row, "previous_recommendation_id"),
+        previous_change_id=_get(row, "previous_change_id"),
+        pending_revision=_as_dict(_get(row, "pending_revision")),
+        changed_since_ignored=_changed_since_ignored(_get(row, "changed_while_ignored_payload")),
     )
+
+
+#: Correlated subquery selecting, as ``changed_while_ignored_payload``, the payload of the latest
+#: ``changed_while_ignored`` event recorded since a row was ignored (REC-06). Same SQL on both backends.
+CHANGED_WHILE_IGNORED_COLUMN = (
+    "(SELECT e.payload FROM recommendation_events e "
+    "WHERE e.recommendation_id = recommendation_history.id AND e.event_type = 'changed_while_ignored' "
+    "AND (recommendation_history.ignored_at IS NULL OR e.created_at >= recommendation_history.ignored_at) "
+    "ORDER BY e.id DESC LIMIT 1) AS changed_while_ignored_payload"
+)
+
+
+def _changed_since_ignored(value: Any) -> Optional[dict]:
+    """The ``details`` of a stored ``changed_while_ignored`` event payload, or None."""
+    payload = from_json(value)
+    if not isinstance(payload, dict):
+        return None
+    details = payload.get("details")
+    return details if isinstance(details, dict) else None
+
+
+def _as_dict(value: Any) -> Optional[dict]:
+    parsed = from_json(value)
+    return parsed if isinstance(parsed, dict) else None

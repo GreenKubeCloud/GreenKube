@@ -36,7 +36,6 @@ from greenkube.models.metrics import PullRequestRecord, PullRequestStatus
 from greenkube.storage.base_gitops_repository import (
     GitOpsProviderConfig,
     PullRequestPollingLeaseNotOwnedError,
-    WorkerHeartbeat,
     WorkloadBinding,
     WorkloadBindingConflictError,
     WorkloadBindingEvent,
@@ -267,6 +266,16 @@ def _plan(
         created_at=datetime(2026, 10, 20, 12, 30, tzinfo=timezone.utc),
         expires_at=datetime(2026, 10, 22, 12, 30, tzinfo=timezone.utc),
     )
+
+
+async def _insert_worker_heartbeat(repository, worker_id: str, heartbeat_at: datetime) -> None:
+    async with repository._transaction() as connection:
+        await repository._execute(
+            connection,
+            "INSERT INTO automation_worker_heartbeats (worker_id, status, heartbeat_at, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (worker_id, "idle", repository._db_datetime(heartbeat_at), repository._db_datetime(heartbeat_at)),
+        )
 
 
 async def _insert_recommendations(manager, backend: str) -> None:
@@ -512,10 +521,8 @@ async def test_repository_credentials_are_removed_from_persisted_sources(gitops_
 async def test_worker_heartbeat_retention_removes_only_stale_rows(gitops_store):
     repository, _, _ = gitops_store
     now = datetime.now(timezone.utc)
-    await repository.upsert_worker_heartbeat(
-        WorkerHeartbeat(worker_id="stale-worker", heartbeat_at=now - timedelta(days=8))
-    )
-    await repository.upsert_worker_heartbeat(WorkerHeartbeat(worker_id="active-worker", heartbeat_at=now))
+    await _insert_worker_heartbeat(repository, "stale-worker", now - timedelta(days=8))
+    await _insert_worker_heartbeat(repository, "active-worker", now)
 
     removed = await repository.prune_worker_heartbeats(cutoff=now - timedelta(days=7))
 
@@ -624,12 +631,8 @@ async def test_automation_backlog_summary_reports_stuck_plans_operations_webhook
             (repository._db_datetime(stale), stuck_event.provider_id, stuck_event.delivery_id),
         )
 
-    await repository.upsert_worker_heartbeat(
-        WorkerHeartbeat(worker_id="backlog-stale-worker", status="idle", heartbeat_at=stale)
-    )
-    await repository.upsert_worker_heartbeat(
-        WorkerHeartbeat(worker_id="backlog-active-worker", status="idle", heartbeat_at=now)
-    )
+    await _insert_worker_heartbeat(repository, "backlog-stale-worker", stale)
+    await _insert_worker_heartbeat(repository, "backlog-active-worker", now)
 
     summary = await repository.get_automation_backlog_summary(stale_before=now - timedelta(minutes=15))
 
@@ -731,13 +734,199 @@ async def test_automation_history_retention_prunes_terminal_payloads_but_keeps_p
         "plan_files": 3,
         "operations": 1,
         "webhooks": 1,
-        "recommendation_events": 1,
         "binding_events": 1,
     }
     retained = await repository.get_plan(plan.plan_id)
     assert retained is not None
     assert retained.status is PlanStatus.FAILED
     assert retained.file_plan is None
+    assert retained.file_plan_summary is not None
+    assert [entry.path for entry in retained.file_plan_summary.files] == [
+        "apps/api/deployment.yaml",
+        "apps/api/values.yaml",
+        "apps/api/legacy.yaml",
+    ]
+    async with manager.connection_scope() as connection:
+        events = await repository._fetch(connection, "SELECT COUNT(*) AS total FROM recommendation_events", ())
+    # The recommendation audit trail is never pruned (D2, BUG-44).
+    assert int(events[0]["total"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_retention_keeps_applied_plans_valid_for_reads_and_policy_history(gitops_store):
+    """Regression for BUG-44: prune_check.py showed pruned APPLIED plans failed Plan validation."""
+    repository, manager, backend = gitops_store
+    await _insert_recommendations(manager, backend)
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="provider-github", provider_type="github", status="ready")
+    )
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=120)
+    plan = _plan(_source())
+    await repository.save_plan(plan)
+    for status in (PlanStatus.APPROVED, PlanStatus.APPLYING, PlanStatus.PR_OPEN, PlanStatus.MERGED):
+        assert await repository.set_plan_status(plan.plan_id, status) is not None
+    assert await repository.set_plan_status(plan.plan_id, PlanStatus.SYNCED) is not None
+    assert await repository.set_plan_status(plan.plan_id, PlanStatus.APPLIED) is not None
+    async with repository._transaction() as connection:
+        await repository._execute(
+            connection,
+            "UPDATE automation_plans SET updated_at = ? WHERE plan_id = ?",
+            (repository._db_datetime(old), plan.plan_id),
+        )
+    async with manager.connection_scope() as connection:
+        events_before = await repository._fetch(
+            connection,
+            "SELECT COUNT(*) AS total FROM recommendation_events WHERE recommendation_id IN (9101, 9102)",
+            (),
+        )
+    assert int(events_before[0]["total"]) > 0
+
+    pruned = await repository.prune_automation_history(cutoff=now - timedelta(days=90))
+
+    assert pruned["plan_files"] == 3
+    retained = await repository.get_plan(plan.plan_id)
+    assert retained is not None
+    assert retained.status is PlanStatus.APPLIED
+    assert retained.file_plan is None
+    summary = retained.file_plan_summary
+    assert summary is not None
+    assert summary.digest == plan.digest
+    assert summary.base_revision == "base-revision"
+    assert summary.validation.passed
+    assert summary.pruned_at is not None
+    assert summary.files[1].original_sha == "original-values-sha"
+    assert summary.files[1].content_digest is not None and summary.files[1].content_digest.startswith("sha256:")
+    assert summary.files[2].content_digest is None
+    record = await repository.get_plan_record(plan.plan_id)
+    assert record is not None and record.updated_at is not None
+    assert record.updated_at < now - timedelta(days=100)
+
+    history = await repository.list_plans_for_workload(
+        cluster="cluster-a",
+        namespace="production",
+        workload_kind="Deployment",
+        workload_name="api",
+    )
+    assert [item.plan_id for item in history] == [plan.plan_id]
+    async with manager.connection_scope() as connection:
+        events_after = await repository._fetch(
+            connection,
+            "SELECT COUNT(*) AS total FROM recommendation_events WHERE recommendation_id IN (9101, 9102)",
+            (),
+        )
+    assert events_after[0]["total"] == events_before[0]["total"]
+
+    # A second pass is idempotent and keeps the stored summary.
+    again = await repository.prune_automation_history(cutoff=now - timedelta(days=90))
+    assert again["plan_files"] == 0
+    assert (await repository.get_plan(plan.plan_id)).file_plan_summary == summary
+
+
+@pytest.mark.asyncio
+async def test_committed_on_revision_is_recorded_separately_from_the_base_revision(gitops_store):
+    """D7: a plan committed on a moved branch head keeps its planned base revision."""
+    repository, manager, backend = gitops_store
+    await _insert_recommendations(manager, backend)
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="provider-github", provider_type="github", status="ready")
+    )
+    plan = _plan(_source())
+    await repository.save_plan(plan)
+
+    assert (
+        await repository.set_plan_committed_on_revision(plan.plan_id, "c" * 40, expected_digest="sha256:" + "f" * 64)
+        is None
+    )
+    updated = await repository.set_plan_committed_on_revision(plan.plan_id, "c" * 40, expected_digest=plan.digest)
+
+    assert updated is not None
+    assert updated.committed_on_revision == "c" * 40
+    assert updated.file_plan is not None and updated.file_plan.base_revision == "base-revision"
+    assert (await repository.set_plan_status(plan.plan_id, PlanStatus.APPROVED)).committed_on_revision == "c" * 40
+    resaved = await repository.save_plan(updated)
+    assert resaved.committed_on_revision == "c" * 40
+
+
+@pytest.mark.asyncio
+async def test_retention_prunes_ignored_webhook_deliveries(gitops_store):
+    """D11 / BUG-53: unrelated PR webhooks are terminal and eventually pruned."""
+    repository, _, _ = gitops_store
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=100)
+    events = [
+        PullRequestEvent(
+            provider_id="provider-github",
+            delivery_id=f"delivery-{index}",
+            repo="acme/unrelated",
+            number=7 + index,
+            action="closed",
+            occurred_at=old,
+        )
+        for index in range(3)
+    ]
+    for event in events:
+        await repository.record_webhook_delivery(event)
+        assert await repository.claim_webhook_delivery(event.provider_id, event.delivery_id, stale_before=now)
+    await repository.update_webhook_delivery(
+        "provider-github",
+        "delivery-0",
+        status="ignored",
+        processed_at=old,
+        error_code="pull_request_unlinked",
+        expected_statuses=("processing",),
+    )
+    await repository.update_webhook_delivery(
+        "provider-github",
+        "delivery-1",
+        status="ignored",
+        processed_at=now,
+        error_code="pull_request_unlinked",
+        expected_statuses=("processing",),
+    )
+
+    pending = await repository.list_pending_webhook_deliveries(limit=10, stale_before=now + timedelta(minutes=5))
+    assert {delivery.delivery_id for delivery in pending} == {"delivery-2"}
+    summary = await repository.get_automation_backlog_summary(stale_before=now - timedelta(minutes=5))
+    assert summary.pending_webhooks == 1
+
+    pruned = await repository.prune_automation_history(cutoff=now - timedelta(days=90))
+
+    assert pruned["webhooks"] == 1
+    assert await repository.get_webhook_delivery("provider-github", "delivery-0") is None
+    assert (await repository.get_webhook_delivery("provider-github", "delivery-1")).status == "ignored"
+
+
+@pytest.mark.asyncio
+async def test_plans_pruned_without_a_summary_are_still_readable(gitops_store):
+    """Installs pruned by 0.3.x lost their file rows and have no stored summary."""
+    repository, manager, backend = gitops_store
+    await _insert_recommendations(manager, backend)
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="provider-github", provider_type="github", status="ready")
+    )
+    plan = _plan(_source())
+    await repository.save_plan(plan)
+    for status in (
+        PlanStatus.APPROVED,
+        PlanStatus.APPLYING,
+        PlanStatus.PR_OPEN,
+        PlanStatus.MERGED,
+        PlanStatus.SYNCED,
+        PlanStatus.SYNC_FAILED,
+    ):
+        assert await repository.set_plan_status(plan.plan_id, status) is not None
+    async with repository._transaction() as connection:
+        await repository._execute(connection, "DELETE FROM automation_plan_files WHERE plan_id = ?", (plan.plan_id,))
+
+    retained = await repository.get_plan(plan.plan_id)
+    assert retained is not None
+    assert retained.status is PlanStatus.SYNC_FAILED
+    assert retained.file_plan is None
+    assert retained.file_plan_summary is not None
+    assert retained.file_plan_summary.files == []
+    assert retained.file_plan_summary.digest == plan.digest
+    assert retained.base_revision == "base-revision"
 
 
 @pytest.mark.asyncio
@@ -746,7 +935,7 @@ async def test_gitops_repository_starts_empty_and_persists_typed_provider_bindin
     assert await repository.list_provider_configs() == []
     assert await repository.list_workload_bindings() == []
     assert await repository.list_plans() == []
-    assert await repository.list_worker_heartbeats() == []
+    assert await repository.get_worker_heartbeat("any-worker") is None
 
     with pytest.raises(ValueError, match="set together"):
         GitOpsProviderConfig(id="incomplete-provider", provider_type="github", secret_name="token")
@@ -1298,7 +1487,6 @@ async def test_plans_recommendations_webhook_dedupe_and_worker_heartbeat(gitops_
     assert approved_rollback is not None
     assert await repository.save_plan_if_absent(rollback_plan) == approved_rollback
     assert await repository.list_plans(status=PlanStatus.VALIDATED) == [persisted_plan]
-    assert await repository.list_recommendation_ids_for_plan(plan.plan_id) == [9101, 9102]
     followup_plan = Plan(
         plan_id="plan-api-followup",
         recommendation_ids=[9101],
@@ -1312,7 +1500,6 @@ async def test_plans_recommendations_webhook_dedupe_and_worker_heartbeat(gitops_
         ),
     )
     await repository.save_plan(followup_plan)
-    assert await repository.list_recommendation_ids_for_plan(followup_plan.plan_id) == [9101]
     assert await repository.list_plans_for_workload(
         cluster=source.cluster,
         namespace=source.namespace,
@@ -1328,9 +1515,11 @@ async def test_plans_recommendations_webhook_dedupe_and_worker_heartbeat(gitops_
 
     assert await repository.set_recommendation_action_status([9101, 9102, 9101], ActionStatus.PLAN_READY) == 2
     assert await repository.get_recommendation_action_status(9101) is ActionStatus.PLAN_READY
-    assert await repository.list_recommendations_by_action_status(ActionStatus.PLAN_READY) == [9101, 9102]
+    assert await repository.get_recommendation_action_status(9102) is ActionStatus.PLAN_READY
     assert await repository.set_recommendation_action_status([9101, 9102], ActionStatus.PR_OPEN) == 2
-    assert await repository.list_recommendations_by_action_status(ActionStatus.PR_OPEN) == [9101, 9102]
+    assert {await repository.get_recommendation_action_status(rec_id) for rec_id in (9101, 9102)} == {
+        ActionStatus.PR_OPEN
+    }
     assert await repository.set_plan_status(plan.plan_id, PlanStatus.APPLIED) is not None
     assert (await repository.get_plan(plan.plan_id)).status is PlanStatus.APPLIED
 
@@ -1399,31 +1588,6 @@ async def test_plans_recommendations_webhook_dedupe_and_worker_heartbeat(gitops_
         stale_before=stale_before,
     )
     assert await repository.update_webhook_delivery("provider-github", "missing-delivery", status="processed") is None
-
-    heartbeat = WorkerHeartbeat(
-        worker_id="worker-a",
-        status="running",
-        heartbeat_at=datetime.now(timezone.utc),
-        lease_id="lease-a",
-        lease_owner="worker-a",
-        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
-        metadata={"queue": "automation", "version": 1},
-    )
-    saved_heartbeat = await repository.upsert_worker_heartbeat(heartbeat)
-    assert await repository.get_worker_heartbeat(heartbeat.worker_id) == saved_heartbeat
-    assert saved_heartbeat.metadata == heartbeat.metadata
-
-    refreshed = WorkerHeartbeat(
-        worker_id="worker-a",
-        status="idle",
-        heartbeat_at=datetime.now(timezone.utc),
-        metadata={"queue": "automation", "version": 2},
-    )
-    saved_refreshed = await repository.upsert_worker_heartbeat(refreshed)
-    assert saved_refreshed.status == "idle"
-    assert saved_refreshed.lease_id is None
-    assert saved_refreshed.metadata == {"queue": "automation", "version": 2}
-    assert await repository.list_worker_heartbeats(status="idle") == [saved_refreshed]
 
 
 @pytest.mark.asyncio
@@ -1612,3 +1776,199 @@ async def test_pr_polling_lease_expiry_and_fencing_prevent_stale_mutations(gitop
     next_owner = await repository.try_acquire_pr_polling_lease("worker-c", lease_seconds=30)
     assert next_owner is not None
     assert next_owner.fencing_token == successor.fencing_token + 1
+
+
+@pytest.mark.asyncio
+async def test_provider_check_records_verification_without_touching_configuration(gitops_store):
+    """A provider stayed "unverified" after successful pull requests (e2e defect)."""
+    repository, _, _ = gitops_store
+    await repository.save_provider_config(
+        GitOpsProviderConfig(
+            id="gitea-quickstart",
+            provider_type="gitea",
+            api_base_url="http://gitea.test/api/v1",
+            secret_namespace="greenkube",
+            secret_name="git-token",
+            secret_key="token",
+        )
+    )
+    await repository.save_provider_config(GitOpsProviderConfig(id="disabled", provider_type="gitea", enabled=False))
+    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    assert await repository.record_provider_check("gitea-quickstart", "verified") is True
+    verified = await repository.get_provider_config("gitea-quickstart")
+    assert verified is not None
+    assert (verified.status, verified.last_error_code) == ("verified", None)
+    assert verified.last_checked_at is not None and verified.last_checked_at >= before
+    assert (verified.api_base_url, verified.secret_name, verified.enabled) == (
+        "http://gitea.test/api/v1",
+        "git-token",
+        True,
+    )
+
+    assert await repository.record_provider_check("gitea-quickstart", "error", error_code="auth_failed") is True
+    failed = await repository.get_provider_config("gitea-quickstart")
+    assert failed is not None and (failed.status, failed.last_error_code) == ("error", "auth_failed")
+
+    assert await repository.record_provider_check("disabled", "verified") is False
+    disabled = await repository.get_provider_config("disabled")
+    assert disabled is not None and disabled.status == "unverified"
+    with pytest.raises(ValueError):
+        await repository.record_provider_check("gitea-quickstart", "ready")
+
+
+@pytest.mark.asyncio
+async def test_delivery_mode_is_recorded_on_approved_plans_and_survives_resaves(gitops_store):
+    """F4: the delivery mode chosen at approval is persisted and listed with the plan."""
+    repository, manager, backend = gitops_store
+    await _insert_recommendations(manager, backend)
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="provider-github", provider_type="github", status="ready")
+    )
+    plan = _plan(_source())
+    await repository.save_plan(plan)
+    assert (await repository.get_plan(plan.plan_id)).delivery_mode is None
+
+    # Only an approved plan with the expected digest gets a delivery mode.
+    approved_only = (PlanStatus.APPROVED,)
+    assert (
+        await repository.set_plan_delivery_mode(
+            plan.plan_id, "ci", expected_digest=plan.digest, expected_statuses=approved_only
+        )
+        is None
+    )
+    await repository.set_plan_status(plan.plan_id, PlanStatus.APPROVED)
+    assert (
+        await repository.set_plan_delivery_mode(
+            plan.plan_id, "ci", expected_digest="sha256:" + "f" * 64, expected_statuses=approved_only
+        )
+        is None
+    )
+    updated = await repository.set_plan_delivery_mode(
+        plan.plan_id, "ci", expected_digest=plan.digest, expected_statuses=approved_only
+    )
+
+    assert updated is not None and updated.delivery_mode == "ci"
+    assert [item.delivery_mode for item in await repository.list_plans(status=PlanStatus.APPROVED)] == ["ci"]
+    assert (await repository.save_plan(updated)).delivery_mode == "ci"
+    assert (await repository.set_plan_status(plan.plan_id, PlanStatus.PR_OPEN)).delivery_mode == "ci"
+    with pytest.raises(ValueError):
+        await repository.set_plan_delivery_mode(
+            plan.plan_id, "push", expected_digest=plan.digest, expected_statuses=approved_only
+        )
+
+
+@pytest.mark.asyncio
+async def test_provider_feature_notes_keep_the_provider_verified(gitops_store):
+    """A refused best-effort feature is a note next to a verified provider, cleared on success."""
+    repository, _, _ = gitops_store
+    await repository.save_provider_config(
+        GitOpsProviderConfig(
+            id="github-main", provider_type="github", secret_name="git-token", secret_key="token", enabled=True
+        )
+    )
+    assert await repository.record_provider_check("github-main", "verified") is True
+
+    await repository.record_provider_feature_note("github-main", "pull_request_metadata", "permission_denied")
+    await repository.record_provider_feature_note("github-main", "comments", "permission_denied")
+    await repository.record_provider_feature_note("github-main", "comments", "permission_denied")
+    await repository.record_provider_feature_note("missing-provider", "comments", "permission_denied")
+
+    notes = await repository.list_provider_feature_notes()
+    assert [(note["provider_id"], note["feature"], note["error_code"]) for note in notes] == [
+        ("github-main", "comments", "permission_denied"),
+        ("github-main", "pull_request_metadata", "permission_denied"),
+    ]
+    assert all(note["observed_at"] is not None for note in notes)
+    provider = await repository.get_provider_config("github-main")
+    assert provider is not None and (provider.status, provider.last_error_code) == ("verified", None)
+
+    await repository.record_provider_feature_note("github-main", "comments", None)
+    remaining = await repository.list_provider_feature_notes("github-main")
+    assert [note["feature"] for note in remaining] == ["pull_request_metadata"]
+
+
+@pytest.mark.asyncio
+async def test_provider_backoff_is_stored_with_the_record_and_released_by_a_new_allowlist_pattern(gitops_store):
+    repository, manager, backend = gitops_store
+    pull_requests = (
+        PostgresPullRequestRepository(manager) if backend == "postgres" else SQLitePullRequestRepository(manager)
+    )
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="github-main", provider_type="github", status="ready")
+    )
+    await repository.add_provider_allowlist("github-main", "acme/platform")
+    detached, other = [
+        await pull_requests.save_pull_request(
+            PullRequestRecord(
+                recommendation_id=recommendation_id,
+                provider="github",
+                provider_id="github-main",
+                repo=repo,
+                pr_number=recommendation_id,
+                plan_id=f"plan-{recommendation_id}",
+                status=PullRequestStatus.OPEN,
+            )
+        )
+        for recommendation_id, repo in ((801, "acme/removed"), (802, "acme/platform"))
+    ]
+    assert detached.provider_retry_failures == 0 and detached.provider_retry_at is None
+    retry_at = datetime(2026, 1, 5, 12, 0, 40, tzinfo=timezone.utc)
+    assert detached.id is not None and other.id is not None
+    await pull_requests.set_provider_retry_state(
+        [detached.id], failures=3, retry_at=retry_at, detached_reason="repository_not_allowed"
+    )
+    await pull_requests.set_provider_retry_state([other.id], failures=0, retry_at=retry_at, detached_reason=None)
+
+    stored = await pull_requests.get_pull_request_by_id(detached.id)
+    assert stored is not None
+    assert stored.provider_retry_failures == 3
+    assert stored.provider_retry_at == retry_at
+    assert stored.provider_detached_reason == "repository_not_allowed"
+    assert stored.updated_at == detached.updated_at
+
+    # Re-adding an existing pattern changes nothing; a new pattern releases detached records only.
+    await repository.add_provider_allowlist("github-main", "acme/platform")
+    assert (await pull_requests.get_pull_request_by_id(detached.id)).provider_retry_at == retry_at  # type: ignore[union-attr]
+    await repository.add_provider_allowlist("github-main", "acme/removed")
+    released = await pull_requests.get_pull_request_by_id(detached.id)
+    assert released is not None
+    assert released.provider_retry_at is None
+    assert (released.provider_retry_failures, released.provider_detached_reason) == (3, "repository_not_allowed")
+    assert (await pull_requests.get_pull_request_by_id(other.id)).provider_retry_at == retry_at  # type: ignore[union-attr]
+
+    await pull_requests.set_provider_retry_state([detached.id], failures=0, retry_at=None, detached_reason=None)
+    cleared = await pull_requests.get_pull_request_by_id(detached.id)
+    assert cleared is not None
+    assert (cleared.provider_retry_failures, cleared.provider_retry_at, cleared.provider_detached_reason) == (
+        0,
+        None,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_cancel_is_stored_as_cancelled_with_its_reason(gitops_store):
+    """F-10: a cancelled plan keeps the ``cancelled`` status and its reason in both dialects."""
+    repository, manager, backend = gitops_store
+    await _insert_recommendations(manager, backend)
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="provider-github", provider_type="github", status="ready")
+    )
+    plan = _plan(_source())
+    await repository.save_plan(plan)
+
+    cancelled = await repository.set_plan_status(
+        plan.plan_id,
+        PlanStatus.CANCELLED,
+        expected_statuses=(PlanStatus.VALIDATED,),
+        expected_digest=plan.digest,
+        reason_code="cancelled_by_user",
+    )
+
+    assert cancelled is not None
+    reread = await repository.get_plan(plan.plan_id)
+    assert reread is not None
+    assert reread.status is PlanStatus.CANCELLED
+    assert reread.status_reason == "cancelled_by_user"
+    assert [item.plan_id for item in await repository.list_plans(status=PlanStatus.CANCELLED)] == [plan.plan_id]
