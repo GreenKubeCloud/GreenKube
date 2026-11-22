@@ -478,6 +478,16 @@ def _mount_frontend(app: FastAPI) -> None:
     # Serve other static files (favicon, etc.)
     app.mount("/static-frontend", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend-root")
 
+    # Files the catch-all may serve, listed once: the frontend is a static build
+    # baked into the image. A request path is only a key into this map, so it
+    # never becomes a filesystem path (no traversal, symlinks are skipped).
+    frontend_files: dict[str, str] = {}
+    for directory, _subdirs, names in os.walk(FRONTEND_DIR):
+        for name in names:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                frontend_files[Path(path).relative_to(FRONTEND_DIR).as_posix()] = path
+
     # SPA catch-all: any route not matched by /api/* returns index.html.
     # Excludes well-known proxy/ingress paths so they return 404 instead
     # of serving the SPA when the reverse proxy misroutes them.
@@ -503,15 +513,12 @@ def _mount_frontend(app: FastAPI) -> None:
         if any(("/" + full_path).startswith(p) for p in _PROXY_PATHS):
             return Response(status_code=404)
 
-        # Resolve the candidate path and refuse anything outside the
-        # frontend directory (path traversal).
-        frontend_root = os.path.realpath(FRONTEND_DIR)
-        candidate = os.path.realpath(os.path.join(frontend_root, full_path))
-        if candidate != frontend_root and not candidate.startswith(frontend_root + os.sep):
+        # A built file is served as is; a path outside the build, including
+        # any traversal attempt, is refused rather than answered with the SPA.
+        if full_path in frontend_files:
+            return FileResponse(frontend_files[full_path])
+        if ".." in full_path.replace("\\", "/").split("/"):
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
-        if os.path.isfile(candidate):
-            return FileResponse(candidate)
         return FileResponse(str(index_html))
 
 
