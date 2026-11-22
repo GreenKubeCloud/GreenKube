@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Set, Tuple
 
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.workload_usage import POD_LEVEL, TargetKey, UsageSnapshot, WorkloadUsageSummary
@@ -42,8 +41,6 @@ class OptimizationContext:
     hpa_targets: Optional[Set[Tuple[str, str, str]]] = None
     persistent_volumes: Optional[List] = None
     load_balancers: Optional[List] = None
-    #: Namespace metadata by name for the deletion safety rules; None when unreadable.
-    namespace_info: Optional[Dict[str, Any]] = None
     usage: Optional[UsageSnapshot] = None
     #: Rightsizing decreases withheld by this scan because the restart/OOM history
     #: could not be read (REC-04), as ``(namespace, target_kind, target_name,
@@ -58,9 +55,6 @@ class OptimizationContext:
     #: Static pods behind ``static_pod_targets`` (reported as a source-run diagnostic).
     static_pod_count: int = 0
     _target_series_cache: Optional[Dict[Tuple[str, str, str], List[CombinedMetric]]] = field(
-        default=None, init=False, repr=False, compare=False
-    )
-    _pod_series_cache: Optional[Dict[Tuple[str, str, str], List[CombinedMetric]]] = field(
         default=None, init=False, repr=False, compare=False
     )
 
@@ -79,20 +73,6 @@ class OptimizationContext:
             target_metrics.extend(self.container_metrics)
             self._target_series_cache = group_by_recommendation_target(target_metrics)
         return self._target_series_cache
-
-    def pod_series(self) -> Dict[Tuple[str, str, str], List[CombinedMetric]]:
-        """Returns the pod-level rows (never container rows) grouped by target, computed once."""
-        if self._pod_series_cache is None:
-            from greenkube.core.optimization.targeting import group_by_recommendation_target
-
-            self._pod_series_cache = group_by_recommendation_target(
-                [metric for metric in self.metrics if not metric.container_name]
-            )
-        return self._pod_series_cache
-
-    def workload_rows(self, target: TargetKey) -> List[CombinedMetric]:
-        """Rows that price a whole-workload change (deletion, schedule): pod level when available."""
-        return self.pod_series().get(target) or self.target_series().get(target, [])
 
     def container_rows(self, target: TargetKey, container: Optional[str]) -> List[CombinedMetric]:
         """Rows that price a request change of one container (``None`` = pod-level aggregate)."""
@@ -154,10 +134,3 @@ class OptimizationContext:
         for target in self.usage_snapshot().summaries:
             for container, summary in self.container_summaries(target):
                 yield target, container, summary
-
-    def namespace_targets(self) -> Dict[str, List[WorkloadUsageSummary]]:
-        """Pod-level summaries grouped by namespace."""
-        grouped: Dict[str, List[WorkloadUsageSummary]] = defaultdict(list)
-        for target, summary in self.workload_summaries():
-            grouped[target[0]].append(summary)
-        return grouped

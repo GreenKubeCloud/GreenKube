@@ -6,34 +6,20 @@ from greenkube.core.optimization.registry import build_sources
 
 
 class TestBuildSources:
-    def test_all_sources_enabled_by_default(self):
-        # Phase 6: VPA and Karpenter are enabled by default and detect their
-        # CRDs at runtime, so an absent CRD disables the source gracefully.
+    def test_vpa_and_native_by_default(self):
+        # VPA is enabled by default and detects its CRD at runtime, so an absent CRD
+        # disables the source gracefully.
         sources = build_sources(Config())
-        assert [s.name for s in sources] == ["vpa", "karpenter", "greenkube"]
+        assert [s.name for s in sources] == ["vpa", "greenkube"]
+        by_name = {s.name: s for s in sources}
+        assert by_name["vpa"].priority > by_name["greenkube"].priority
 
-    def test_native_only_when_sources_disabled(self):
+    def test_native_only_when_vpa_disabled(self):
         cfg = Config()
         cfg.RECOMMENDATION_VPA_ENABLED = False
-        cfg.RECOMMENDATION_KARPENTER_ENABLED = False
         sources = build_sources(cfg)
         assert [s.name for s in sources] == ["greenkube"]
 
-    def test_vpa_enabled(self):
-        cfg = Config()
-        cfg.RECOMMENDATION_KARPENTER_ENABLED = False
-        sources = build_sources(cfg)
-        names = [s.name for s in sources]
-        assert names == ["vpa", "greenkube"]
-
-    def test_karpenter_enabled(self):
-        cfg = Config()
-        cfg.RECOMMENDATION_VPA_ENABLED = False
-        sources = build_sources(cfg)
-        assert [s.name for s in sources] == ["karpenter", "greenkube"]
-
-    def test_all_sources_enabled(self):
-        cfg = Config()
-        cfg.RECOMMENDATION_VPA_ENABLED = True
-        cfg.RECOMMENDATION_KARPENTER_ENABLED = True
-        assert [s.name for s in build_sources(cfg)] == ["vpa", "karpenter", "greenkube"]
+    def test_the_removed_karpenter_flag_changes_nothing(self):
+        cfg = Config(RECOMMENDATION_KARPENTER_ENABLED=True)
+        assert [s.name for s in build_sources(cfg)] == ["vpa", "greenkube"]

@@ -372,7 +372,16 @@
             "sourcePriority": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "string"}]},
             "consensusPolicy": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "string"}]},
             "vpaEnabled": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": ["boolean", "string"]}]},
-            "karpenterEnabled": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": ["boolean", "string"]}]}
+            "karpenterEnabled": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["boolean", "string"]}]},
+            "zombieCostThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
+            "zombieEnergyThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
+            "autoscalingCvThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
+            "autoscalingSpikeRatio": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
+            "offPeakIdleThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
+            "offPeakMinIdleHours": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
+            "idleNamespaceEnergyThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
+            "carbonAwareThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
+            "nodeUtilizationThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]}
           }
         }
       }

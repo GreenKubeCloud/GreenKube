@@ -95,7 +95,7 @@ rotates them. Credentials are never written to ConfigMaps, logs, API responses, 
 | Controller/worker | Git providers (GitHub, GitLab, Gitea) | The Git credential, to its bound host only |
 | Controller | Remote Helm repositories and OCI registries | None (anonymous; registry bearer tokens never follow a redirect to another host) |
 | Controller | Self-hosted provider probe (`/api/v4/version`, `/api/v1/version`) | None |
-| Connectors (VPA, Goldilocks, Karpenter) | The Kubernetes API | The GreenKube ServiceAccount |
+| Connectors (VPA, Goldilocks) and the realization factor's Karpenter and Cluster Autoscaler reads | The Kubernetes API | The GreenKube ServiceAccount |
 | Renderer sandbox | Nothing (egress denied) | None |
 
 Restrict controller egress with `monitoring.networkPolicy.additionalEgress` (opt-in: the right egress list depends on

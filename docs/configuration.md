@@ -219,16 +219,7 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.minCpuMillicores` | `RECOMMENDATION_MIN_CPU_MILLICORES` | `10` | Floor of a proposed CPU request; lower targets are raised to it. |
 | `config.recommendations.minMemoryBytes` | `RECOMMENDATION_MIN_MEMORY_BYTES` | `16777216` | Floor of a proposed memory request (16 MiB; quote it in values so YAML keeps an integer). |
 | `config.recommendations.applyTolerance` | `RECOMMENDATION_APPLY_TOLERANCE` | `0.25` | Relative deviation between the live request and the proposal still counted as applied by apply detection ([Recommendation lifecycle](recommendation.md)). |
-| `config.recommendations.zombieCostThreshold` | `ZOMBIE_COST_THRESHOLD` | `0.01` | A workload whose cost over the scan lookback exceeds this (pricing currency) while its energy stays below `zombieEnergyThreshold` is a zombie candidate. |
-| `config.recommendations.zombieEnergyThreshold` | `ZOMBIE_ENERGY_THRESHOLD` | `1000` | Energy (joules over the scan lookback) below which a costly workload is a zombie candidate. |
-| `config.recommendations.autoscalingCvThreshold` | `AUTOSCALING_CV_THRESHOLD` | `0.7` | Coefficient of variation of CPU usage above which a workload without an HPA is an autoscaling candidate. |
-| `config.recommendations.autoscalingSpikeRatio` | `AUTOSCALING_SPIKE_RATIO` | `3.0` | Max/mean CPU ratio required, with the coefficient of variation, for an autoscaling candidate. |
-| `config.recommendations.offPeakIdleThreshold` | `OFF_PEAK_IDLE_THRESHOLD` | `0.05` | Share of the daily CPU peak below which an hour counts as idle for off-peak scaling. |
-| `config.recommendations.offPeakMinIdleHours` | `OFF_PEAK_MIN_IDLE_HOURS` | `4` | Consecutive idle hours required for an off-peak scale-to-zero recommendation. |
-| `config.recommendations.idleNamespaceEnergyThreshold` | `IDLE_NAMESPACE_ENERGY_THRESHOLD` | `1000` | Namespace energy (joules) below which a namespace with a positive cost is idle. |
-| `config.recommendations.carbonAwareThreshold` | `CARBON_AWARE_THRESHOLD` | `1.5` | A workload whose average grid intensity exceeds this multiple of its zone average gets a carbon-aware scheduling recommendation. |
-| `config.recommendations.nodeUtilizationThreshold` | `NODE_UTILIZATION_THRESHOLD` | `0.2` | Average CPU (and memory, when known) utilization below which a node is over-provisioned. |
-| `config.recommendations.recommendSystemNamespaces` | `RECOMMEND_SYSTEM_NAMESPACES` | `false` | Include system namespaces (such as `kube-system`) in recommendations. Zombie, idle-namespace and off-peak recommendations never target infrastructure namespaces, whatever this says. |
+| `config.recommendations.recommendSystemNamespaces` | `RECOMMEND_SYSTEM_NAMESPACES` | `false` | Include system namespaces (such as `kube-system`) in recommendations. |
 | `config.recommendations.storageCostPerGibMonth` | `STORAGE_COST_PER_GIB_MONTH` | `0.1` | Assumed monthly cost per GiB of an orphaned PersistentVolume, for its deletion savings. |
 | `config.recommendations.loadBalancerCostPerMonth` | `LOAD_BALANCER_COST_PER_MONTH` | `18.0` | Assumed monthly cost of an orphaned cloud LoadBalancer, for its deletion savings. |
 | `config.recommendations.rightsizingIncreaseThreshold` | `RIGHTSIZING_INCREASE_THRESHOLD` | `0.9` | Recommend a request increase (reliability) when p99 usage exceeds this share of the request. |
@@ -236,7 +227,7 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.targetMaxStalenessHours` | `RECOMMENDATION_TARGET_MAX_STALENESS_HOURS` | `2` | Hours after its last sample a target without a running pod is left out of rightsizing: its recommendations are retired (`target_gone`) once the cluster confirms it is gone, or kept when it is scaled to zero or its pods cannot be listed. |
 | `config.recommendations.rightsizingWarmupMinutes` | `RIGHTSIZING_WARMUP_MINUTES` | `10` | Minutes after a container restart (or a new replica) left out of usage percentiles, so startup spikes do not size requests. The maximum keeps every point. `0` disables it. |
 | `config.recommendations.minDecreaseCoverageDays` | `RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS` | `7` | Observed days required before a request decrease is recommended. Increases need no minimum. |
-| `config.recommendations.deletionMinUnusedDays` | `DELETION_MIN_UNUSED_DAYS` | `7` | Days a LoadBalancer Service or PersistentVolume must look unused continuously, and days of idle observations for zombie workloads and idle namespaces, before a deletion is recommended. See [Why GreenKube thinks a resource is unused](recommendation.md#why-greenkube-thinks-a-resource-is-unused). |
+| `config.recommendations.deletionMinUnusedDays` | `DELETION_MIN_UNUSED_DAYS` | `7` | Days a LoadBalancer Service or PersistentVolume must look unused continuously before a deletion is recommended. See [Why GreenKube thinks a resource is unused](recommendation.md#why-greenkube-thinks-a-resource-is-unused). |
 | `config.recommendations.limitsPolicy` | `RECOMMENDATION_LIMITS_POLICY` | `keep` | Limits advice of native rightsizing: `keep` (only when a limit would be invalid or unsafe), `remove_cpu`, or `memory_equals_request`. See [Two-way rightsizing](recommendation.md#two-way-rightsizing-and-limits). |
 | `config.recommendations.ttlDays` | `RECOMMENDATION_TTL_DAYS` | `14` | Recommendation expiry. |
 | `config.recommendations.rankingProfile` | `RECOMMENDATION_RANKING_PROFILE` | `balanced` | Default ranking profile: `balanced`, `cost_first`, `carbon_first`, `low_risk` or `quick_wins`, presets over the carbon price, risk aversion and effort weight of the expected value. Requests override it with `?profile=`. See [ranking](recommendation.md#sources-evidence-and-ranking). |
@@ -267,12 +258,12 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 
 ### Recommendation sources (`sources`)
 
-Sources produce the signals recommendations are built from: one per native analyzer (`greenkube.rightsizing_cpu`, `greenkube.orphaned_lb`...), `vpa` (with Goldilocks provenance), `greenkube.nodepool`, the signal-only connectors `krr` and `push`, and third-party plugins. `GET /api/v1/sources` lists them with their status. GreenKube's measured value decides every size; the other sources move the confidence ([Consensus across sources](recommendation.md#consensus-across-sources)). See [Recommendation sources](sources.md).
+Sources produce the signals recommendations are built from: one per native analyzer (`greenkube.rightsizing_cpu`, `greenkube.orphaned_lb`...), `vpa` (with Goldilocks provenance), the signal-only connectors `krr` and `push`, and third-party plugins. `GET /api/v1/sources` lists them with their status. GreenKube's measured value decides every size; the other sources move the confidence ([Consensus across sources](recommendation.md#consensus-across-sources)). See [Recommendation sources](sources.md).
 
 | Helm value | Environment variable | Default | Description |
 |---|---|---|---|
 | `sources.pluginsEnabled` | `SOURCES_PLUGINS_ENABLED` | `true` | Load third-party sources installed in the image and registered under the `greenkube.sources` Python entry points. A plugin that fails to load is reported in `GET /api/v1/sources` (`problems`) and never stops the other sources. |
-| `sources.settings` | `SOURCES_CONFIG` | `{}` | Per-source settings keyed by source id, rendered as a JSON object. `enabled` is `true`, `false` or `auto` (run when the source's prerequisites are detected, the default for `vpa` and `greenkube.nodepool`); other keys are validated by the source (unknown keys disable that source and are reported). Invalid JSON is rejected at startup. Do not put credentials here: the map is stored in the ConfigMap. The 0.3.x `config.recommendations.vpaEnabled`/`karpenterEnabled` flags are still honoured for one minor release. |
+| `sources.settings` | `SOURCES_CONFIG` | `{}` | Per-source settings keyed by source id, rendered as a JSON object. `enabled` is `true`, `false` or `auto` (run when the source's prerequisites are detected, the default for `vpa`); other keys are validated by the source (unknown keys disable that source and are reported). Invalid JSON is rejected at startup. Do not put credentials here: the map is stored in the ConfigMap. The 0.3.x `config.recommendations.vpaEnabled`/`karpenterEnabled` flags are still honoured for one minor release. |
 | `sources.toolFloors` | `SIGNAL_TOOL_FLOORS` | `{krr: {cpu: 10m, memory: 100Mi}, vpa: {cpu: 15m, memory: 100Mi}}` | Known minimum each tool proposes, keyed by engine family or source id (a source id such as `goldilocks` overrides its family `vpa`; a key without the resource falls through), with `cpu` and/or `memory` quantities (rendered as JSON). A proposal on the floor is not counted as a consensus vote; the `vpa` floor is per pod and split between its containers. Set a key to `null` to drop it. Invalid JSON or quantities are rejected at startup. See [Votes that are not counted](recommendation.md#consensus-across-sources). |
 | `sources.minChange.percent` | `SIGNAL_MIN_CHANGE_PERCENT` | `5` | Smallest relative change (percent of the current request) an external source must propose to vote for its own value; a smaller change votes to keep the current request. |
 | `sources.minChange.cpuMillicores` | `SIGNAL_MIN_CHANGE_CPU_MILLICORES` | `10` | Smallest absolute CPU change of an external vote; both minimums must be reached. |
@@ -290,7 +281,7 @@ Connector settings in `sources.settings` (all optional, validated by each source
 ```yaml
 sources:
   settings:
-    greenkube.carbon_aware: { enabled: false }   # turn one native analyzer off (its active advice goes stale)
+    greenkube.orphaned_lb: { enabled: false }    # turn one native analyzer off (its active advice goes stale)
     vpa: { enabled: auto }
     push: { max_age_hours: 72 }
 ```

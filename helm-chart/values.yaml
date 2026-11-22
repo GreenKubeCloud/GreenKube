@@ -595,24 +595,14 @@ config:
     minDecreaseCoverageDays: 7
     # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.
     limitsPolicy: keep
-    zombieCostThreshold: 0.01
-    zombieEnergyThreshold: 1000
-    autoscalingCvThreshold: 0.7
-    autoscalingSpikeRatio: 3.0
-    offPeakIdleThreshold: 0.05
-    offPeakMinIdleHours: 4
-    idleNamespaceEnergyThreshold: 1000
-    carbonAwareThreshold: 1.5
-    nodeUtilizationThreshold: 0.2
     # Assumed monthly cost per GiB of provisioned storage (USD), used to estimate
     # the annual cost savings of deleting orphaned PersistentVolumes.
     storageCostPerGibMonth: 0.1
     # Assumed monthly cost of a provisioned cloud LoadBalancer (USD), used to
     # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
     loadBalancerCostPerMonth: 18.0
-    # Days a LoadBalancer or PersistentVolume must look unused continuously (zombie
-    # workloads and idle namespaces: be observed idle) before its deletion is
-    # recommended. Deletions are never automated; see docs/recommendation.md.
+    # Days a LoadBalancer or PersistentVolume must look unused continuously before
+    # its deletion is recommended. Deletions are never automated; see docs/recommendation.md.
     deletionMinUnusedDays: 7
     # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
     recommendSystemNamespaces: false
@@ -721,10 +711,10 @@ sources:
   # `greenkube.sources` Python entry points. GET /api/v1/sources lists them.
   pluginsEnabled: true
   # Per-source settings keyed by source id; `enabled` is true, false or auto
-  # (auto: the source probes its prerequisites, such as the VPA or Karpenter
-  # CRDs). Replaces config.recommendations.vpaEnabled / karpenterEnabled. Example:
+  # (auto: the source probes its prerequisites, such as the VPA CRD).
+  # Replaces config.recommendations.vpaEnabled. Example:
   #   settings:
-  #     greenkube.carbon_aware: { enabled: false }
+  #     greenkube.orphaned_lb: { enabled: false }
   #     vpa: { enabled: auto }
   # Do not put credentials here: this map is rendered into the ConfigMap.
   # Connector settings (docs/sources/): krr and push { max_age_hours }.

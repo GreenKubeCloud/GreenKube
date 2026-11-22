@@ -332,16 +332,14 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
     ) -> UsageSnapshot:
         scope = sorted(namespaces) if namespaces is not None else None
         params = q.scope_params(_encode(start), _encode(end), namespace, scope)
-        summaries, profiles, nodes, collection = await self._fetch_bounded(
+        summaries, collection = await self._fetch_bounded(
             [
                 (q.summary_sql(_ph, namespace, scope), params),
-                (q.hour_profile_sql(_ph, namespace, scope), params),
-                (q.node_sql(_ph, namespace, scope), params),
                 # IMP-04: collection is cluster-wide (all live namespaces), even for a namespace-scoped read.
                 (q.collection_sql(_ph, None, scope), q.scope_params(_encode(start), _encode(end), None, scope)),
             ]
         )
-        return q.build_snapshot(summaries, profiles, nodes, _decode, collection)
+        return q.build_snapshot(summaries, _decode, collection)
 
     async def read_baseline_rows(
         self,

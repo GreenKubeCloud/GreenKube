@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from greenkube.core.config import Config
-from greenkube.core.optimization.analyzers import CpuRightsizingAnalyzer, MemoryRightsizingAnalyzer, NodesAnalyzer
+from greenkube.core.optimization.analyzers import CpuRightsizingAnalyzer, MemoryRightsizingAnalyzer
 from greenkube.core.optimization.analyzers.rightsizing import (
     CONTAINER_USAGE_EXCEEDS_POD,
     POD_LEVEL_USAGE_ONLY,
@@ -20,8 +20,7 @@ from greenkube.core.optimization.analyzers.rightsizing import (
 )
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.evidence import build_evidence
-from greenkube.models.metrics import CombinedMetric, RecommendationType
-from greenkube.models.node import NodeInfo
+from greenkube.models.metrics import CombinedMetric
 from greenkube.models.workload_usage import UsageSnapshot, UsageStats, WorkloadUsageSummary
 
 MIB = 1024 * 1024
@@ -256,27 +255,6 @@ class TestPercentilesFromSteps:
         evidence = build_evidence(rec, context)
         assert evidence is not None and evidence.cpu_usage is not None
         assert evidence.cpu_usage.max == pytest.approx(600)
-
-
-class TestNodes:
-    def test_underutilized_node_type_is_never_emitted(self):
-        rows = [
-            CombinedMetric(
-                restart_count=0,
-                pod_name="solo",
-                namespace="default",
-                node="lonely",
-                cpu_usage_millicores=50,
-                memory_usage_bytes=100 * MIB,
-                timestamp=datetime.now(timezone.utc) - timedelta(hours=1),
-                duration_seconds=300,
-            )
-        ]
-        node = NodeInfo(name="lonely", cpu_capacity_cores=8.0, memory_capacity_bytes=32 * 1024 * MIB)
-        context = OptimizationContext(config=Config(), metrics=rows, node_infos=[node])
-        recs = NodesAnalyzer(context.config).analyze(context)
-        assert [rec.type for rec in recs] == [RecommendationType.OVERPROVISIONED_NODE]
-        assert RecommendationType.UNDERUTILIZED_NODE.value == "UNDERUTILIZED_NODE"
 
 
 def test_memory_analyzer_reports_the_reliability_cause():

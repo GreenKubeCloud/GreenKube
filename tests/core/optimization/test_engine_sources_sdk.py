@@ -24,7 +24,7 @@ from greenkube.storage.sqlite.optimization_run_repository import SQLiteOptimizat
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 
 
-def _rec(pod: str, rec_type: RecommendationType = RecommendationType.ZOMBIE_POD) -> Recommendation:
+def _rec(pod: str, rec_type: RecommendationType = RecommendationType.ORPHANED_PERSISTENT_VOLUME) -> Recommendation:
     return Recommendation(
         pod_name=pod,
         namespace="prod",
@@ -38,9 +38,9 @@ def _rec(pod: str, rec_type: RecommendationType = RecommendationType.ZOMBIE_POD)
 
 
 class GoodAnalyzer(Analyzer):
-    """Emits one zombie recommendation."""
+    """Emits one orphaned-volume recommendation."""
 
-    capability = "zombie_cleanup"
+    capability = "storage_cleanup"
 
     def analyze(self, context):
         return [_rec("alive")]

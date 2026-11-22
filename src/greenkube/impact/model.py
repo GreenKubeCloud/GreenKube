@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 from greenkube.impact.allocation import allocate_snapshot
@@ -28,13 +27,10 @@ from greenkube.impact.types import (
     CostSource,
     ImpactDelta,
     NodeImpactProfile,
-    NodePoolChange,
     NodePoolContext,
     ProposedChange,
-    ReplicaScheduleChange,
     ResourceSample,
     WorkloadBaseline,
-    WorkloadDeletion,
     carbon_value,
     parse_cost_source,
 )
@@ -344,16 +340,6 @@ class _Accumulator:
         tally.ram_cost += prices.ram_reserved_gib_hour * mem_quantity
         tally.ram_gib_hours += mem_quantity
 
-    def track_node(self, node: NodeImpactProfile, hours: float) -> None:
-        """Records a whole node priced at its unit prices (node-pool changes)."""
-        self.nodes.setdefault(node.name, node)
-        self.priced_nodes.setdefault(node.name, node)
-        self.currencies.add(node.prices.currency)
-        self.weight_hours += hours
-        self.confidence_weighted += price_confidence(node) * hours
-        self.pue_weighted += node.pue * hours
-        self.intensity_weighted += node.grid_intensity_g_per_kwh * hours
-
     def listed_prices(self) -> List[Dict[str, Any]]:
         """Distinct unit prices used by a projection, for the PR body and the API."""
         listed: List[Dict[str, Any]] = []
@@ -469,31 +455,8 @@ class ReservationAwareImpactModel:
     def project(self, baseline: WorkloadBaseline, change: ProposedChange, pool: NodePoolContext) -> ImpactDelta:
         if isinstance(change, ContainerResourceChange):
             return self._project_container_resources(baseline, change, pool)
-        if isinstance(change, WorkloadDeletion):
-            # IMP-05: deleting pods releases reserved capacity like cutting their requests to zero; the
-            # bill only falls when a node goes away, so the pool's factor applies (usage-based terms and
-            # per-asset costs keep a factor of 1, see _finalize).
-            factor, source, reasons, pools = pool.realization_for(baseline.samples)
-            delta = self._project_sample_removal(
-                baseline, baseline.samples, ChangeKind.WORKLOAD_DELETION, pool, factor, source, removal=True
-            )
-            _record_realization(delta, reasons, pools)
-            return delta
-        if isinstance(change, ReplicaScheduleChange):
-            removed = [
-                sample
-                for sample in baseline.samples
-                if sample.timestamp is not None and _utc_hour(sample.timestamp) in change.removed_hours_of_day
-            ]
-            factor, source, reasons, pools = pool.realization_for(removed or baseline.samples)
-            delta = self._project_sample_removal(baseline, removed, ChangeKind.REPLICA_SCHEDULE, pool, factor, source)
-            _record_realization(delta, reasons, pools)
-            delta.assumptions["removed_hours_of_day"] = sorted(change.removed_hours_of_day)
-            return delta
         if isinstance(change, AssetDeletion):
             return self._project_asset_deletion(change, pool)
-        if isinstance(change, NodePoolChange):
-            return self._project_node_pool(baseline, change, pool)
         raise TypeError(f"Unsupported change type: {type(change).__name__}")
 
     # ------------------------------------------------------------------ #
@@ -567,63 +530,6 @@ class ReservationAwareImpactModel:
         delta.assumptions["change"] = change_details
         return delta
 
-    # ------------------------------------------------------------------ #
-    # Deletion and schedule changes                                       #
-    # ------------------------------------------------------------------ #
-
-    def _project_sample_removal(
-        self,
-        baseline: WorkloadBaseline,
-        samples,
-        kind: ChangeKind,
-        pool: NodePoolContext,
-        realization_factor: float,
-        realization_source: str,
-        removal: bool = False,
-    ) -> ImpactDelta:
-        acc = _Accumulator()
-        for sample in samples:
-            node = pool.node_for(sample.node)
-            pue, intensity = _sample_environment(sample, node)
-            prices = sample_prices(sample, node, pool.currency)
-            acc.track(node, sample, pue, intensity, prices)
-            hours = max(sample.hours, 0.0)
-            acc.replica_hours += hours
-
-            cpu_reserved = sample.cpu_reserved_cores
-            mem_reserved = sample.mem_reserved_gib
-            acc.cpu_core_hours += cpu_reserved * hours
-            acc.mem_gib_hours += mem_reserved * hours
-            acc.add_cost(_sample_allocated_cost(sample, prices))
-
-            # Shares are capped at the node: one workload never holds more than
-            # the whole node's idle power, dynamic power or embodied emissions.
-            cpu_share = _capped(cpu_reserved, node.allocatable_cpu)
-            used = _capped(max(sample.cpu_usage_cores or 0.0, 0.0), node.cpu_capacity_cores)
-            idle_kwh = cpu_share * hours * node.idle_watts_per_reserved_core / 1000.0
-            dynamic_kwh = used * hours * node.dynamic_watts_per_used_core / 1000.0
-            mem_share = _capped(mem_reserved, node.allocatable_mem)
-            memory_kwh = mem_share * hours * max(node.memory_watts_per_gib, 0.0) / 1000.0
-            gpu_kwh = max(sample.gpu_watts or 0.0, 0.0) * hours / 1000.0
-            acc.add_co2e(
-                idle=idle_kwh * pue * intensity,
-                dynamic=dynamic_kwh * pue * intensity,
-                memory=memory_kwh * pue * intensity,
-                gpu=gpu_kwh * pue * intensity,
-                embodied=cpu_share * hours * node.embodied_g_per_reserved_core_hour,
-            )
-
-        return self._finalize(
-            kind,
-            acc,
-            annualization(baseline),
-            pool,
-            realization_factor=realization_factor,
-            realization_source=realization_source,
-            co2e_basis="allocated_share_released",
-            removal=removal,
-        )
-
     def _project_asset_deletion(self, change: AssetDeletion, pool: NodePoolContext) -> ImpactDelta:
         cost_value = max(float(change.allocated_cost_annual), 0.0)
         component = change.component if change.component in ("storage", "network", "lb") else "other"
@@ -661,66 +567,6 @@ class ReservationAwareImpactModel:
         )
 
     # ------------------------------------------------------------------ #
-    # Node pools                                                          #
-    # ------------------------------------------------------------------ #
-
-    def _project_node_pool(
-        self, baseline: WorkloadBaseline, change: NodePoolChange, pool: NodePoolContext
-    ) -> ImpactDelta:
-        acc = _Accumulator()
-        node_hours = 0.0
-        missing: List[str] = []
-        for name in change.removed_nodes:
-            if name not in pool.nodes:
-                missing.append(name)
-                continue
-            node = pool.nodes[name]
-            hours = float(HOURS_PER_YEAR)
-            node_hours += hours
-            acc.track_node(node, hours)
-            acc.cpu_core_hours += node.cpu_capacity_cores * hours
-            acc.mem_gib_hours += node.mem_capacity_gib * hours
-            acc.add_cost(
-                CostBreakdown(
-                    cpu=node.cpu_capacity_cores * node.prices.cpu_core_hour * hours,
-                    ram=node.mem_capacity_gib * node.prices.ram_gib_hour * hours,
-                )
-            )
-            # Workloads move to the remaining nodes, so dynamic power stays;
-            # the removed node's idle power, memory power, idle GPUs and
-            # embodied emissions go away.
-            intensity = node.pue * node.grid_intensity_g_per_kwh
-            acc.add_co2e(
-                idle=node.idle_watts * hours / 1000.0 * intensity,
-                memory=node.memory_watts * hours / 1000.0 * intensity,
-                gpu=max(node.gpu_unattributed_watts, 0.0) * hours / 1000.0 * intensity,
-                embodied=node.embodied_g_per_hour * hours,
-            )
-
-        reasons: Tuple[str, ...] = ()
-        pools: Tuple = ()
-        if change.action_is_consolidation:
-            realization_factor, realization_source = 1.0, "consolidation_action"
-        else:
-            node_samples = [ResourceSample(ref=baseline.ref, hours=1.0, node=name) for name in change.removed_nodes]
-            realization_factor, realization_source, reasons, pools = pool.realization_for(node_samples)
-        delta = self._finalize(
-            ChangeKind.NODE_POOL,
-            acc,
-            Annualization(hours=float(HOURS_PER_YEAR)),
-            pool,
-            realization_factor=realization_factor,
-            realization_source=realization_source,
-            co2e_basis="node_idle_and_embodied_removed",
-            node_hours=node_hours,
-        )
-        _record_realization(delta, reasons, pools)
-        delta.assumptions["removed_nodes"] = list(change.removed_nodes)
-        if missing:
-            delta.assumptions["unknown_nodes"] = missing
-        return delta
-
-    # ------------------------------------------------------------------ #
     # Shared                                                              #
     # ------------------------------------------------------------------ #
 
@@ -734,37 +580,15 @@ class ReservationAwareImpactModel:
         realization_factor: float,
         co2e_basis: str,
         realization_source: Optional[str] = None,
-        node_hours: float = 0.0,
-        removal: bool = False,
     ) -> ImpactDelta:
-        """Annualizes an accumulated projection and applies the realization factor.
-
-        With ``removal`` (a workload deletion, IMP-05) the factor applies to the
-        reservation-driven parts only: per-asset costs (storage, LoadBalancer,
-        network) and the usage-based CO2e (dynamic CPU and GPU power, no longer
-        consumed) are saved whole, the reserved CPU, memory and other cost and the
-        idle, memory and embodied CO2e at the pool factor.
-        """
+        """Annualizes an accumulated projection and applies the realization factor."""
         window_hours = annualized.hours
         factor = HOURS_PER_YEAR / window_hours if window_hours > 0 else 0.0
         realization = min(max(float(realization_factor), 0.0), 1.0)
         cost = acc.cost.scaled(factor)
         co2e = acc.co2e.scaled(factor)
-        expected_breakdown: Optional[Co2eBreakdown] = None
-        if removal:
-            per_asset = cost.storage + cost.lb + cost.network
-            expected_cost = (cost.total - per_asset) * realization + per_asset
-            expected_breakdown = Co2eBreakdown(
-                idle_operational=co2e.idle_operational * realization,
-                dynamic_operational=co2e.dynamic_operational,
-                embodied=co2e.embodied * realization,
-                memory_operational=co2e.memory_operational * realization,
-                gpu_operational=co2e.gpu_operational,
-            )
-            expected_co2e = expected_breakdown.total
-        else:
-            expected_cost = cost.total * realization
-            expected_co2e = co2e.total * realization
+        expected_cost = cost.total * realization
+        expected_co2e = co2e.total * realization
         confidence = acc.confidence_weighted / acc.weight_hours if acc.weight_hours > 0 else 0.0
         confidence *= annualized.confidence_scale
         currencies = sorted(acc.currencies) or [pool.currency]
@@ -809,7 +633,6 @@ class ReservationAwareImpactModel:
                 cpu_core_hours=acc.cpu_core_hours * factor,
                 mem_gib_hours=acc.mem_gib_hours * factor,
                 replica_hours=acc.replica_hours * factor,
-                node_hours=node_hours,
             ),
             expected_billable_cost_annual=expected_cost,
             realization_factor=realization,
@@ -822,7 +645,6 @@ class ReservationAwareImpactModel:
             currency=currency,
             confidence=round(confidence, 4),
             assumptions=assumptions,
-            co2e_expected_breakdown_annual_g=expected_breakdown,
         )
 
 
@@ -832,13 +654,6 @@ def _record_realization(delta: ImpactDelta, reasons: Tuple[str, ...], pools: Tup
         delta.assumptions["realization_reasons"] = list(reasons)
     if pools:
         delta.assumptions["realization_pools"] = list(pools)
-
-
-def _utc_hour(timestamp: datetime) -> int:
-    """Hour of day in UTC; naive timestamps are already UTC in GreenKube storage."""
-    if timestamp.tzinfo is not None:
-        timestamp = timestamp.astimezone(timezone.utc)
-    return timestamp.hour
 
 
 def _capped(value: float, ceiling: float) -> float:
@@ -867,18 +682,6 @@ def _sample_environment(sample: ResourceSample, node: NodeImpactProfile) -> Tupl
         else node.grid_intensity_g_per_kwh
     )
     return pue, intensity
-
-
-def _sample_allocated_cost(sample: ResourceSample, prices: SamplePrices) -> CostBreakdown:
-    """Current allocated cost of a sample: observed when known, otherwise modeled."""
-    observed = observed_cost_breakdown(sample) if prices.observed else None
-    if observed is not None:
-        return observed
-    hours = max(sample.hours, 0.0)
-    return CostBreakdown(
-        cpu=sample.cpu_reserved_cores * hours * prices.cpu_reserved_core_hour,
-        ram=sample.mem_reserved_gib * hours * prices.ram_reserved_gib_hour,
-    )
 
 
 def _listed_prices(nodes: Dict[str, NodeImpactProfile]) -> List[Dict[str, Any]]:

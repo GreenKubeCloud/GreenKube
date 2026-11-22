@@ -18,14 +18,8 @@ from greenkube.signals.registry import parse_sources_config
 from greenkube.signals.sdk import EnabledMode, Source, SourceBatch, SourceSettings, SourceTier
 
 NATIVE_IDS = [
-    "greenkube.zombie",
     "greenkube.rightsizing_cpu",
     "greenkube.rightsizing_memory",
-    "greenkube.autoscaling",
-    "greenkube.off_peak",
-    "greenkube.idle_namespace",
-    "greenkube.carbon_aware",
-    "greenkube.nodes",
     "greenkube.orphaned_pv",
     "greenkube.orphaned_lb",
 ]
@@ -72,27 +66,21 @@ def _config(**overrides) -> Config:
 class TestBuiltins:
     def test_builtins_in_execution_order(self):
         registry, configured = build_source_registry(Config(), entry_points=lambda: [])
-        assert [item.id for item in configured] == ["vpa", "greenkube.nodepool", *NATIVE_IDS, *CONNECTOR_IDS]
+        assert [item.id for item in configured] == ["vpa", *NATIVE_IDS, *CONNECTOR_IDS]
         assert all(item.descriptor.origin == "builtin" for item in configured)
         assert registry.problems == []
 
     def test_engine_runs_the_sdk_sources_by_default(self):
         engine = OptimizationEngine(config=Config(), sources=build_signal_sources(Config(), entry_points=lambda: []))
-        assert [source.source_id for source in engine.sources] == [
-            "vpa",
-            "greenkube.nodepool",
-            *NATIVE_IDS,
-            *CONNECTOR_IDS,
-        ]
-        # Run records count vpa, karpenter, greenkube and each signal-only connector.
-        assert engine.source_group_count == 3 + len(CONNECTOR_IDS)
+        assert [source.source_id for source in engine.sources] == ["vpa", *NATIVE_IDS, *CONNECTOR_IDS]
+        # Run records count vpa, greenkube and each signal-only connector.
+        assert engine.source_group_count == 2 + len(CONNECTOR_IDS)
 
-    def test_legacy_flags_disable_vpa_and_the_nodepool_heuristic(self):
-        config = _config(RECOMMENDATION_VPA_ENABLED=False, RECOMMENDATION_KARPENTER_ENABLED=False)
+    def test_legacy_flag_disables_vpa(self):
+        config = _config(RECOMMENDATION_VPA_ENABLED=False)
         _registry, configured = build_source_registry(config, entry_points=lambda: [])
         enabled = {item.id: item.enabled for item in configured}
         assert enabled["vpa"] == EnabledMode.FALSE
-        assert enabled["greenkube.nodepool"] == EnabledMode.FALSE
         assert enabled["greenkube.rightsizing_cpu"] == EnabledMode.AUTO
         ids = [s.source_id for s in build_signal_sources(config, entry_points=lambda: [])]
         assert ids == [*NATIVE_IDS, *CONNECTOR_IDS]
@@ -121,6 +109,13 @@ class TestBuiltins:
         registry, configured = build_source_registry(config, entry_points=lambda: [])
         assert [(p.code, p.source_id) for p in registry.problems] == [("unknown_source", "nope")]
         assert not {"kubecost", "polaris", "gke", "azure_advisor"} & {item.id for item in configured}
+
+    def test_settings_of_removed_analyzers_are_ignored_without_a_problem(self):
+        """B.1: SOURCES_CONFIG of the removed advisory analyzers and NodePool heuristic is accepted and ignored."""
+        config = _config(SOURCES_CONFIG='{"greenkube.carbon_aware": {"enabled": false}, "greenkube.nodepool": {}}')
+        registry, configured = build_source_registry(config, entry_points=lambda: [])
+        assert registry.problems == []
+        assert not {"greenkube.carbon_aware", "greenkube.nodepool"} & {item.id for item in configured}
 
 
 class TestPlugins:

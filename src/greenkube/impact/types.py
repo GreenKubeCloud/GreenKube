@@ -65,10 +65,7 @@ class ChangeKind(StrEnum):
     """Kinds of change the model can project."""
 
     CONTAINER_RESOURCES = "container_resources"
-    WORKLOAD_DELETION = "workload_deletion"
     ASSET_DELETION = "asset_deletion"
-    REPLICA_SCHEDULE = "replica_schedule"
-    NODE_POOL = "node_pool"
 
 
 @dataclass(frozen=True)
@@ -459,13 +456,6 @@ class ContainerResourceChange:
 
 
 @dataclass(frozen=True)
-class WorkloadDeletion:
-    """Removal of every replica of a workload (zombie pods, idle namespaces)."""
-
-    kind = ChangeKind.WORKLOAD_DELETION
-
-
-@dataclass(frozen=True)
 class AssetDeletion:
     """Removal of a non-compute asset whose allocated rate is known (PV, LoadBalancer)."""
 
@@ -483,32 +473,9 @@ class AssetDeletion:
     kind = ChangeKind.ASSET_DELETION
 
 
-@dataclass(frozen=True)
-class ReplicaScheduleChange:
-    """Scale a workload to zero during the given UTC hours of the day."""
-
-    removed_hours_of_day: frozenset[int]
-
-    kind = ChangeKind.REPLICA_SCHEDULE
-
-
-@dataclass(frozen=True)
-class NodePoolChange:
-    """Removal of whole nodes from a pool (consolidation)."""
-
-    removed_nodes: Tuple[str, ...]
-    #: True when the recommended action is the consolidation itself (realization 1).
-    action_is_consolidation: bool = True
-
-    kind = ChangeKind.NODE_POOL
-
-
 ProposedChange = Union[
     ContainerResourceChange,
-    WorkloadDeletion,
     AssetDeletion,
-    ReplicaScheduleChange,
-    NodePoolChange,
 ]
 
 

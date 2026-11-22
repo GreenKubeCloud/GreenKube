@@ -5,7 +5,6 @@ The engine runs Source SDK sources (:mod:`greenkube.signals`):
 * one source per native analyzer (``greenkube.rightsizing_cpu``, ``greenkube.orphaned_lb``...),
   built by the analyzer adapter;
 * ``vpa``, the VPA connector;
-* ``greenkube.nodepool``, the NodePool consolidation heuristic over Karpenter objects;
 * ``krr`` and ``push``, the signal-only sources that read pushed reports and batches;
 * third-party sources registered under the ``greenkube.sources`` entry points.
 
@@ -17,7 +16,6 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from greenkube.core.optimization.providers.base import RecommendationSource
-from greenkube.core.optimization.providers.karpenter import KarpenterSource, NodePoolSignalSource
 from greenkube.core.optimization.providers.native import NativeSource
 from greenkube.core.optimization.providers.vpa import VpaSignalSource, VpaSource
 from greenkube.signals.registry import ConfiguredSource, SourceRegistry, instantiate, parse_sources_config
@@ -35,8 +33,6 @@ def build_sources(config: "Config") -> List[RecommendationSource]:
 
     if getattr(config, "RECOMMENDATION_VPA_ENABLED", False):
         sources.append(VpaSource(config))
-    if getattr(config, "RECOMMENDATION_KARPENTER_ENABLED", False):
-        sources.append(KarpenterSource(config))
 
     # Native analysis is always enabled.
     sources.append(NativeSource(config))
@@ -46,7 +42,7 @@ def build_sources(config: "Config") -> List[RecommendationSource]:
 
 
 def builtin_source_classes() -> List[type[Source]]:
-    """Built-in sources, in execution order (VPA, NodePool, the native analyzers, then the signal-only connectors)."""
+    """Built-in sources, in execution order (VPA, the native analyzers, then the signal-only connectors)."""
     from greenkube.core.optimization.analyzers import DEFAULT_ANALYZERS
     from greenkube.signals.adapters import analyzer_source_class
     from greenkube.signals.connectors.krr import KrrSource
@@ -54,7 +50,6 @@ def builtin_source_classes() -> List[type[Source]]:
 
     return [
         VpaSignalSource,
-        NodePoolSignalSource,
         *(analyzer_source_class(cls) for cls in DEFAULT_ANALYZERS),
         KrrSource,
         PushSignalSource,
@@ -66,10 +61,7 @@ def legacy_enablement(config: "Config") -> Dict[str, EnabledMode]:
 
     The v1 flags already meant "enabled when the CRD is detected", i.e. ``auto``.
     """
-    flags = (
-        (VpaSignalSource.id, "RECOMMENDATION_VPA_ENABLED"),
-        (NodePoolSignalSource.id, "RECOMMENDATION_KARPENTER_ENABLED"),
-    )
+    flags = ((VpaSignalSource.id, "RECOMMENDATION_VPA_ENABLED"),)
     return {
         source_id: EnabledMode.AUTO if getattr(config, flag, True) else EnabledMode.FALSE for source_id, flag in flags
     }

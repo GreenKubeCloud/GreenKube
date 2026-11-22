@@ -17,11 +17,19 @@ from greenkube.demo.data_generator import (
     generate_node_snapshots,
     generate_recommendations,
 )
-from greenkube.models.metrics import CombinedMetric, RecommendationRecord, RecommendationStatus, RecommendationType
+from greenkube.models.metrics import (
+    RETIRED_RECOMMENDATION_TYPES,
+    CombinedMetric,
+    RecommendationRecord,
+    RecommendationStatus,
+    RecommendationType,
+)
 from greenkube.models.node import NodeInfo
 
 #: Statuses of a recommendation whose change landed (verified ones were measured afterwards).
 _LANDED = {RecommendationStatus.APPLIED, RecommendationStatus.VERIFIED}
+#: Types the analyzers still produce (the retired ones only exist in stored rows).
+_PRODUCED_TYPES = set(RecommendationType) - RETIRED_RECOMMENDATION_TYPES
 
 
 class TestGenerateNodeSnapshots:
@@ -284,7 +292,7 @@ class TestGenerateRecommendations:
     def test_generates_multiple_recommendations(self):
         """Should generate a meaningful number of recommendations."""
         recs = generate_recommendations()
-        assert len(recs) >= len(RecommendationType) + 3
+        assert len(recs) >= len(_PRODUCED_TYPES) + 3
 
     def test_all_are_recommendation_records(self):
         """All returned items are RecommendationRecord instances."""
@@ -296,31 +304,19 @@ class TestGenerateRecommendations:
         """Recommendations should cover multiple types."""
         recs = generate_recommendations()
         types = {rec.type for rec in recs}
-        assert types == set(RecommendationType)
+        assert types == _PRODUCED_TYPES
 
     def test_all_types_have_been_applied(self):
         """The demo should already show one applied recommendation of each type."""
         recs = generate_recommendations()
         applied_types = {rec.type for rec in recs if rec.status in _LANDED}
-        assert applied_types == set(RecommendationType)
-
-    def test_has_zombie_pod_recommendation(self):
-        """Should include a zombie pod recommendation."""
-        recs = generate_recommendations()
-        types = {rec.type for rec in recs}
-        assert RecommendationType.ZOMBIE_POD in types
+        assert applied_types == _PRODUCED_TYPES
 
     def test_has_rightsizing_recommendation(self):
         """Should include a rightsizing recommendation."""
         recs = generate_recommendations()
         types = {rec.type for rec in recs}
         assert RecommendationType.RIGHTSIZING_CPU in types
-
-    def test_has_carbon_aware_recommendation(self):
-        """Should include a carbon-aware scheduling recommendation."""
-        recs = generate_recommendations()
-        types = {rec.type for rec in recs}
-        assert RecommendationType.CARBON_AWARE_SCHEDULING in types
 
     def test_all_have_description(self):
         """Every recommendation must have a non-empty description."""
@@ -337,13 +333,13 @@ class TestGenerateRecommendations:
             assert rec.created_at is not None
             assert rec.created_at <= now
 
-    def test_recommendations_span_two_year_story(self):
-        """Recommendations should show a historical adoption story over roughly two years."""
+    def test_recommendations_span_a_long_story(self):
+        """Recommendations should show a historical adoption story over more than a year."""
         recs = generate_recommendations()
         oldest = min(rec.created_at for rec in recs)
         newest = max(rec.created_at for rec in recs)
         assert newest <= datetime.now(timezone.utc)
-        assert oldest <= datetime.now(timezone.utc) - timedelta(days=700)
+        assert oldest <= datetime.now(timezone.utc) - timedelta(days=450)
 
     def test_applied_recommendations_have_realized_savings(self):
         """Applied recommendations must carry realized cost and CO2 savings."""
@@ -374,7 +370,7 @@ class TestDemoMeasurementsAndProjections:
 
     def test_measured_recommendations_carry_measured_rates(self):
         verified = [rec for rec in generate_recommendations() if rec.status == RecommendationStatus.VERIFIED]
-        assert len(verified) >= 10
+        assert len(verified) >= 5
         for rec in verified:
             assert rec.measured_cost_saved == rec.cost_saved
             assert rec.verified_at is not None and rec.applied_at is not None

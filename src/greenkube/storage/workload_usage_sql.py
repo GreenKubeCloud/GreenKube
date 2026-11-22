@@ -21,7 +21,6 @@ from greenkube.models.workload_usage import (
     POD_LEVEL,
     USAGE_PERCENTILES,
     BaselineMetric,
-    NodeUsageSummary,
     TargetKey,
     UsageSnapshot,
     UsageStats,
@@ -340,39 +339,6 @@ def collection_sql(
     """
 
 
-def hour_profile_sql(
-    ph: Callable[[int], str], namespace: Optional[str], namespaces: Optional[Sequence[str]] = None
-) -> str:
-    return f"""
-        SELECT namespace, target_kind, target_name, hour_of_day,
-            SUM(cpu_usage_avg * cpu_sample_count) AS cpu_sum,
-            SUM(cpu_sample_count) AS cpu_n
-        FROM workload_usage_hourly
-        WHERE {_window_filter(ph, namespace, f"container_name = '{POD_LEVEL}' AND cpu_sample_count > 0", namespaces)}
-        GROUP BY namespace, target_kind, target_name, hour_of_day
-    """
-
-
-def node_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: Optional[Sequence[str]] = None) -> str:
-    return f"""
-        WITH per_node AS (
-            SELECT node, hour_bucket,
-                MAX(step_count) AS steps,
-                SUM(COALESCE(cpu_usage_avg, 0) * cpu_sample_count) AS cpu_sum,
-                SUM(COALESCE(memory_usage_avg, 0) * memory_sample_count) AS mem_sum,
-                SUM(cpu_request_sum) AS cpu_req,
-                SUM(memory_request_sum) AS mem_req
-            FROM workload_usage_hourly
-            WHERE {_window_filter(ph, namespace, f"container_name = '{POD_LEVEL}' AND node <> ''", namespaces)}
-            GROUP BY node, hour_bucket
-        )
-        SELECT node, COUNT(*) AS hours_observed, SUM(steps) AS steps,
-            SUM(cpu_sum) AS cpu_sum, SUM(mem_sum) AS mem_sum, SUM(cpu_req) AS cpu_req, SUM(mem_req) AS mem_req
-        FROM per_node
-        GROUP BY node
-    """
-
-
 _HOD = f"CASE WHEN container_name = '{POD_LEVEL}' THEN hour_of_day ELSE -1 END"
 
 #: Coverage of the CPU/RAM cost split in an aggregated row (F-03). Hours
@@ -509,8 +475,6 @@ def summary_from_row(row: Mapping[str, Any], decode_time: Callable[[Any], Option
 
 def build_snapshot(
     summary_rows: Sequence[Mapping[str, Any]],
-    profile_rows: Sequence[Mapping[str, Any]],
-    node_rows: Sequence[Mapping[str, Any]],
     decode_time: Callable[[Any], Optional[datetime]],
     collection_rows: Sequence[Mapping[str, Any]] = (),
 ) -> UsageSnapshot:
@@ -524,29 +488,6 @@ def build_snapshot(
         snapshot.summaries.setdefault(summary.target, {})[summary.container_name] = summary
         if summary.first_hour is not None and (snapshot.first_hour is None or summary.first_hour < snapshot.first_hour):
             snapshot.first_hour = summary.first_hour
-
-    sums: Dict[TargetKey, List[float]] = {}
-    counts: Dict[TargetKey, List[int]] = {}
-    for row in profile_rows:
-        target = (row["namespace"], row["target_kind"], row["target_name"])
-        hour = int(row["hour_of_day"])
-        sums.setdefault(target, [0.0] * 24)[hour] += float(row["cpu_sum"] or 0.0)
-        counts.setdefault(target, [0] * 24)[hour] += int(row["cpu_n"] or 0)
-    for target, values in sums.items():
-        n = counts[target]
-        snapshot.hour_profiles[target] = tuple(values[h] / n[h] if n[h] else None for h in range(24))
-        snapshot.hour_profile_samples[target] = sum(n)
-
-    for row in node_rows:
-        steps = float(row["steps"] or 0.0)
-        snapshot.nodes[row["node"]] = NodeUsageSummary(
-            node=row["node"],
-            hours_observed=int(row["hours_observed"] or 0),
-            cpu_usage_avg=float(row["cpu_sum"] or 0.0) / steps if steps else 0.0,
-            memory_usage_avg=float(row["mem_sum"] or 0.0) / steps if steps else 0.0,
-            cpu_request_avg=float(row["cpu_req"] or 0.0) / steps if steps else 0.0,
-            memory_request_avg=float(row["mem_req"] or 0.0) / steps if steps else 0.0,
-        )
     return snapshot
 
 

@@ -24,6 +24,30 @@ async def _scan(combined_repo, node_repo, reco_repo, namespace=None) -> list[dic
     return [RecommendationRecord.from_recommendation(rec).model_dump(mode="json") for rec in recommendations]
 
 
+def _hot_rows(pod: str, namespace: str) -> list:
+    """Samples of a pod using its whole CPU request: a request increase (no coverage minimum)."""
+    from greenkube.models.metrics import CombinedMetric
+
+    start = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(hours=4)
+    return [
+        CombinedMetric(
+            pod_name=pod,
+            container_name="app",
+            namespace=namespace,
+            total_cost=0.05,
+            co2e_grams=0.01,
+            joules=1000.0,
+            cpu_usage_millicores=100,
+            cpu_request=100,
+            memory_request=128 * 1024 * 1024,
+            memory_usage_bytes=32 * 1024 * 1024,
+            timestamp=start + timedelta(minutes=5 * step),
+            duration_seconds=300,
+        )
+        for step in range(48)
+    ]
+
+
 class TestRecommendationsEndpoint:
     """Tests for GET /api/v1/recommendations and the scans that populate it."""
 
@@ -38,102 +62,11 @@ class TestRecommendationsEndpoint:
         data = response.json()
         assert data == []
 
-    async def test_recommendations_with_zombie_pod(self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo):
-        """Should detect a zombie pod (cost > threshold, energy < threshold)."""
-        from datetime import datetime, timezone
-
-        from greenkube.models.metrics import CombinedMetric
-
-        zombie_metric = CombinedMetric(
-            pod_name="zombie-pod",
-            namespace="default",
-            total_cost=0.05,
-            co2e_grams=0.0,
-            joules=100.0,
-            cpu_usage_millicores=0,
-            cpu_request=100,
-            memory_request=128 * 1024 * 1024,
-            timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
-            duration_seconds=300,
-        )
-        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[zombie_metric])
-        data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
-        assert len(data) >= 1
-        assert any(r["type"] == "ZOMBIE_POD" for r in data)
-
-    async def test_recommendation_potential_savings_are_annualized(
-        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
-    ):
-        """Potential savings returned by the API should be annual projections from the lookback window."""
-        from greenkube.models.metrics import CombinedMetric
-
-        zombie_metric = CombinedMetric(
-            pod_name="zombie-pod",
-            namespace="default",
-            total_cost=0.05,
-            co2e_grams=0.02,
-            joules=100.0,
-            cpu_usage_millicores=0,
-            cpu_request=100,
-            memory_request=128 * 1024 * 1024,
-            timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
-            duration_seconds=300,
-        )
-        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[zombie_metric])
-
-        data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
-
-        zombie_rec = next(r for r in data if r["type"] == "ZOMBIE_POD")
-        # IMP-04: annualized over the hours the collector observed the cluster. The only row of the
-        # cluster is this 5-minute sample, so the minimum coverage applies.
-        from greenkube.impact.model import MIN_COVERAGE_HOURS
-
-        annualization_factor = 8760 / MIN_COVERAGE_HOURS
-        assert zombie_rec["potential_savings_cost"] == pytest.approx(0.05 * annualization_factor)
-        # CO2e comes from the Impact Model (allocated idle, dynamic and embodied
-        # share released by deleting the pod), returned with its provenance.
-        impact = zombie_rec["impact"]
-        assert impact["kind"] == "workload_deletion"
-        assert impact["assumptions"]["annualization_factor"] == pytest.approx(annualization_factor)
-        # One 5-minute sample, plus at most one step of alignment tolerance.
-        assert 300 / 3600 <= impact["assumptions"]["collected_hours"] <= 600 / 3600 + 1e-9
-        assert zombie_rec["potential_savings_co2e_grams"] == pytest.approx(impact["co2e_expected_annual_g"])
-        assert zombie_rec["potential_savings_co2e_grams"] > 0
-
     async def test_recommendations_filter_by_namespace(
         self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
     ):
         """Should filter recommendations by namespace."""
-        from datetime import datetime, timezone
-
-        from greenkube.models.metrics import CombinedMetric
-
-        metrics = [
-            CombinedMetric(
-                pod_name="zombie-1",
-                namespace="team-a",
-                total_cost=0.05,
-                co2e_grams=0.0,
-                joules=100.0,
-                cpu_usage_millicores=0,
-                cpu_request=100,
-                memory_request=128 * 1024 * 1024,
-                timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
-                duration_seconds=300,
-            ),
-            CombinedMetric(
-                pod_name="zombie-2",
-                namespace="team-b",
-                total_cost=0.05,
-                co2e_grams=0.0,
-                joules=100.0,
-                cpu_usage_millicores=0,
-                cpu_request=100,
-                memory_request=128 * 1024 * 1024,
-                timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
-                duration_seconds=300,
-            ),
-        ]
+        metrics = [*_hot_rows("hot-1", "team-a"), *_hot_rows("hot-2", "team-b")]
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=metrics)
         data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, namespace="team-a")
         assert data
@@ -143,26 +76,11 @@ class TestRecommendationsEndpoint:
         self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
     ):
         """Each recommendation should contain expected fields."""
-        from greenkube.models.metrics import CombinedMetric
-
-        zombie = CombinedMetric(
-            pod_name="zombie-pod",
-            namespace="default",
-            total_cost=0.05,
-            co2e_grams=0.0,
-            joules=100.0,
-            cpu_usage_millicores=0,
-            cpu_request=100,
-            memory_request=128 * 1024 * 1024,
-            timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
-            duration_seconds=300,
-        )
-        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[zombie])
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=_hot_rows("hot", "default"))
         data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
-        if data:
-            rec = data[0]
-            for field in ["pod_name", "namespace", "type", "description"]:
-                assert field in rec, f"Missing field: {field}"
+        assert data
+        for field in ["pod_name", "namespace", "type", "description"]:
+            assert data[0][field], f"Missing field: {field}"
 
     async def test_recommendations_include_orphaned_persistent_volumes(
         self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, mock_pv_collector

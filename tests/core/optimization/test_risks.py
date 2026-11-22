@@ -7,7 +7,6 @@ from greenkube.core.config import Config
 from greenkube.core.optimization.risks import assess
 from greenkube.models.evidence import RecommendationEvidence, ResourceSnapshot, UtilizationStats
 from greenkube.models.metrics import (
-    EffortLevel,
     Recommendation,
     RecommendationSource,
     RecommendationType,
@@ -74,24 +73,10 @@ class TestOtherTypes:
         assert result.risk_level == RiskLevel.HIGH
         assert "restart_history" in result.risk_factors
 
-    def test_node_recommendation_is_high_effort(self):
-        rec = Recommendation(
-            type=RecommendationType.UNDERUTILIZED_NODE,
-            scope="node",
-            target_node="node-1",
-            description="drain",
-        )
-        result = assess(rec, None, Config())
-        assert result.risk_level == RiskLevel.HIGH
-        assert result.effort == EffortLevel.HIGH
-        assert result.requires_restart is True
-
     @pytest.mark.parametrize(
         ("rec_type", "level"),
         [
-            (RecommendationType.ZOMBIE_POD, RiskLevel.MEDIUM),
             (RecommendationType.ORPHANED_LOAD_BALANCER, RiskLevel.MEDIUM),
-            (RecommendationType.IDLE_NAMESPACE, RiskLevel.HIGH),
             (RecommendationType.ORPHANED_PERSISTENT_VOLUME, RiskLevel.HIGH),
         ],
     )

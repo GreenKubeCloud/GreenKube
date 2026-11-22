@@ -89,8 +89,7 @@ def repo(client):
     repository = FakeSignalRepository()
     config = Config().model_copy(
         update={
-            "RECOMMENDATION_KARPENTER_ENABLED": False,
-            "SOURCES_CONFIG": '{"greenkube.carbon_aware": {"enabled": false}, "vpa": {"enabled": "true"}}',
+            "SOURCES_CONFIG": '{"greenkube.orphaned_pv": {"enabled": false}, "vpa": {"enabled": "true"}}',
         }
     )
     catalog = build_source_registry(config, entry_points=lambda: [_point(), _broken_point()])
@@ -147,12 +146,12 @@ class TestListSources:
         assert response.status_code == 200
         body = response.json()
         by_id = {source["id"]: source for source in body["sources"]}
-        assert [s["id"] for s in body["sources"]][:2] == ["vpa", "greenkube.nodepool"]
+        assert [s["id"] for s in body["sources"]][:2] == ["vpa", "greenkube.rightsizing_cpu"]
         assert by_id["vpa"]["status"] == "failing"  # explicitly enabled but not installed
         assert "VPA CRD not installed" in by_id["vpa"]["status_reason"]
-        assert by_id["greenkube.nodepool"]["status"] == "disabled"
-        assert by_id["greenkube.carbon_aware"]["status"] == "disabled"
-        assert by_id["greenkube.zombie"]["status"] == "pending"
+        assert by_id["greenkube.orphaned_pv"]["status"] == "disabled"
+        assert by_id["greenkube.rightsizing_memory"]["status"] == "pending"
+        assert "greenkube.nodepool" not in by_id and "greenkube.zombie" not in by_id
         cpu = by_id["greenkube.rightsizing_cpu"]
         assert cpu["status"] == "healthy"
         assert cpu["tier"] == "native" and cpu["legacy_source"] == "greenkube"
@@ -196,7 +195,7 @@ class TestSourceRuns:
         assert run["run_id"] == 2 and run["status"] == "failed" and run["error_code"] == "timeout"
 
     def test_known_source_without_runs_is_empty(self, client, repo):
-        assert client.get("/api/v1/sources/greenkube.zombie/runs").json() == []
+        assert client.get("/api/v1/sources/greenkube.rightsizing_memory/runs").json() == []
 
     def test_unknown_source_is_404(self, client, repo):
         assert client.get("/api/v1/sources/nope/runs").status_code == 404

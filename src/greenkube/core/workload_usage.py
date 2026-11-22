@@ -36,7 +36,6 @@ from greenkube.models.provenance import combine_cost_sources
 from greenkube.models.workload_usage import (
     POD_LEVEL,
     USAGE_PERCENTILES,
-    NodeUsageSummary,
     TargetKey,
     UsageSnapshot,
     UsageStats,
@@ -857,9 +856,6 @@ def _sort_key(bucket: Optional[datetime]) -> float:
 def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> UsageSnapshot:
     """Aggregates hourly rows into the usage snapshot analyzers read."""
     per_hour: Dict[Tuple[TargetKey, str], Dict[Optional[datetime], _HourTotals]] = defaultdict(dict)
-    profile_sum: Dict[TargetKey, List[float]] = defaultdict(lambda: [0.0] * 24)
-    profile_n: Dict[TargetKey, List[int]] = defaultdict(lambda: [0] * 24)
-    node_hours: Dict[Tuple[str, Optional[datetime]], List[float]] = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0])
     first_hour: Optional[datetime] = None
     collected: Dict[datetime, int] = {}
 
@@ -874,18 +870,6 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             first_hour = hour.hour_bucket
         if hour.hour_bucket is not None:
             collected[hour.hour_bucket] = max(collected.get(hour.hour_bucket, 0), int(hour.step_count or 0))
-        if hour.container_name != POD_LEVEL:
-            continue
-        if hour.hour_of_day is not None and hour.cpu_usage_avg is not None and hour.cpu_sample_count:
-            profile_sum[hour.target][hour.hour_of_day] += hour.cpu_usage_avg * hour.cpu_sample_count
-            profile_n[hour.target][hour.hour_of_day] += hour.cpu_sample_count
-        if hour.node:
-            acc = node_hours[(hour.node, hour.hour_bucket)]
-            acc[0] = max(acc[0], hour.step_count)
-            acc[1] += (hour.cpu_usage_avg or 0.0) * hour.cpu_sample_count
-            acc[2] += (hour.memory_usage_avg or 0.0) * hour.memory_sample_count
-            acc[3] += hour.cpu_request_sum
-            acc[4] += hour.memory_request_sum
 
     snapshot = UsageSnapshot(
         source=source, first_hour=first_hour, collected_steps_by_hour=dict(sorted(collected.items()))
@@ -949,28 +933,6 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             emaps_zone=max((item.emaps_zone for item in ordered if item.emaps_zone), default=None),
         )
         snapshot.summaries.setdefault(target, {})[container] = summary
-
-    for target, sums in profile_sum.items():
-        counts = profile_n[target]
-        snapshot.hour_profiles[target] = tuple(sums[h] / counts[h] if counts[h] else None for h in range(24))
-        snapshot.hour_profile_samples[target] = sum(counts)
-
-    per_node: Dict[str, List[float]] = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    for (node, _bucket_value), acc in node_hours.items():
-        totals = per_node[node]
-        totals[0] += 1
-        for index in range(5):
-            totals[index + 1] += acc[index]
-    for node, totals in per_node.items():
-        steps = totals[1]
-        snapshot.nodes[node] = NodeUsageSummary(
-            node=node,
-            hours_observed=int(totals[0]),
-            cpu_usage_avg=totals[2] / steps if steps else 0.0,
-            memory_usage_avg=totals[3] / steps if steps else 0.0,
-            cpu_request_avg=totals[4] / steps if steps else 0.0,
-            memory_request_avg=totals[5] / steps if steps else 0.0,
-        )
     return snapshot
 
 

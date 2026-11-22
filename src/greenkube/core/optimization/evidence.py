@@ -175,25 +175,6 @@ def _rollback_conditions(
                 description="any OOM kill after apply",
             )
         )
-    elif rec.type in (RecommendationType.OFF_PEAK_SCALING, RecommendationType.AUTOSCALING_CANDIDATE):
-        conditions.append(
-            RollbackCondition(
-                metric="availability_ratio",
-                comparator="lt",
-                threshold=0.99,
-                description="readiness drops below 99% during the scale window",
-            )
-        )
-    elif rec.type in (RecommendationType.OVERPROVISIONED_NODE, RecommendationType.UNDERUTILIZED_NODE):
-        conditions.append(
-            RollbackCondition(
-                metric="node_cpu_utilization",
-                comparator="gt",
-                threshold=0.8,
-                action="review",
-                description="node utilization exceeds 80% after consolidation",
-            )
-        )
     return conditions
 
 
@@ -204,12 +185,8 @@ def _savings_method(rec: Recommendation) -> str:
         return f"impact_model/{impact['model_version']}/{impact['kind']}"
     if rec.type in (RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY):
         return "request_reduction_ratio"
-    if rec.type in (RecommendationType.ZOMBIE_POD, RecommendationType.IDLE_NAMESPACE):
-        return "observed_cost_annualized"
     if rec.type in (RecommendationType.ORPHANED_PERSISTENT_VOLUME, RecommendationType.ORPHANED_LOAD_BALANCER):
         return "opencost_or_flat_estimate"
-    if rec.type == RecommendationType.CARBON_AWARE_SCHEDULING:
-        return "high_carbon_share"
     return "unknown"
 
 

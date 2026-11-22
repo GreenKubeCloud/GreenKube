@@ -62,22 +62,20 @@ def _project(rows, name: str, end: datetime, lookback: float = DAY):
     projector = ImpactProjector(Config(), rows=rows, analysis_window_seconds=lookback, window_end=end)
     ref = projector.workload_ref("apps", "Deployment", name)
     target = [row for row in rows if row.owner_name == name]
-    return projector.container_resources(ref, target, cpu_millicores=(1000, 100)), projector.workload_deletion(
-        ref, target
-    )
+    return projector.container_resources(ref, target, cpu_millicores=(1000, 100))
 
 
 def test_a_cluster_wide_collection_gap_does_not_lower_the_projection():
     end = _hour()
-    full_cut, full_delete = _project(_rows("api", end, 24), "api", end)
+    full_cut = _project(_rows("api", end, 24), "api", end)
     gap_rows = _rows("api", end, 24, skip=lambda index: 6 <= index < 18) + _rows(
         "other", end, 24, skip=lambda index: 6 <= index < 18
     )
-    gap_cut, gap_delete = _project(gap_rows, "api", end)
+    gap_cut = _project(gap_rows, "api", end)
 
     assert gap_cut.allocated_cost_annual == pytest.approx(full_cut.allocated_cost_annual, rel=0.01)
-    assert gap_delete.capacity_released.replica_hours == pytest.approx(HOURS_PER_YEAR, rel=0.01)
-    assert full_delete.capacity_released.replica_hours == pytest.approx(HOURS_PER_YEAR, rel=0.01)
+    assert gap_cut.capacity_released.replica_hours == pytest.approx(HOURS_PER_YEAR, rel=0.01)
+    assert full_cut.capacity_released.replica_hours == pytest.approx(HOURS_PER_YEAR, rel=0.01)
     assert gap_cut.assumptions["collection_gap_hours"] == pytest.approx(12.0)
     assert gap_cut.assumptions["collected_hours"] == pytest.approx(12.0)
     assert full_cut.assumptions["collection_gap_hours"] == pytest.approx(0.0)
@@ -90,8 +88,8 @@ def test_a_cronjob_keeps_its_duty_cycle_while_other_targets_were_collected():
     days = 3
     cron = [row for row in _rows("cron", end, 24 * days, skip=lambda index: index % 24 != 0)]
     rows = cron + _rows("other", end, 24 * days)
-    _, delete = _project(rows, "cron", end, lookback=days * DAY)
-    assert delete.capacity_released.replica_hours == pytest.approx(HOURS_PER_YEAR / 24, rel=0.01)
+    cut = _project(rows, "cron", end, lookback=days * DAY)
+    assert cut.capacity_released.replica_hours == pytest.approx(HOURS_PER_YEAR / 24, rel=0.01)
 
 
 def _hour_row(hour, name, steps, last_offset=None) -> WorkloadUsageHour:
@@ -134,8 +132,10 @@ def _young_projection(hours, end, samples):
         usage=snapshot,
     )
     projector = ImpactProjector.for_context(context)
-    delta = projector.workload_deletion(
-        projector.workload_ref("apps", "Deployment", "young"), context.workload_rows(("apps", "Deployment", "young"))
+    delta = projector.container_resources(
+        projector.workload_ref("apps", "Deployment", "young"),
+        context.container_rows(("apps", "Deployment", "young"), None),
+        cpu_millicores=(1000, 100),
     )
     return snapshot, delta
 
@@ -156,7 +156,7 @@ def test_a_young_target_counts_from_its_first_sample_not_the_hour_floor():
     assert summary.first_hour_last_offset == 3300
     assert snapshot.collected_steps_by_hour == {first_hour: 12, first_hour + timedelta(hours=1): 6}
     assert delta.assumptions["coverage_hours"] == pytest.approx(55 / 60, rel=0.02)
-    assert delta.allocated_cost_annual == pytest.approx(0.03 * HOURS_PER_YEAR, rel=0.02)
+    assert delta.assumptions["annualization_factor"] == pytest.approx(HOURS_PER_YEAR * 60 / 55, rel=0.02)
 
 
 def test_a_gap_inside_the_first_hour_does_not_move_the_first_observation():
@@ -170,6 +170,6 @@ def test_a_gap_inside_the_first_hour_does_not_move_the_first_observation():
         _hour_row(first_hour + timedelta(hours=1), "other", 12, last_offset=3300),
     ]
     _, delta = _young_projection(hours, end, 14)
-    # 14 samples of 0.0025 over two collected hours, not over 70 minutes (1.71x too high).
+    # 14 samples over two collected hours, not over 70 minutes (1.71x too high).
     assert delta.assumptions["coverage_hours"] == pytest.approx(2.0, rel=0.01)
-    assert delta.allocated_cost_annual == pytest.approx(0.0025 * 14 / 2 * HOURS_PER_YEAR, rel=0.01)
+    assert delta.assumptions["annualization_factor"] == pytest.approx(HOURS_PER_YEAR / 2.0, rel=0.01)

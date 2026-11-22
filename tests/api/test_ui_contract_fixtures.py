@@ -454,8 +454,7 @@ def source_catalog(client):
     repository = _FixtureSignalRepository(_source_runs())
     config = Config().model_copy(
         update={
-            "RECOMMENDATION_KARPENTER_ENABLED": False,
-            "SOURCES_CONFIG": '{"greenkube.carbon_aware": {"enabled": false}, "vpa": {"enabled": "true"}}',
+            "SOURCES_CONFIG": '{"greenkube.orphaned_pv": {"enabled": false}, "vpa": {"enabled": "true"}}',
         }
     )
     catalog = build_source_registry(config, entry_points=lambda: [_broken_plugin()])

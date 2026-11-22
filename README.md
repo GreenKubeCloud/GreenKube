@@ -14,7 +14,7 @@ GreenKube turns that advice into reviewed pull requests in your GitOps repositor
 
 ## How it works
 
-1. **Aggregate.** GreenKube's own measurements, corroborated by [VPA](docs/sources/vpa.md), [Goldilocks](docs/sources/goldilocks.md), [Robusta KRR](docs/sources/krr.md), [Karpenter](docs/sources/nodepool.md) and any tool through a [push API](docs/sources/push.md), in one model.
+1. **Aggregate.** GreenKube's own measurements, corroborated by [VPA](docs/sources/vpa.md), [Goldilocks](docs/sources/goldilocks.md), [Robusta KRR](docs/sources/krr.md) and any tool through a [push API](docs/sources/push.md), in one model.
 2. **Decide.** GreenKube's measured value decides each size; the other sources raise or lower the confidence (one vote per engine, contested advice labeled), and each recommendation gets evidence, a projected impact, a risk level, a confidence score and a risk-adjusted ranking.
 3. **Deliver.** GreenKube finds the workload's source in Git through Argo CD or Flux (plain YAML, Kustomize, Helm), shows the exact diff, and opens a pull request on GitHub, GitLab or Gitea once you approve the plan.
 4. **Prove.** It follows the merge through the sync and the rollout, then measures the change against a counterfactual baseline, with confounders and health gates, and records the outcome in an append-only, hash-chained ledger.

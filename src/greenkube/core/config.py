@@ -120,6 +120,17 @@ REMOVED_SETTINGS: dict[str, str] = {
     # B.3: consensus has one policy, the native measured value decides the size.
     "RECOMMENDATION_CONSENSUS_POLICY": "GreenKube's measured value decides the size; other sources move confidence",
     "RECOMMENDATION_SOURCE_PRIORITY": "GreenKube's measured value decides the size; other sources move confidence",
+    # B.1: the native advisory analyzers and the Karpenter NodePool source were removed.
+    "RECOMMENDATION_KARPENTER_ENABLED": "the Karpenter NodePool recommendation source was removed",
+    "ZOMBIE_COST_THRESHOLD": "the zombie-pod analyzer was removed",
+    "ZOMBIE_ENERGY_THRESHOLD": "the zombie-pod analyzer was removed",
+    "AUTOSCALING_CV_THRESHOLD": "the autoscaling-candidate analyzer was removed",
+    "AUTOSCALING_SPIKE_RATIO": "the autoscaling-candidate analyzer was removed",
+    "OFF_PEAK_IDLE_THRESHOLD": "the off-peak scaling analyzer was removed",
+    "OFF_PEAK_MIN_IDLE_HOURS": "the off-peak scaling analyzer was removed",
+    "IDLE_NAMESPACE_ENERGY_THRESHOLD": "the idle-namespace analyzer was removed",
+    "CARBON_AWARE_THRESHOLD": "the carbon-aware scheduling analyzer was removed",
+    "NODE_UTILIZATION_THRESHOLD": "the node utilization analyzer was removed",
 }
 #: Removed settings already reported: warn once per process.
 _REMOVED_WARNED: set[str] = set()
@@ -550,15 +561,6 @@ class Config(BaseSettings):
     RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS: float = 7.0
     # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.
     RECOMMENDATION_LIMITS_POLICY: str = "keep"
-    ZOMBIE_COST_THRESHOLD: float = 0.01
-    ZOMBIE_ENERGY_THRESHOLD: float = 1000.0
-    AUTOSCALING_CV_THRESHOLD: float = 0.7
-    AUTOSCALING_SPIKE_RATIO: float = 3.0
-    OFF_PEAK_IDLE_THRESHOLD: float = 0.05
-    OFF_PEAK_MIN_IDLE_HOURS: int = 4
-    IDLE_NAMESPACE_ENERGY_THRESHOLD: float = 1000.0
-    CARBON_AWARE_THRESHOLD: float = 1.5
-    NODE_UTILIZATION_THRESHOLD: float = 0.2
     # Minimum realistic values — recommendations below these are flagged as unrealistic
     RECOMMENDATION_MIN_CPU_MILLICORES: int = 10
     RECOMMENDATION_MIN_MEMORY_BYTES: int = 16 * 1024 * 1024
@@ -571,8 +573,7 @@ class Config(BaseSettings):
     # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
     LOAD_BALANCER_COST_PER_MONTH: float = 18.0
     # Days a resource must look unused continuously (LoadBalancer, PersistentVolume)
-    # or be observed idle (zombie workload, idle namespace) before its deletion is
-    # recommended. Never below 0.
+    # before its deletion is recommended. Never below 0.
     DELETION_MIN_UNUSED_DAYS: float = 7.0
 
     # --- Impact Model (docs/methodology/impact-model.md) ---
@@ -610,9 +611,6 @@ class Config(BaseSettings):
     # Phase 6 enables the source by default; it degrades gracefully when the VPA
     # CRD is not installed.
     RECOMMENDATION_VPA_ENABLED: bool = True
-    # Karpenter NodePool consolidation recommendations. Enabled by default and
-    # skipped gracefully when the Karpenter CRDs are absent.
-    RECOMMENDATION_KARPENTER_ENABLED: bool = True
     # Known minimum each tool proposes, per engine family or source id (roadmap A.5): a value
     # equal to it is the tool's floor, not a signal of need, and is not counted as a vote.
     # JSON object; blank means the built-in KRR simple and Fairwinds VPA chart floors.
@@ -630,7 +628,7 @@ class Config(BaseSettings):
     # registered under the `greenkube.sources` Python entry points.
     SOURCES_PLUGINS_ENABLED: bool = True
     # Per-source settings as a JSON object keyed by source id, e.g.
-    # {"vpa": {"enabled": "auto"}, "greenkube.carbon_aware": {"enabled": false}}.
+    # {"vpa": {"enabled": "auto"}, "greenkube.orphaned_lb": {"enabled": false}}.
     # "enabled" is true, false or auto and overrides the RECOMMENDATION_*_ENABLED flags.
     SOURCES_CONFIG: str = ""
 

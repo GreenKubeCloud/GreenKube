@@ -116,7 +116,7 @@ class TestRollup:
         targets = {row.target for row in rollup_rows(rows)}
         assert targets == {("shop", "Pod", "debug"), ("shop", "Deployment", "web")}
 
-    def test_replicas_and_node_requests(self):
+    def test_replicas(self):
         hour = _hour()
         rows = []
         for step in range(12):
@@ -127,9 +127,6 @@ class TestRollup:
         summary = snapshot.summaries[("shop", "Deployment", "api")][""]
         assert summary.replicas_avg == pytest.approx(2.0)
         assert summary.replicas_max == 2
-        node = snapshot.nodes["node-a"]
-        assert node.cpu_usage_avg == pytest.approx(200)
-        assert node.cpu_request_avg == pytest.approx(1000)
 
     def test_one_hour_of_500_pods_is_rolled_up_quickly_in_bounded_memory(self):
         hour = _hour()
@@ -174,4 +171,3 @@ class TestSummaries:
         snapshot = summarize_rows([CombinedMetric(pod_name="p", namespace="n", cpu_usage_millicores=5)])
         summary = snapshot.summaries[("n", "Pod", "p")][""]
         assert summary.coverage_seconds is None
-        assert snapshot.hour_profiles == {}

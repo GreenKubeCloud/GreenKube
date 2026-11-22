@@ -45,14 +45,11 @@ from greenkube.impact.types import (
     CostSource,
     ImpactDelta,
     NodeImpactProfile,
-    NodePoolChange,
     NodePoolContext,
     ObservedCoverage,
     PowerSource,
-    ReplicaScheduleChange,
     ResourceSample,
     WorkloadBaseline,
-    WorkloadDeletion,
     WorkloadRef,
 )
 from greenkube.utils.time import parse_query_step_seconds
@@ -334,8 +331,12 @@ def collected_steps_from_rows(rows: Sequence[Any], step_seconds: float) -> Dict[
 
     Each distinct row timestamp covers the longest row at that time (one step
     for a raw row, its ``duration_seconds`` for an hourly row read for older
-    hours), capped at the hour. Empty for rollup baseline rows, whose
-    timestamps are not sample times (the usage snapshot gives their collection).
+    hours), counted in the hour the row starts and capped at the hour. This is
+    the rule of the rollup (``workload_usage_hourly.step_count`` counts the
+    steps that start in each hour bucket), so the raw-row and rollup paths give
+    the same coverage: collection runs on wall-clock steps, so a step never
+    crosses an hour. Empty for rollup baseline rows, whose timestamps are not
+    sample times (the usage snapshot gives their collection).
     """
     if step_seconds <= 0:
         return {}
@@ -361,8 +362,10 @@ def collected_hours(
     The span minus the uncollected time of each hour: an hour with no row of
     any target is a gap of its whole overlap with the span, a partly collected
     hour misses its overlap minus its collected time (steps x step), less one
-    step of tolerance (samples are not aligned on the hour). A CronJob's idle
-    hours are collected when other targets have rows in them.
+    step of tolerance (the span's ends are not aligned on the step grid). The
+    tolerance only applies to an hour in which steps started: an hour without
+    any step is a whole gap. A CronJob's idle hours are collected when other
+    targets have rows in them.
     """
     if end <= start:
         return 0.0
@@ -738,17 +741,6 @@ class ImpactProjector:
         )
         return self.model.project(self.baseline(ref, series), change, self.pool)
 
-    def workload_deletion(self, ref: WorkloadRef, series: Sequence[Any]) -> ImpactDelta:
-        """Projects removing every replica of a workload."""
-        return self.model.project(self.baseline(ref, series), WorkloadDeletion(), self.pool)
-
-    def replica_schedule(
-        self, ref: WorkloadRef, series: Sequence[Any], removed_hours_of_day: Iterable[int]
-    ) -> ImpactDelta:
-        """Projects scaling a workload to zero during the given UTC hours."""
-        change = ReplicaScheduleChange(removed_hours_of_day=frozenset(int(hour) % 24 for hour in removed_hours_of_day))
-        return self.model.project(self.baseline(ref, series), change, self.pool)
-
     def asset_deletion(
         self,
         *,
@@ -776,17 +768,6 @@ class ImpactProjector:
             load_balancers=load_balancers,
         )
         return self.model.project(WorkloadBaseline(ref=ref, samples=(), window_hours=HOURS_PER_YEAR), change, self.pool)
-
-    def node_removal(self, node_names: Sequence[str], *, action_is_consolidation: bool = True) -> ImpactDelta:
-        """Projects removing whole nodes (consolidation)."""
-        ref = self.workload_ref(None, "NodePool", ",".join(node_names))
-        change = NodePoolChange(removed_nodes=tuple(node_names), action_is_consolidation=action_is_consolidation)
-        return self.model.project(WorkloadBaseline(ref=ref, samples=(), window_hours=HOURS_PER_YEAR), change, self.pool)
-
-    def node_hourly_price(self, node_name: str) -> Optional[float]:
-        """Full hourly price of a known node, from its resolved unit prices."""
-        node = self.pool.nodes.get(node_name)
-        return node.hourly_price if node is not None else None
 
 
 def _row_environment(rows: Iterable[Any]) -> Mapping[str, Tuple[float, float]]:

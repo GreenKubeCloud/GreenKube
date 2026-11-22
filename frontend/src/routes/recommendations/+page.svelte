@@ -92,7 +92,7 @@
 	let filterCapability = '';
 	let namespaceOptions = [];
 
-	const SOURCE_OPTIONS = ['greenkube', 'vpa', 'karpenter'];
+	const SOURCE_OPTIONS = ['greenkube', 'vpa'];
 	const RISK_OPTIONS = [
 		{ value: 'low', label: 'Low risk' },
 		{ value: 'medium', label: 'Medium risk' },
@@ -101,13 +101,6 @@
 	const CAPABILITY_OPTIONS = [
 		{ value: 'cpu_rightsizing', label: 'CPU rightsizing' },
 		{ value: 'memory_rightsizing', label: 'Memory rightsizing' },
-		{ value: 'autoscaling', label: 'Autoscaling' },
-		{ value: 'off_peak', label: 'Off-peak scaling' },
-		{ value: 'carbon_aware', label: 'Carbon-aware scheduling' },
-		{ value: 'zombie_cleanup', label: 'Zombie cleanup' },
-		{ value: 'namespace_cleanup', label: 'Namespace cleanup' },
-		{ value: 'node_optimization', label: 'Node optimization' },
-		{ value: 'node_pool', label: 'Node pool' },
 		{ value: 'storage_cleanup', label: 'Storage cleanup' },
 		{ value: 'lb_cleanup', label: 'Load balancer cleanup' }
 	];
@@ -380,8 +373,8 @@
 		sortMode = mode;
 	}
 
-	// IMP-07: the server's de-duplicated opportunity, the same figure as the dashboard. The client-side
-	// sums (which add overlapping recommendations and net increases) are only a fallback.
+	// IMP-07: the server's opportunity, the same figure as the dashboard. The client-side
+	// sums (which net increases) are only a fallback.
 	// The server figure covers every active recommendation: with source/risk filters the page sums the matches.
 	$: opportunity = serverFiltersActive ? null : serverOpportunity(savings);
 	// Fallback (filters on): the matching savings recommendations only, never increases or negatives.
@@ -1243,8 +1236,7 @@
 	// --- Source / risk display ---
 	const sourceConfig = {
 		greenkube: { label: 'GreenKube', color: 'green' },
-		vpa: { label: 'VPA', color: 'blue' },
-		karpenter: { label: 'Karpenter', color: 'purple' }
+		vpa: { label: 'VPA', color: 'blue' }
 	};
 
 	function getSourceConfig(source) {
@@ -1268,15 +1260,8 @@
 
 	// --- Type config ---
 	const typeConfig = {
-		ZOMBIE_POD:              { icon: '💀', label: 'Zombie Pod',           color: 'red',    desc: 'Pod with no meaningful activity' },
 		RIGHTSIZING_CPU:         { icon: '📐', label: 'CPU Rightsizing',      color: 'yellow', desc: 'CPU request can be optimized' },
 		RIGHTSIZING_MEMORY:      { icon: '📐', label: 'Memory Rightsizing',   color: 'yellow', desc: 'Memory request can be optimized' },
-		AUTOSCALING_CANDIDATE:   { icon: '📈', label: 'Autoscaling',          color: 'orange', desc: 'Workload with spiky usage — consider HPA' },
-		OFF_PEAK_SCALING:        { icon: '🌙', label: 'Off-Peak Scaling',     color: 'indigo', desc: 'Idle during off-peak hours — scale down with cron' },
-		IDLE_NAMESPACE:          { icon: '💤', label: 'Idle Namespace',       color: 'purple', desc: 'Namespace with minimal activity' },
-		CARBON_AWARE_SCHEDULING: { icon: '🌍', label: 'Carbon-Aware',         color: 'green',  desc: 'Could run in a lower-carbon zone' },
-		OVERPROVISIONED_NODE:    { icon: '🖥️', label: 'Overprovisioned Node', color: 'blue',   desc: 'Node with very low utilization' },
-		UNDERUTILIZED_NODE:      { icon: '🔻', label: 'Underutilized Node',   color: 'blue',   desc: 'Node with few pods — consider draining' },
 		ORPHANED_PERSISTENT_VOLUME: { icon: '💾', label: 'Orphaned PV',      color: 'orange', desc: 'PersistentVolume with no bound claim' },
 		ORPHANED_LOAD_BALANCER:    { icon: '🌐', label: 'Orphaned LoadBalancer', color: 'orange', desc: 'LoadBalancer Service with no backing endpoints' },
 	};

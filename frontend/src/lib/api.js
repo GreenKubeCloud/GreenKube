@@ -280,7 +280,7 @@ export function getRecommendations({ namespace } = {}) {
  * {@link requestOptimizationRun} so page loads stay read-only (BUG-25).
  * @param {Object} opts
  * @param {string} [opts.namespace]
- * @param {string} [opts.source] — greenkube | vpa | karpenter | …
+ * @param {string} [opts.source] — greenkube | vpa | …
  * @param {string} [opts.risk_level] — low | medium | high
  * @param {string} [opts.capability] — e.g. cpu_rightsizing
  * @param {string} [opts.profile] — balanced | carbon_first | cost_first | quick_wins | low_risk

@@ -63,68 +63,6 @@
     },
     {
       "capabilities": [
-        "node_pool"
-      ],
-      "consecutive_failures": 0,
-      "description": "Under-utilized Karpenter NodePools that could consolidate onto fewer nodes, and NodePool policy advice (consolidation, capacity type, architecture).",
-      "display_name": "GreenKube NodePool consolidation",
-      "distribution": null,
-      "enabled": "false",
-      "entry_point": null,
-      "health": null,
-      "id": "greenkube.nodepool",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": "karpenter",
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 300.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 0.0,
-        "probe_timeout_seconds": 30.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "disabled",
-      "status_reason": null,
-      "tier": "native",
-      "version": null
-    },
-    {
-      "capabilities": [
-        "cleanup"
-      ],
-      "consecutive_failures": 0,
-      "description": "Identifies targets with cost but near-zero energy consumption, with evidence.",
-      "display_name": "GreenKube zombie",
-      "distribution": null,
-      "enabled": "auto",
-      "entry_point": null,
-      "health": null,
-      "id": "greenkube.zombie",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": "greenkube",
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 300.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 0.0,
-        "probe_timeout_seconds": 30.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "pending",
-      "status_reason": "no scan has run this source yet",
-      "tier": "native",
-      "version": null
-    },
-    {
-      "capabilities": [
         "container_requests"
       ],
       "consecutive_failures": 0,
@@ -213,168 +151,13 @@
     },
     {
       "capabilities": [
-        "horizontal_autoscaling"
-      ],
-      "consecutive_failures": 0,
-      "description": "Identifies targets with spiky load patterns that would benefit from HPA.",
-      "display_name": "GreenKube autoscaling",
-      "distribution": null,
-      "enabled": "auto",
-      "entry_point": null,
-      "health": null,
-      "id": "greenkube.autoscaling",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": "greenkube",
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 300.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 0.0,
-        "probe_timeout_seconds": 30.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "pending",
-      "status_reason": "no scan has run this source yet",
-      "tier": "native",
-      "version": null
-    },
-    {
-      "capabilities": [
-        "schedule"
-      ],
-      "consecutive_failures": 0,
-      "description": "Identifies workloads active only during certain hours.",
-      "display_name": "GreenKube off peak",
-      "distribution": null,
-      "enabled": "auto",
-      "entry_point": null,
-      "health": null,
-      "id": "greenkube.off_peak",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": "greenkube",
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 300.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 0.0,
-        "probe_timeout_seconds": 30.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "pending",
-      "status_reason": "no scan has run this source yet",
-      "tier": "native",
-      "version": null
-    },
-    {
-      "capabilities": [
-        "cleanup"
-      ],
-      "consecutive_failures": 0,
-      "description": "Identifies namespaces with minimal total activity, with evidence.",
-      "display_name": "GreenKube idle namespace",
-      "distribution": null,
-      "enabled": "auto",
-      "entry_point": null,
-      "health": null,
-      "id": "greenkube.idle_namespace",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": "greenkube",
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 300.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 0.0,
-        "probe_timeout_seconds": 30.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "pending",
-      "status_reason": "no scan has run this source yet",
-      "tier": "native",
-      "version": null
-    },
-    {
-      "capabilities": [
-        "placement"
-      ],
-      "consecutive_failures": 0,
-      "description": "Identifies targets running during high carbon intensity periods.",
-      "display_name": "GreenKube carbon aware",
-      "distribution": null,
-      "enabled": "false",
-      "entry_point": null,
-      "health": null,
-      "id": "greenkube.carbon_aware",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": "greenkube",
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 300.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 0.0,
-        "probe_timeout_seconds": 30.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "disabled",
-      "status_reason": null,
-      "tier": "native",
-      "version": null
-    },
-    {
-      "capabilities": [
-        "node_pool"
-      ],
-      "consecutive_failures": 0,
-      "description": "Analyzes node-level utilization from the per-node usage summaries.",
-      "display_name": "GreenKube nodes",
-      "distribution": null,
-      "enabled": "auto",
-      "entry_point": null,
-      "health": null,
-      "id": "greenkube.nodes",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": "greenkube",
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 300.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 0.0,
-        "probe_timeout_seconds": 30.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "pending",
-      "status_reason": "no scan has run this source yet",
-      "tier": "native",
-      "version": null
-    },
-    {
-      "capabilities": [
         "cleanup"
       ],
       "consecutive_failures": 0,
       "description": "Identifies released PersistentVolumes that have looked unused long enough, with evidence.",
       "display_name": "GreenKube orphaned pv",
       "distribution": null,
-      "enabled": "auto",
+      "enabled": "false",
       "entry_point": null,
       "health": null,
       "id": "greenkube.orphaned_pv",
@@ -392,8 +175,8 @@
       "origin": "builtin",
       "recommendation_count": 0,
       "signal_count": 0,
-      "status": "pending",
-      "status_reason": "no scan has run this source yet",
+      "status": "disabled",
+      "status_reason": null,
       "tier": "native",
       "version": null
     },

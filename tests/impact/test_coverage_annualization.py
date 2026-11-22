@@ -15,14 +15,15 @@ import pytest
 
 from greenkube.core.config import Config
 from greenkube.core.optimization.context import OptimizationContext
-from greenkube.impact import ImpactProjector, ReservationAwareImpactModel, WorkloadBaseline, WorkloadDeletion
+from greenkube.core.workload_usage import rollup_rows, summarize
+from greenkube.impact import ContainerResourceChange, ImpactProjector, ReservationAwareImpactModel, WorkloadBaseline
 from greenkube.impact.model import (
     MIN_COVERAGE_HOURS,
     SHORT_COVERAGE_CONFIDENCE_FLOOR,
     SHORT_COVERAGE_HOURS,
     annualization,
 )
-from greenkube.impact.projector import first_observed_from_summaries
+from greenkube.impact.projector import collected_hours, collected_steps_from_rows, first_observed_from_summaries
 from greenkube.impact.types import HOURS_PER_YEAR, ObservedCoverage, WorkloadRef
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.workload_usage import BaselineMetric, UsageSnapshot, WorkloadUsageSummary
@@ -33,7 +34,9 @@ STEP_COST = 0.004  # per 5-minute sample: 0.048 per hour
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    """The current time on the 5-minute collection grid (collection runs on wall-clock steps)."""
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    return now - timedelta(minutes=now.minute % 5)
 
 
 def _rows(end: datetime, hours: float, name: str = "young") -> list[CombinedMetric]:
@@ -57,8 +60,20 @@ def _rows(end: datetime, hours: float, name: str = "young") -> list[CombinedMetr
     ]
 
 
-def _deletion(projector: ImpactProjector, rows, name: str = "young"):
-    return projector.workload_deletion(projector.workload_ref("apps", "Deployment", name), rows)
+#: The projected change: a CPU request cut of the workload (500m -> 250m).
+CUT = (500, 250)
+
+
+def _cut(projector: ImpactProjector, rows, name: str = "young"):
+    return projector.container_resources(projector.workload_ref("apps", "Deployment", name), rows, cpu_millicores=CUT)
+
+
+def _window_saving(projector: ImpactProjector, rows, name: str = "young") -> float:
+    """The cut's saving over the observed rows themselves (annualization factor 1)."""
+    baseline = projector.baseline(projector.workload_ref("apps", "Deployment", name), rows)
+    change = ContainerResourceChange(cpu_request_cores=(CUT[0] / 1000.0, CUT[1] / 1000.0))
+    unannualized = WorkloadBaseline(ref=baseline.ref, samples=baseline.samples, window_hours=HOURS_PER_YEAR)
+    return projector.model.project(unannualized, change, projector.pool).allocated_cost_annual
 
 
 class TestTwoHourWorkloadInFourteenDayLookback:
@@ -66,12 +81,12 @@ class TestTwoHourWorkloadInFourteenDayLookback:
         now = _now()
         rows = _rows(now, 2.0)
         projector = ImpactProjector(Config(), rows=rows, analysis_window_seconds=LOOKBACK, window_end=now)
-        delta = _deletion(projector, rows)
+        delta = _cut(projector, rows)
 
-        observed_cost = STEP_COST * 24
-        # Before the fix: observed_cost * 8760 / 336 = 0.27; the run-rate is 0.048/h.
-        assert delta.allocated_cost_annual == pytest.approx(observed_cost * HOURS_PER_YEAR / 2.0)
-        assert delta.allocated_cost_annual == pytest.approx(0.048 * HOURS_PER_YEAR)
+        # Before the fix the two observed hours were annualized as if spread over the 336 h lookback.
+        assert delta.allocated_cost_annual > 0
+        assert delta.allocated_cost_annual == pytest.approx(_window_saving(projector, rows) * HOURS_PER_YEAR / 2.0)
+        assert delta.assumptions["annualization_factor"] == pytest.approx(HOURS_PER_YEAR / 2.0)
         assumptions = delta.assumptions
         assert assumptions["window_hours"] == pytest.approx(2.0)
         assert assumptions["lookback_hours"] == pytest.approx(336.0)
@@ -84,7 +99,7 @@ class TestTwoHourWorkloadInFourteenDayLookback:
         baseline = full.baseline(full.workload_ref("apps", "Deployment", "young"), rows)
         unscaled = ReservationAwareImpactModel().project(
             WorkloadBaseline(ref=baseline.ref, samples=baseline.samples, window_hours=2.0),
-            WorkloadDeletion(),
+            ContainerResourceChange(cpu_request_cores=(CUT[0] / 1000.0, CUT[1] / 1000.0)),
             full.pool,
         )
         assert delta.confidence == pytest.approx(unscaled.confidence * SHORT_COVERAGE_CONFIDENCE_FLOOR, abs=1e-4)
@@ -94,8 +109,8 @@ class TestTwoHourWorkloadInFourteenDayLookback:
         young = _rows(now, 2.0, "young")
         old = _rows(now, 14 * 24, "old")
         projector = ImpactProjector(Config(), rows=young + old, analysis_window_seconds=LOOKBACK, window_end=now)
-        young_delta = _deletion(projector, young, "young")
-        old_delta = _deletion(projector, old, "old")
+        young_delta = _cut(projector, young, "young")
+        old_delta = _cut(projector, old, "old")
         assert young_delta.allocated_cost_annual == pytest.approx(old_delta.allocated_cost_annual)
         assert young_delta.co2e_allocated_annual_g == pytest.approx(old_delta.co2e_allocated_annual_g)
         assert old_delta.assumptions["coverage_hours"] == pytest.approx(336.0)
@@ -143,11 +158,11 @@ class TestTwoHourWorkloadInFourteenDayLookback:
             usage=snapshot,
         )
         projector = ImpactProjector.for_context(context)
-        delta = _deletion(projector, context.workload_rows(("apps", "Deployment", "young")))
+        delta = _cut(projector, context.container_rows(("apps", "Deployment", "young"), None))
         coverage = (now - first_hour).total_seconds() / 3600.0
         assert delta.assumptions["coverage_basis"] == "target_summary"
         assert delta.assumptions["coverage_hours"] == pytest.approx(coverage)
-        assert delta.allocated_cost_annual == pytest.approx(STEP_COST * 24 * HOURS_PER_YEAR / coverage)
+        assert delta.assumptions["annualization_factor"] == pytest.approx(HOURS_PER_YEAR / coverage)
 
     def test_rollup_rows_without_a_summary_keep_the_lookback(self):
         """An aggregated row's timestamp is not a sample time: never infer coverage from it."""
@@ -167,10 +182,10 @@ class TestTwoHourWorkloadInFourteenDayLookback:
             estimation_reasons=[],
         )
         projector = ImpactProjector(Config(), rows=[row], analysis_window_seconds=LOOKBACK, window_end=now)
-        delta = projector.workload_deletion(projector.workload_ref("apps", "Deployment", "svc"), [row])
+        delta = _cut(projector, [row], "svc")
         assert delta.assumptions["coverage_basis"] == "lookback"
         assert delta.assumptions["window_hours"] == pytest.approx(336.0)
-        assert delta.allocated_cost_annual == pytest.approx(HOURS_PER_YEAR / 336.0)
+        assert delta.assumptions["annualization_factor"] == pytest.approx(HOURS_PER_YEAR / 336.0)
 
 
 class TestMinimumCoverage:
@@ -178,11 +193,13 @@ class TestMinimumCoverage:
         now = _now()
         rows = _rows(now, 1 / 6)  # two 5-minute samples
         projector = ImpactProjector(Config(), rows=rows, analysis_window_seconds=LOOKBACK, window_end=now)
-        delta = _deletion(projector, rows)
+        delta = _cut(projector, rows)
         assert delta.assumptions["coverage_hours"] == pytest.approx(1 / 6)
         assert delta.assumptions["minimum_coverage_applied"] is True
         assert delta.assumptions["window_hours"] == MIN_COVERAGE_HOURS
-        assert delta.allocated_cost_annual == pytest.approx(2 * STEP_COST * HOURS_PER_YEAR / MIN_COVERAGE_HOURS)
+        assert delta.allocated_cost_annual == pytest.approx(
+            _window_saving(projector, rows) * HOURS_PER_YEAR / MIN_COVERAGE_HOURS
+        )
 
     def test_annualization_rules(self):
         ref = WorkloadRef("", "ns", "Deployment", "x")
@@ -229,3 +246,73 @@ class TestFirstObservedFromSummaries:
         assert first("Deployment", "web", "unknown") == now - timedelta(hours=10)
         assert first("Namespace", "apps") == now - timedelta(hours=20)
         assert first("Deployment", "missing") is None
+
+
+STEP = 300.0
+
+
+def _stamp(hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 11, 21, hour, minute, tzinfo=timezone.utc)
+
+
+def _raw(at: datetime, seconds: float = STEP, name: str = "young") -> CombinedMetric:
+    return CombinedMetric(
+        pod_name=f"{name}-7f9c5d9f6d-a1b2c",
+        namespace="apps",
+        owner_kind="Deployment",
+        owner_name=name,
+        node="n1",
+        cpu_request=500,
+        cpu_usage_millicores=100,
+        total_cost=STEP_COST,
+        timestamp=at,
+        duration_seconds=int(seconds),
+    )
+
+
+def _grid(start: datetime, end: datetime, step: float = STEP) -> list[CombinedMetric]:
+    count = int((end - start).total_seconds() // step)
+    return [_raw(start + timedelta(seconds=step * index), step) for index in range(count)]
+
+
+class TestCollectionCoverageRule:
+    """IMP-04: a step counts in the hour it starts, on the raw-row and the rollup paths alike."""
+
+    @pytest.mark.parametrize("minute", [0, 1, 4, 30, 59])
+    def test_the_scan_minute_never_creates_a_gap_on_the_step_grid(self, minute):
+        rows = _grid(_stamp(21), _stamp(23))
+        end = _stamp(23, minute)
+        steps = collected_steps_from_rows(rows, STEP)
+        # 21:00-23:00 collected; the minutes after 23:00 had no step yet and are not counted.
+        assert collected_hours(steps, STEP, _stamp(21), end) == pytest.approx(2.0)
+
+    def test_a_missing_hour_is_a_whole_gap(self):
+        rows = _grid(_stamp(20), _stamp(22)) + _grid(_stamp(23), _stamp(23) + timedelta(hours=1))
+        steps = collected_steps_from_rows(rows, STEP)
+        assert _stamp(22) not in steps
+        # 20:00-22:00 and 23:00-24:00: the empty hour 22 gets no tolerance.
+        assert collected_hours(steps, STEP, _stamp(20), _stamp(23) + timedelta(hours=1)) == pytest.approx(3.0)
+
+    def test_thirty_second_steps(self):
+        rows = _grid(_stamp(21, 30), _stamp(23), step=30.0)
+        steps = collected_steps_from_rows(rows, 30.0)
+        assert steps == {_stamp(21): 60.0, _stamp(22): 120.0}
+        assert collected_hours(steps, 30.0, _stamp(21, 30), _stamp(23)) == pytest.approx(1.5)
+
+    def test_hourly_rows_are_clipped_to_their_bucket(self):
+        """An hourly row (also one not aligned on the hour, or 3601 s long) never fills the next hour."""
+        rows = [_raw(_stamp(20, 30), 3600.0), _raw(_stamp(22), 3601.0)]
+        steps = collected_steps_from_rows(rows, STEP)
+        assert steps == {_stamp(20): 12.0, _stamp(22): 12.0}
+        assert collected_hours(steps, STEP, _stamp(20), _stamp(23) + timedelta(hours=1)) == pytest.approx(2.0)
+
+    @pytest.mark.parametrize("offset_minutes", [0, 2])
+    def test_raw_rows_and_the_rollup_give_the_same_coverage(self, offset_minutes):
+        """Off the grid too: both paths count a step in the hour it starts."""
+        start = _stamp(20, 10) + timedelta(minutes=offset_minutes)
+        rows = _grid(start, start + timedelta(hours=1)) + _grid(_stamp(22, 3), _stamp(23, 3))
+        raw = collected_steps_from_rows(rows, STEP)
+        rollup = summarize(rollup_rows(rows, step_seconds=STEP)).collected_steps_by_hour
+        assert {hour: float(steps) for hour, steps in rollup.items()} == raw
+        end = _stamp(23, 30)
+        assert collected_hours(rollup, STEP, start, end) == pytest.approx(collected_hours(raw, STEP, start, end))

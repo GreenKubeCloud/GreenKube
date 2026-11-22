@@ -1,12 +1,12 @@
 # src/greenkube/core/deletion_safety.py
 """Shared safety rules of destructive recommendations.
 
-A deletion (orphaned LoadBalancer or PersistentVolume, zombie workload, idle
-namespace) or a scale-to-zero schedule is only recommended when GreenKube can
-show evidence that the resource is unused, and never for resources that
-operators opted out or that run the cluster itself. The rules here are shared
-by the collectors and the analyzers; ``docs/recommendation.md`` ("Why
-GreenKube thinks a resource is unused") documents them.
+A deletion (orphaned LoadBalancer or PersistentVolume) is only recommended
+when GreenKube can show evidence that the resource is unused, and never for
+resources that operators opted out or that run the cluster itself. The rules
+here are shared by the collectors, the analyzers and the deletion action;
+``docs/recommendation.md`` ("Why GreenKube thinks a resource is unused")
+documents them.
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ KEEP_ANNOTATION = "greenkube.io/keep"
 _FALSE_VALUES = frozenset({"false", "0", "no", "off"})
 
 #: Recommendation types that delete something (no deletion PR is automated in this release).
-DELETION_TYPES = frozenset({"ZOMBIE_POD", "IDLE_NAMESPACE", "ORPHANED_PERSISTENT_VOLUME", "ORPHANED_LOAD_BALANCER"})
+DELETION_TYPES = frozenset({"ORPHANED_PERSISTENT_VOLUME", "ORPHANED_LOAD_BALANCER"})
 
-#: Namespaces that run the cluster or its platform tooling: never deleted or scaled to zero.
+#: Namespaces that run the cluster or its platform tooling: nothing in them is ever deleted.
 INFRASTRUCTURE_NAMESPACES = frozenset(
     {
         "kube-system",
@@ -87,16 +87,6 @@ _INFRASTRUCTURE_PATTERNS = (
     re.compile(r"-operators?$"),
 )
 
-#: Namespaces Kubernetes does not let anyone delete.
-UNDELETABLE_NAMESPACES = frozenset({"default", "kube-system", "kube-public", "kube-node-lease"})
-
-#: Workloads that wait for events (operators, controllers, webhooks): idle by design, never zombies.
-_EVENT_DRIVEN_NAME = re.compile(r"(operator|controller|webhook|provisioner|autoscaler|reconciler)", re.IGNORECASE)
-
-#: Kinds that cannot be deleted as "a zombie" or scaled to zero by a schedule.
-NODE_AGENT_KINDS = frozenset({"DaemonSet"})
-NON_SCALABLE_KINDS = frozenset({"DaemonSet", "Pod", "Job", "CronJob"})
-
 
 def opt_out_reason(metadata: Optional[Mapping[str, Any]]) -> Optional[str]:
     """The opt-out annotation that protects an object, or None."""
@@ -117,11 +107,6 @@ def is_infrastructure_namespace(namespace: Optional[str]) -> bool:
         return False
     name = namespace.strip().lower()
     return name in INFRASTRUCTURE_NAMESPACES or any(pattern.search(name) for pattern in _INFRASTRUCTURE_PATTERNS)
-
-
-def looks_event_driven(name: Optional[str]) -> bool:
-    """True for workload names of operators, controllers and webhooks."""
-    return bool(name and _EVENT_DRIVEN_NAME.search(name))
 
 
 def min_unused_period(config: Any) -> timedelta:

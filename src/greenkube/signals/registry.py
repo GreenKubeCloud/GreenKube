@@ -44,9 +44,25 @@ logger = logging.getLogger(__name__)
 #: Maximum length of a problem message kept for the API.
 _MESSAGE_LIMIT = 300
 
-#: Built-in connectors removed in roadmap B.3: their ``SOURCES_CONFIG`` entries are
-#: accepted and ignored for one release, with a warning (roadmap B.0).
-REMOVED_SOURCE_IDS = frozenset({"kubecost", "polaris", "gke", "azure_advisor"})
+#: Built-in sources removed in phase B: their ``SOURCES_CONFIG`` entries are accepted and
+#: ignored for one release, with a warning (roadmap B.0). B.3: the connectors; B.1: the native
+#: advisory analyzers and the Karpenter NodePool heuristic.
+REMOVED_SOURCE_IDS = frozenset(
+    {
+        "kubecost",
+        "polaris",
+        "gke",
+        "azure_advisor",
+        "greenkube.zombie",
+        "greenkube.autoscaling",
+        "greenkube.off_peak",
+        "greenkube.idle_namespace",
+        "greenkube.carbon_aware",
+        "greenkube.nodes",
+        "greenkube.nodepool",
+        "karpenter",
+    }
+)
 
 
 def parse_sources_config(value: Any) -> Dict[str, Dict[str, Any]]:

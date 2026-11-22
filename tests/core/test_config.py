@@ -408,3 +408,30 @@ def test_gpu_assumed_utilization_defaults_to_half(monkeypatch):
     assert Config().GPU_ASSUMED_UTILIZATION_PCT == 50.0
     monkeypatch.setenv("GPU_ASSUMED_UTILIZATION_PCT", "80")
     assert Config().GPU_ASSUMED_UTILIZATION_PCT == 80.0
+
+
+class TestRemovedSettings:
+    """Settings removed in 0.4 are accepted, ignored and named in one warning (roadmap B.0)."""
+
+    def test_a_removed_setting_is_accepted_and_named_once(self, caplog, monkeypatch):
+        import greenkube.core.config as config_module
+
+        monkeypatch.setattr(config_module, "_REMOVED_WARNED", set())
+        with patch.dict(
+            os.environ, {"RECOMMENDATION_KARPENTER_ENABLED": "false", "ZOMBIE_COST_THRESHOLD": "0.5"}, clear=True
+        ):
+            with caplog.at_level(logging.WARNING):
+                Config()
+                Config()
+        warnings = [record.getMessage() for record in caplog.records if "removed setting" in record.getMessage()]
+        assert len(warnings) == 1
+        assert "RECOMMENDATION_KARPENTER_ENABLED" in warnings[0] and "ZOMBIE_COST_THRESHOLD" in warnings[0]
+
+    def test_no_warning_when_no_removed_setting_is_set(self, caplog, monkeypatch):
+        import greenkube.core.config as config_module
+
+        monkeypatch.setattr(config_module, "_REMOVED_WARNED", set())
+        with patch.dict(os.environ, {}, clear=True):
+            with caplog.at_level(logging.WARNING):
+                Config()
+        assert "removed setting" not in caplog.text
