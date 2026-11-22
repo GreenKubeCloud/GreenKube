@@ -164,8 +164,6 @@ def exclude_static_pods(snapshot: UsageSnapshot) -> StaticPodExclusion:
         named = len([name for name in containers if name != POD_LEVEL])
         report.pod_count += max(replicas, named, 1)
         report.targets.add(target)
-        snapshot.hour_profiles.pop(target, None)
-        snapshot.hour_profile_samples.pop(target, None)
     if report.targets:
         logger.info(
             "Static pods: %d pod(s) on %d node(s) left out of the analyzers (manifests on the node, not in Git).",

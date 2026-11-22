@@ -21,7 +21,7 @@ from greenkube.core.db import DatabaseManager
 from greenkube.core.metrics_compressor import MetricsCompressor
 from greenkube.core.workload_usage import WorkloadUsageRollup, floor_hour, rollup_rows, summarize
 from greenkube.models.metrics import CombinedMetric
-from greenkube.models.workload_usage import BaselineMetric, UsageSnapshot
+from greenkube.models.workload_usage import BaselineMetric
 from greenkube.storage.base_workload_usage_repository import create_workload_usage_repository
 from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
@@ -228,11 +228,6 @@ async def test_sql_snapshot_matches_the_reference_summary(db):
     api = snapshot.summaries[("shop", "Deployment", "api")]
     assert api[""].replicas_avg == pytest.approx(2.0)
     assert api["web"].cpu_limit == 1000
-    assert _profiles_equal(snapshot, reference)
-    assert set(snapshot.nodes) == {"node-a", "node-b"}
-    for node, expected_node in reference.nodes.items():
-        assert snapshot.nodes[node].cpu_usage_avg == pytest.approx(expected_node.cpu_usage_avg)
-        assert snapshot.nodes[node].cpu_request_avg == pytest.approx(expected_node.cpu_request_avg)
 
 
 async def test_sql_snapshot_derives_restarts_in_the_window_from_the_rollup(db):
@@ -270,16 +265,6 @@ async def test_sql_snapshot_derives_restarts_in_the_window_from_the_rollup(db):
     db_summary = snapshot.summaries[("shop", "StatefulSet", "db")][""]
     assert db_summary.restart_increase is None
     assert reference.summaries[("shop", "StatefulSet", "db")][""].restart_increase is None
-
-
-def _profiles_equal(left: UsageSnapshot, right: UsageSnapshot) -> bool:
-    for target, profile in right.hour_profiles.items():
-        for got, want in zip(left.hour_profiles[target], profile):
-            if (got is None) != (want is None):
-                return False
-            if got is not None and want is not None and abs(got - want) > 1e-6:
-                return False
-    return True
 
 
 async def test_namespace_filter_is_applied_in_sql(db):
@@ -1072,7 +1057,7 @@ async def test_node_observed_prices_from_mixed_baselines_keep_the_split_prices(d
     assert split_prices.cpu_core_hour == pytest.approx(0.144, rel=1e-3)
     assert mixed_prices.cpu_core_hour == pytest.approx(split_prices.cpu_core_hour, rel=0.01)
     assert mixed_prices.ram_gib_hour == pytest.approx(split_prices.ram_gib_hour, rel=0.01)
-    split_hourly, mixed_hourly = split.node_hourly_price("node-a"), mixed.node_hourly_price("node-a")
+    split_hourly, mixed_hourly = split.pool.nodes["node-a"].hourly_price, mixed.pool.nodes["node-a"].hourly_price
     assert split_hourly is not None and mixed_hourly is not None
     assert mixed_hourly == pytest.approx(split_hourly, rel=0.01)
 

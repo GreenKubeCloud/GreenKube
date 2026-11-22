@@ -315,7 +315,3 @@ async def test_deleted_namespaces_leave_node_averages_and_observed_window(db, no
     assert "gone" not in {target[0] for target in after.usage_snapshot().summaries}
     assert after.window_start == before.window_start
     assert after.analysis_window_seconds == pytest.approx(before.analysis_window_seconds, abs=120)
-    node_before, node_after = before.usage_snapshot().nodes["node-b"], after.usage_snapshot().nodes["node-b"]
-    assert node_after.hours_observed == node_before.hours_observed
-    for name in ("cpu_usage_avg", "memory_usage_avg", "cpu_request_avg", "memory_request_avg"):
-        assert getattr(node_after, name) == pytest.approx(getattr(node_before, name))

@@ -239,29 +239,12 @@ class WorkloadUsageSummary:
         return self.sample_count / self.step_count
 
 
-@dataclass(slots=True)
-class NodeUsageSummary:
-    """Average concurrent usage and requests of the pods on one node over the lookback."""
-
-    node: str
-    hours_observed: int = 0
-    cpu_usage_avg: float = 0.0
-    memory_usage_avg: float = 0.0
-    cpu_request_avg: float = 0.0
-    memory_request_avg: float = 0.0
-
-
 @dataclass
 class UsageSnapshot:
     """Everything usage-based analyzers read, bounded by the number of targets."""
 
     #: ``{target: {container_name: summary}}`` with ``""`` for the pod-level aggregate.
     summaries: Dict[TargetKey, Dict[str, WorkloadUsageSummary]] = field(default_factory=dict)
-    #: Pod-level average CPU per UTC hour of day (24 entries, None when unobserved).
-    hour_profiles: Dict[TargetKey, Tuple[Optional[float], ...]] = field(default_factory=dict)
-    #: Samples behind each hour-of-day profile.
-    hour_profile_samples: Dict[TargetKey, int] = field(default_factory=dict)
-    nodes: Dict[str, NodeUsageSummary] = field(default_factory=dict)
     #: ``rollup`` (SQL over ``workload_usage_hourly``) or ``rows`` (computed from metric rows).
     source: str = "rows"
     #: First observed hour across all targets (None when unknown).
