@@ -8,8 +8,11 @@ name: E2E — Loop on Minikube
 # step (steps.jsonl, API responses) and cluster diagnostics are uploaded as
 # the "e2e-evidence" artifact, whatever the outcome.
 #
-# Nightly, on demand, on pull requests that touch the application or the chart,
-# and from the release workflow (a release tag cannot publish without it).
+# The full loop (verdict included, Argo CD then Flux, about 45 minutes) runs
+# nightly, on demand and from the release workflow (a release tag cannot
+# publish without it). Pull requests to main that touch the application or the
+# chart get the fast run (about 15 minutes): Argo CD only, stopping once the
+# change is applied and its measurement has started.
 #
 # GitHub only fires "schedule" for the workflow file of the default branch
 # (main), on the main commit. The nightly run therefore checks out the
@@ -32,7 +35,7 @@ on:
         type: boolean
         default: true
   pull_request:
-    branches: [main, dev]
+    branches: [main]
     paths:
       - 'src/greenkube/**'
       - 'helm-chart/**'
@@ -63,8 +66,10 @@ jobs:
     env:
       E2E_KUBE_CONTEXT: minikube
       # inputs.flux is set by workflow_dispatch and workflow_call (where github.event_name
-      # is the caller's event), and empty for schedule and pull_request: Flux runs then.
-      E2E_FLUX: ${{ inputs.flux == false && '0' || '1' }}
+      # is the caller's event) and empty for schedule: Flux runs then. Pull requests
+      # get the fast run: no Flux variant, no wait for the measurement verdict.
+      E2E_FLUX: ${{ (github.event_name == 'pull_request' || inputs.flux == false) && '0' || '1' }}
+      E2E_WAIT_VERDICT: ${{ github.event_name == 'pull_request' && '0' || '1' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

@@ -98,10 +98,12 @@ stub `kubectl`, `helm` and `curl` binaries, it checks that the harness scripts r
 
 ### Nightly in CI
 
-`.github/workflows/e2e-nightly.yml` runs `make e2e` every night, on demand (`workflow_dispatch`, with an option to
-skip the Flux variant), on pull requests that touch `src/greenkube/`, `helm-chart/`, `frontend/`, the Dockerfile,
-`hack/e2e/` or the quickstart assets, and from the release workflow (`workflow_call`): a release tag publishes
-nothing unless the loop passes. GitHub schedules only the workflow file of the default branch (`main`), so the
+`.github/workflows/e2e-nightly.yml` runs the full `make e2e` (Argo CD then Flux, verdict included, about 45 minutes)
+every night, on demand (`workflow_dispatch`, with an option to skip the Flux variant) and from the release workflow
+(`workflow_call`): a release tag publishes nothing unless the loop passes. Pull requests to `main` that touch
+`src/greenkube/`, `helm-chart/`, `frontend/`, the Dockerfile, `hack/e2e/` or the quickstart assets get a fast run of
+about 15 minutes: Argo CD only (`E2E_FLUX=0`), stopping once the change is applied and its measurement has started
+(`E2E_WAIT_VERDICT=0`). Pull requests to `dev` do not run it. GitHub schedules only the workflow file of the default branch (`main`), so the
 nightly run checks out the integration branch `dev` (`E2E_NIGHTLY_REF`); the file must be present on `main` for
 the schedule to fire.
 
