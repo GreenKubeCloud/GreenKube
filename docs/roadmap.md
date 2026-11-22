@@ -182,14 +182,15 @@ Every surprise becomes an issue in this roadmap. **This is the release gate of p
 
 ## 5. Phase B: cut the scope
 
-**Status on 2026-11-22.** B.1, B.3, B.4 and B.7 are merged into `dev`, each reviewed independently and gated on SQLite and PostgreSQL (about 15,000 lines removed). B.2 (orphan hardening) and B.6 (legacy verifier, after C.5) are open. Removed settings are accepted and ignored for one release with one start warning (`REMOVED_SETTINGS`, `.env` included); columns of removed dimensions are kept and marked deprecated (migration 0320), to be dropped after a release. Both websites and the Grafana.com dashboard ("GreenKube Operations", `dashboards/README.md`) are aligned locally, not published.
+**Status on 2026-11-22.** B.1, B.3, B.4 and B.7 are merged into `dev`, each reviewed independently and gated on SQLite and PostgreSQL (about 15,000 lines removed). B.2 (orphan hardening) and B.6 (legacy verifier, after C.5) are open. Removed settings are deleted outright, with no deprecation window (the upgrade notes tell users to remove them); columns of removed dimensions are kept and marked deprecated (migration 0320), to be dropped after a release. Both websites and the Grafana.com dashboard ("GreenKube Operations", `dashboards/README.md`) are aligned locally, not published.
 
 ### B.0 Removal procedure (applies to every B task)
 1. **Code:** remove the source module, its registry entries, API routes, UI pages and tests in one branch per area.
 2. **Settings:**
-   - removed settings are accepted and ignored for one release, with one warning at start naming them;
-   - their Helm values are mapped to nothing with a NOTES warning;
-   - the schema marks them deprecated.
+   - removed settings are deleted outright, with no deprecation window: no start warning, no NOTES line, no
+     schema entry, no doc entry;
+   - leftover environment variables and Helm values are ignored (no schema `additionalProperties: false` on
+     their parents), and the upgrade notes in `docs/upgrading.md` tell users to remove them.
 3. **Data:**
    - stop writing first;
    - drop tables and columns in a later migration, after a release, with a backup note in `docs/upgrading.md`;

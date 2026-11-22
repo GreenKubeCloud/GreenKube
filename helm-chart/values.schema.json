@@ -43,8 +43,7 @@
       "items": {"type": "string", "minLength": 1, "pattern": "^\\S+$"}
     },
     "hostname": {"type": "string", "pattern": "^(\\*\\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$", "maxLength": 253},
-    "deprecated": {"description": "0.3.x value, accepted and mapped for one minor release (docs/upgrading.md)."},
-    "removed": {"deprecated": true, "description": "Removed value: accepted and ignored for one release, with a NOTES warning (docs/upgrading.md)."}
+    "deprecated": {"description": "0.3.x value, accepted and mapped for one minor release (docs/upgrading.md)."}
   },
   "properties": {
     "tmp": {"type": "object", "properties": {"sizeLimit": {"$ref": "#/definitions/quantity"}}},
@@ -369,19 +368,7 @@
                 "minSamples": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "integer", "minimum": 1}]}
               }
             },
-            "sourcePriority": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "string"}]},
-            "consensusPolicy": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "string"}]},
-            "vpaEnabled": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": ["boolean", "string"]}]},
-            "karpenterEnabled": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["boolean", "string"]}]},
-            "zombieCostThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
-            "zombieEnergyThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
-            "autoscalingCvThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
-            "autoscalingSpikeRatio": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
-            "offPeakIdleThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
-            "offPeakMinIdleHours": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
-            "idleNamespaceEnergyThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
-            "carbonAwareThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]},
-            "nodeUtilizationThreshold": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": ["number", "string"]}]}
+            "vpaEnabled": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": ["boolean", "string"]}]}
           }
         }
       }
@@ -391,7 +378,6 @@
       "properties": {
         "pluginsEnabled": {"type": "boolean"},
         "settings": {"type": "object"},
-        "priority": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "string"}]},
         "toolFloors": {
           "type": "object",
           "additionalProperties": {
@@ -418,9 +404,7 @@
             "minSampleHours": {"type": "number", "minimum": 0}
           },
           "additionalProperties": false
-        },
-        "krr": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "object"}]},
-        "polaris": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "object"}]}
+        }
       }
     },
     "impact": {
