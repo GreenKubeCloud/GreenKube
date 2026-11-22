@@ -164,9 +164,6 @@ class FakePrometheus:
                     current[ts] = max(current[ts], value) if op == "max" else current[ts] + value
         return groups
 
-    async def collect_pod_storage(self):
-        return {}
-
     async def close(self):
         return None
 

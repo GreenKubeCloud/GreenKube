@@ -14,7 +14,7 @@ from greenkube.core.k8s_client import get_apps_v1_api, get_batch_v1_api, get_cor
 from greenkube.core.optimization.targeting import MIRROR_POD_ANNOTATION, STATIC_POD_OWNER_KIND
 from greenkube.models.metrics import PodMetric
 
-from ..utils.k8s_utils import parse_cpu_request, parse_memory_request, parse_storage_request
+from ..utils.k8s_utils import parse_cpu_request, parse_memory_request
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,6 @@ def _container_metric(
         container_name=container.name,
         cpu_request=parse_cpu_request(requests.get("cpu")),
         memory_request=parse_memory_request(requests.get("memory")),
-        ephemeral_storage_request=parse_storage_request(requests.get("ephemeral-storage")),
         cpu_limit=parse_cpu_request(limits["cpu"]) if limits.get("cpu") else None,
         memory_limit=parse_memory_request(limits["memory"]) if limits.get("memory") else None,
         gpu_request=_gpu_quantity(requests) or _gpu_quantity(limits),

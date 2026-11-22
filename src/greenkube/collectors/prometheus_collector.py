@@ -1,8 +1,8 @@
 # src/greenkube/collectors/prometheus_collector.py
 
 """
-PrometheusCollector runs the range queries of the collection pipeline and the
-persistent-storage lookups, with endpoint discovery and authentication.
+PrometheusCollector runs the range queries of the collection pipeline, with
+endpoint discovery and authentication.
 """
 
 import logging
@@ -67,87 +67,6 @@ class PrometheusCollector:
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
             self._client = None
-
-    async def _query_prometheus(self, client: httpx.AsyncClient, query: str) -> List[Dict[str, Any]]:
-        """
-        Internal helper to run a query against the Prometheus API.
-
-        Without a configured URL, discovery runs before the first request, as
-        in ``collect_range``, so relative URLs are never queried (F-06).
-        """
-        if not self.base_url:
-            await self._discover_and_update_url(client)
-        if not self.base_url:
-            logger.error("Prometheus URL is not configured and could not be discovered; query skipped: %s", query)
-            return []
-        base = self.base_url.rstrip("/")
-        candidates = [
-            f"{base}/api/v1/query",
-            f"{base}/query",
-            f"{base}/prometheus/api/v1/query",
-        ]
-
-        params = {"query": query}
-
-        headers = {}
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
-
-        auth = None
-        if self.username and self.password:
-            auth = (self.username, self.password)
-
-        return await self._query_run_loop(client, candidates, params, headers, auth, query)
-
-    async def _query_run_loop(self, client, candidates, params, headers, auth, query):
-        # Helper to avoid recursion depth or duplicated code
-        last_err = None
-        for query_url in candidates:
-            try:
-                response = await client.get(
-                    query_url,
-                    params=params,
-                    headers=headers,
-                    auth=auth,
-                )
-                response.raise_for_status()
-
-                data = response.json()
-                if data.get("status") != "success":
-                    logger.warning(
-                        "Prometheus returned non-success status for %s: %s",
-                        query_url,
-                        data.get("error", "Unknown"),
-                    )
-                    continue
-
-                results = data.get("data", {}).get("result", [])
-                logger.info("Prometheus at %s returned %d result(s)", query_url, len(results))
-                return results
-
-            except httpx.HTTPError as e:
-                last_err = e
-                logger.debug("Failed to connect to Prometheus at %s: %s", query_url, e)
-                continue
-            except Exception as e:
-                last_err = e
-                logger.error("Unexpected error querying Prometheus at %s: %s", query_url, e)
-                continue
-
-        if last_err:
-            logger.error("All Prometheus query endpoints failed. Last error: %s", last_err)
-        else:
-            if not candidates:
-                pass  # No URL set
-            else:
-                logger.error("Prometheus queries returned no results for query: %s", query)
-
-        # Attempt discovery once when configured endpoints fail.
-        # We need to act carefully. _discover_and_update_url might change self.base_url
-        if await self._discover_and_update_url(client):
-            return await self._query_prometheus(client, query)
-
-        return []
 
     async def is_available(self) -> bool:
         client = await self._get_client()
@@ -225,58 +144,6 @@ class PrometheusCollector:
                     self.base_url = old_url
                     self.verify = old_verify
         return False
-
-    async def collect_pod_storage(self) -> Dict[tuple, Dict[str, float]]:
-        """Collect per-pod persistent storage request/usage from kube-state-metrics.
-
-        Joins ``kube_pod_spec_volumes_persistentvolumeclaims_info`` (pod → PVC)
-        with ``kube_persistentvolumeclaim_resource_requests_storage_bytes``
-        (PVC → requested bytes) and, when the kubelet exposes it,
-        ``kubelet_volume_stats_used_bytes`` (PVC → used bytes).
-
-        Returns ``{(namespace, pod): {"request": bytes, "usage": bytes}}``.
-        This is best-effort: clusters without kube-state-metrics return ``{}``.
-        """
-        client = await self._get_client()
-        try:
-            mapping = await self._query_prometheus(client, "kube_pod_spec_volumes_persistentvolumeclaims_info")
-            requests = await self._query_prometheus(
-                client, "kube_persistentvolumeclaim_resource_requests_storage_bytes"
-            )
-            usage = await self._query_prometheus(client, "kubelet_volume_stats_used_bytes")
-        except Exception as e:
-            logger.warning("Failed to collect pod storage metrics from Prometheus: %s", e)
-            return {}
-
-        def _pvc_values(results: List[Dict[str, Any]]) -> Dict[str, float]:
-            values: Dict[str, float] = {}
-            for item in results:
-                metric = item.get("metric", {}) or {}
-                pvc = metric.get("persistentvolumeclaim")
-                value_str = item.get("value", [None, None])[1]
-                if not pvc or value_str is None:
-                    continue
-                try:
-                    values[pvc] = float(value_str)
-                except (TypeError, ValueError):
-                    continue
-            return values
-
-        request_by_pvc = _pvc_values(requests)
-        usage_by_pvc = _pvc_values(usage)
-
-        pod_storage: Dict[tuple, Dict[str, float]] = {}
-        for item in mapping:
-            metric = item.get("metric", {}) or {}
-            ns = metric.get("namespace")
-            pod = metric.get("pod")
-            pvc = metric.get("persistentvolumeclaim")
-            if not (ns and pod and pvc):
-                continue
-            entry = pod_storage.setdefault((ns, pod), {"request": 0.0, "usage": 0.0})
-            entry["request"] += request_by_pvc.get(pvc, 0.0)
-            entry["usage"] += usage_by_pvc.get(pvc, 0.0)
-        return pod_storage
 
     async def collect_range(
         self,

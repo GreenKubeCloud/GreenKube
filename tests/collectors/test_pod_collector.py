@@ -162,7 +162,7 @@ async def test_pod_collector_handles_missing_client(mock_get_api):
 
 
 @pytest.mark.asyncio
-async def test_pod_collector_extracts_owner_and_ephemeral_storage():
+async def test_pod_collector_extracts_owner():
     replica_set_owner = k8s.V1OwnerReference(
         api_version="apps/v1",
         kind="ReplicaSet",
@@ -206,7 +206,6 @@ async def test_pod_collector_extracts_owner_and_ephemeral_storage():
     assert len(metrics) == 1
     assert metrics[0].owner_kind == "Deployment"
     assert metrics[0].owner_name == "api"
-    assert metrics[0].ephemeral_storage_request == 1024**3
 
 
 def test_parse_storage_units():

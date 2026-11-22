@@ -222,12 +222,6 @@ class _MetricsTable:
         ]
         if self.pod_scope:
             columns += [
-                ("network_receive_bytes", "AVG(network_receive_bytes)"),
-                ("network_transmit_bytes", "AVG(network_transmit_bytes)"),
-                ("disk_read_bytes", "AVG(disk_read_bytes)"),
-                ("disk_write_bytes", "AVG(disk_write_bytes)"),
-                ("storage_request_bytes", "MAX(storage_request_bytes)"),
-                ("storage_usage_bytes", "MAX(storage_usage_bytes)"),
                 ("gpu_usage_millicores", "MAX(gpu_usage_millicores)"),
                 ("restart_count", "MAX(restart_count)"),
                 ("node", _mode("node", backend)),

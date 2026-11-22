@@ -260,8 +260,6 @@ All collectors are fully asynchronous and implement a common pattern.
 - **Metrics collected:**
   - CPU usage (cores) per pod/container
   - Memory usage (bytes) per pod
-  - Network I/O (bytes received/transmitted) per pod
-  - Disk I/O (bytes read/written) per pod
   - Pod restart counts
   - Node instance type labels
 - **Features:**
@@ -272,7 +270,7 @@ All collectors are fully asynchronous and implement a common pattern.
   - Kubernetes Metrics API container samples that fill the latest step of a pod measured only at pod level are stored with `usage_source = metrics_server` and the reason `metrics_api_point_sample` (COL-05), and scaled down to the pod cgroup value when they add up to more than it (cri-dockerd counts page cache in a container's working set); the rows are flagged `container_usage_exceeds_pod`
   - Range queries raise `PrometheusQueryError` when Prometheus is unreachable, so an outage is never stored as an empty window
   - TLS/authentication support (basic auth, bearer token)
-  - Concurrent query execution (8 queries via `asyncio.gather`)
+  - Concurrent query execution (the range queries of a chunk via `asyncio.gather`)
   - Robust error handling with detailed logging
 - **Implementation:** Uses `httpx.AsyncClient` for non-blocking HTTP requests
 - **Emits:** `PrometheusMetric` (aggregated result with all metric lists)
@@ -293,7 +291,6 @@ All collectors are fully asynchronous and implement a common pattern.
 - **Data collected:**
   - CPU requests (millicores)
   - Memory requests (bytes)
-  - Ephemeral storage requests (bytes)
   - Owner references (Deployment, StatefulSet, etc.)
 - **Implementation:** Async K8s API with label-based filtering
 - **Emits:** `List[PodMetric]`
@@ -459,7 +456,7 @@ Implementations:
 #### **CombinedMetricRepository**
 Stores final aggregated metrics (energy + carbon + cost + resources).
 
-Schema (33 columns):
+Main columns:
 - Core: pod_name, namespace, timestamp, duration_seconds
 - Energy: joules, co2e_grams, grid_intensity, pue
 - Cost: total_cost and its components cost_cpu, cost_ram, cost_storage, cost_network, cost_lb
@@ -467,9 +464,6 @@ Schema (33 columns):
 - Resources:
   - CPU: cpu_request, cpu_usage_millicores
   - Memory: memory_request, memory_usage_bytes
-  - Network: network_receive_bytes, network_transmit_bytes
-  - Disk: disk_read_bytes, disk_write_bytes
-  - Storage: storage_request_bytes, storage_usage_bytes, ephemeral_storage_request_bytes, ephemeral_storage_usage_bytes
   - GPU: gpu_usage_millicores
   - Restarts: restart_count
 - Metadata: node, node_instance_type, node_zone, emaps_zone, owner_kind, owner_name
@@ -665,7 +659,6 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      │   ├─ CPU and memory per container and per pod cgroup in one query
      │   │  (pod!="", container!="POD"): a pod's containers when it has any, else its
      │   │  pod cgroup counted once, per pod (mixed runtimes keep every pod, COL-09)
-     │   ├─ Network I/O per pod, disk I/O and ephemeral usage per container
      │   ├─ Restart counts and kube_pod_info (pod → node placement)
      │   ├─ kube_pod_status_phase{phase="Running"} (pods without a CPU sample)
      │   └─ any query error fails the window (never stored as "empty")
@@ -929,7 +922,7 @@ Controlled by `NORMALIZATION_GRANULARITY`:
 
 ### Concurrency
 - **Collectors:** All run concurrently via `asyncio.gather`
-- **Prometheus Queries:** 8 queries in parallel (CPU, mem, net rx/tx, disk r/w, restarts, nodes)
+- **Prometheus Queries:** the range queries of a chunk run in parallel (CPU, memory, memory peak, restarts, pod placement, running pods)
 - **Database Operations:** Connection pooling, batch inserts
 - **Historical Processing:** Day-sized chunks with explicit memory cleanup
 
@@ -1038,8 +1031,6 @@ The API liveness endpoint does not probe optional providers. Readiness is marked
 
 **Extended Metrics:**
 - GPU power consumption (NVIDIA DCGM)
-- Storage I/O per PVC
-- Network traffic per service
 - Custom metrics via PromQL
 
 **Enhanced Reporting:**

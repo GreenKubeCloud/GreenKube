@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from greenkube.collectors.promql import CONTAINER_FILTER, PromQLCatalog, parse_duration_seconds
+from greenkube.collectors.promql import PromQLCatalog, parse_duration_seconds
 from greenkube.core.config import Config
 
 
@@ -26,15 +26,11 @@ def test_container_scoped_expressions_exclude_pod_cgroup_and_pause_series():
     assert catalog.container_memory_working_set() == (
         'max(container_memory_working_set_bytes{container!="",container!="POD"}) by (namespace,pod,container,node)'
     )
-    for expression in (catalog.pod_disk_read(), catalog.pod_disk_write(), catalog.pod_ephemeral_storage_usage()):
-        assert CONTAINER_FILTER in expression
 
 
-def test_pod_scoped_and_kube_state_expressions_are_unfiltered_by_container():
+def test_kube_state_expressions_are_unfiltered_by_container():
     catalog = PromQLCatalog(step_seconds=300)
 
-    assert "container!=" not in catalog.pod_network_receive()
-    assert "container!=" not in catalog.pod_network_transmit()
     assert catalog.pod_restarts() == "sum(kube_pod_container_status_restarts_total) by (namespace,pod)"
     assert catalog.pod_node() == 'max(kube_pod_info{node!=""}) by (namespace,pod,node)'
     assert catalog.pod_cgroup_cpu_usage() == (
@@ -50,7 +46,7 @@ def test_extra_matchers_are_applied_to_every_selector():
 
     assert '{container!="",container!="POD",name!="",cluster="eu-1"}' in catalog.container_cpu_usage()
     assert '{container!="",container!="POD",name="",cluster="eu-1"}' in catalog.container_cpu_usage()
-    assert 'container_network_receive_bytes_total{cluster="eu-1"}' in catalog.pod_network_receive()
+    assert 'kube_pod_container_status_restarts_total{cluster="eu-1"}' in catalog.pod_restarts()
     assert 'kube_pod_info{node!="",cluster="eu-1"}' in catalog.pod_node()
 
 

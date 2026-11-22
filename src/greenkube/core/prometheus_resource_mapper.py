@@ -25,8 +25,4 @@ class PodResourceMaps:
     #: Usage source of containers whose usage did not come from the pod row's source (COL-05:
     #: ``metrics_server`` for Metrics API point samples), keyed like the container maps.
     container_usage_source_map: Dict[tuple, str] = field(default_factory=dict)
-    network_rx_map: Dict[tuple, float] = field(default_factory=dict)
-    network_tx_map: Dict[tuple, float] = field(default_factory=dict)
-    disk_read_map: Dict[tuple, float] = field(default_factory=dict)
-    disk_write_map: Dict[tuple, float] = field(default_factory=dict)
     restart_map: Dict[tuple, int] = field(default_factory=dict)

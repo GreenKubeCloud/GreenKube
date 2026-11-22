@@ -68,8 +68,8 @@ class HealthGateResult(BaseModel):
 class MeasuredLedgerInput(BaseModel):
     """Auditable, measured values used when attributing verified savings.
 
-    ``traffic_ratio`` is informational only: traffic normalization is disabled
-    until the load-driver counterfactual (C3) ships (BUG-27). ``before_*`` and
+    ``traffic_ratio`` is no longer written since network collection was removed
+    (B.4); it stays so that older ledger inputs still load. ``before_*`` and
     ``after_*`` rates are the claimed basis of the recommendation (its cost
     component or its share of an attribution group), not necessarily the whole
     workload.
