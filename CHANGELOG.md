@@ -388,6 +388,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - **CI: the promtool alert tests run on Linux runners.** Without a local promtool, `.github/scripts/promtool-check.sh` runs the Prometheus image, whose `nobody` user could not read the `mktemp -d` work directory (mode 0700); the directory and rule files are now world-readable.
 - The 500-pod scan acceptance test failed on the CI's Python 3.14 runner (344 MB peak RSS against 300 MB) although the scan itself grows by about 30 MB: the peak was mostly the fixed cost of the interpreter, imports and coverage tracer. The test now budgets the scan's own growth (peak minus the RSS once imports and the database connection are done, below 128 MB) and keeps a 512 MB absolute ceiling, well under the controller's 1 GiB limit. CI test shards now list failed and errored tests in the final summary (`-rfEs`).
 - The CI end-to-end loop installs OpenCost (chart 2.5.33, reading the kube-prometheus-stack Prometheus) and exports `OPENCOST_URL`. Without it every post-change row stayed priced `opencost_pending`, the verifier counted 0 trusted savings samples, and each verdict closed `inconclusive` (`insufficient_trusted_savings_samples (0 < 6)`).
+- The CI e2e Gitea token has the `write:issue` scope, so GreenKube can add labels and its status comment to the pull request (they failed with a 403 `read:issue` error).
 
 ### Security
 - Wildcard CORS is never combined with credentials; CORS is same-origin by default.
