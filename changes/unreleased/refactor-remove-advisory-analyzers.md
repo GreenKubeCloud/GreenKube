@@ -5,7 +5,9 @@
 - The scan no longer lists namespaces (the namespace metadata served only the idle-namespace, zombie and off-peak safety rules).
 - UI: the badges of the retired types, the Karpenter source badge and filter, and the capability filters of the removed analyzers.
 - The demo no longer seeds recommendations of the retired types.
+- Code that only served them: the Karpenter NodePool collector (`collectors/karpenter_collector.py`; the realization factor reads NodePools through the autoscaler collector), the per-node usage and hour-of-day CPU profile aggregations of the scan usage snapshot (two SQL queries fewer per scan), and the Impact Model workload deletion, replica schedule and node-pool consolidation projections. Stored `impact` objects of those kinds are kept as written.
 
 ### Changed
+- Collection coverage (IMP-04): a raw sample that crosses an hour boundary now counts in both hours, so a scan run a few minutes past the hour no longer sees the start of the current hour as a collection gap (it lowered the coverage of short-lived workloads by up to 4 minutes and raised their projection by up to 3.5 %).
 - The projected opportunity (`opportunity` of `GET /recommendations/savings`) sums the request changes and asset deletions: the overlap rules for namespace deletions, off-peak schedules, zombie deletions and node removals had nothing left to apply to.
 - The thresholds `ZOMBIE_*`, `AUTOSCALING_*`, `OFF_PEAK_*`, `IDLE_NAMESPACE_ENERGY_THRESHOLD`, `CARBON_AWARE_THRESHOLD` and `NODE_UTILIZATION_THRESHOLD` now only feed the sustainability score.

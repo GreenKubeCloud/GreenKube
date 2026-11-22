@@ -57,9 +57,6 @@ class OptimizationContext:
     _target_series_cache: Optional[Dict[Tuple[str, str, str], List[CombinedMetric]]] = field(
         default=None, init=False, repr=False, compare=False
     )
-    _pod_series_cache: Optional[Dict[Tuple[str, str, str], List[CombinedMetric]]] = field(
-        default=None, init=False, repr=False, compare=False
-    )
 
     def target_series(self) -> Dict[Tuple[str, str, str], List[CombinedMetric]]:
         """Returns metrics grouped by stable workload owner, computed once.
@@ -76,20 +73,6 @@ class OptimizationContext:
             target_metrics.extend(self.container_metrics)
             self._target_series_cache = group_by_recommendation_target(target_metrics)
         return self._target_series_cache
-
-    def pod_series(self) -> Dict[Tuple[str, str, str], List[CombinedMetric]]:
-        """Returns the pod-level rows (never container rows) grouped by target, computed once."""
-        if self._pod_series_cache is None:
-            from greenkube.core.optimization.targeting import group_by_recommendation_target
-
-            self._pod_series_cache = group_by_recommendation_target(
-                [metric for metric in self.metrics if not metric.container_name]
-            )
-        return self._pod_series_cache
-
-    def workload_rows(self, target: TargetKey) -> List[CombinedMetric]:
-        """Rows that price a whole-workload change (deletion, schedule): pod level when available."""
-        return self.pod_series().get(target) or self.target_series().get(target, [])
 
     def container_rows(self, target: TargetKey, container: Optional[str]) -> List[CombinedMetric]:
         """Rows that price a request change of one container (``None`` = pod-level aggregate)."""

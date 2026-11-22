@@ -288,42 +288,6 @@ class TestProjection:
         )
         assert context is not None and context.pools[CLUSTER_POOL].factor == pytest.approx(0.8)
 
-    def test_deletions_on_fixed_nodes_save_only_the_usage_based_terms(self):
-        # IMP-05: deleting pods releases reserved capacity exactly like cutting their requests to zero.
-        set_realization_context(
-            resolve_realization(RealizationInputs(nodes=[NodeObservation("k1"), NodeObservation("c1")]), NOW)
-        )
-        projector, rows = self._projector()
-        delta = projector.workload_deletion(projector.workload_ref("prod", "Deployment", "api"), rows)
-        assert delta.allocated_cost_annual > 0
-        assert delta.realization_factor == 0.0
-        assert delta.expected_billable_cost_annual == 0.0
-        assert delta.assumptions["realization_factor_source"] == SOURCE_CONTEXT
-        breakdown = delta.co2e_breakdown_annual_g
-        assert delta.co2e_expected_annual_g == pytest.approx(breakdown.dynamic_operational + breakdown.gpu_operational)
-        assert delta.co2e_expected_annual_g > 0
-        assert delta.co2e_measurable_expected_annual_g == pytest.approx(breakdown.dynamic_operational)
-
-    def test_deletions_with_cluster_autoscaler_keep_per_asset_costs_whole(self):
-        from greenkube.impact.types import ChangeKind, CostBreakdown
-
-        set_realization_context(
-            resolve_realization(
-                RealizationInputs(
-                    nodes=[NodeObservation("k1"), NodeObservation("c1")],
-                    cluster_autoscaler=ClusterAutoscalerObservation(CA_TEXT),
-                ),
-                NOW,
-            )
-        )
-        projector, rows = self._projector()
-        delta = projector.workload_deletion(projector.workload_ref("prod", "Deployment", "api"), rows)
-        assert delta.kind is ChangeKind.WORKLOAD_DELETION
-        cost: CostBreakdown = delta.cost_breakdown_annual
-        expected = 0.6 * (cost.cpu + cost.ram + cost.gpu + cost.other) + cost.storage + cost.lb + cost.network
-        assert delta.realization_factor == pytest.approx(0.6)
-        assert delta.expected_billable_cost_annual == pytest.approx(expected)
-
 
 class _FakeCollector:
     def __init__(self, inputs):

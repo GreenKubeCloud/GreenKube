@@ -17,15 +17,12 @@ from greenkube.impact import (
     CostSource,
     ImpactProjector,
     NodeImpactProfile,
-    NodePoolChange,
     NodePoolContext,
     PricingCatalog,
-    ReplicaScheduleChange,
     ReservationAwareImpactModel,
     ResourceSample,
     UnitPrices,
     WorkloadBaseline,
-    WorkloadDeletion,
     WorkloadRef,
     carbon_value,
 )
@@ -197,7 +194,10 @@ class TestContainerRequestProperties:
         )
 
         combined = MODEL.project(baseline, change, pool)
-        allocated = MODEL.project(baseline, WorkloadDeletion(), pool)
+        # A full cut releases the whole reservation: the container's allocated cost (BUG-15).
+        allocated = MODEL.project(
+            baseline, ContainerResourceChange(cpu_request_cores=(cpu_req, 0), mem_request_gib=(mem_req, 0)), pool
+        )
         cpu_only = MODEL.project(baseline, ContainerResourceChange(cpu_request_cores=change.cpu_request_cores), pool)
         mem_only = MODEL.project(baseline, ContainerResourceChange(mem_request_gib=change.mem_request_gib), pool)
 
@@ -345,12 +345,11 @@ class TestContainerRequestProperties:
         assert prices["detail"] == "observed_components"
         assert prices["cpu_core_hour"] == pytest.approx(0.08 / (2 * 2))
         assert prices["ram_gib_hour"] == pytest.approx(0.04 / (8 * 2))
-        # Bounded by the observed cost (BUG-15): a full cut never projects more than a deletion.
+        # Bounded by the observed cost (BUG-15): a full cut never projects more than the 0.12 observed.
         cut = MODEL.project(
             _baseline([sample], 2.0), ContainerResourceChange(cpu_request_cores=(2, 0), mem_request_gib=(8, 0)), pool
         )
-        deletion = MODEL.project(_baseline([sample], 2.0), WorkloadDeletion(), pool)
-        assert cut.allocated_cost_annual <= deletion.allocated_cost_annual + 1e-9
+        assert cut.allocated_cost_annual <= 0.12 * HOURS_PER_YEAR / 2.0 + 1e-9
         assert "unsplit_cost_hours_share" not in delta.assumptions
         # Nothing was apportioned: the observed-components confidence is kept.
         assert delta.confidence == pytest.approx(0.9)
@@ -367,8 +366,9 @@ class TestContainerRequestProperties:
         node, pool = _profile()
         eur_node = replace(node, prices=replace(node.prices, currency="EUR"))
         pool = replace(pool, nodes={"n1": eur_node}, default_node=eur_node)
-        observed = MODEL.project(_baseline([_sample(2, 0.1, 8, 1, cost_total=0.5)], 1.0), WorkloadDeletion(), pool)
-        modeled = MODEL.project(_baseline([_sample(2, 0.1, 8, 1)], 1.0), WorkloadDeletion(), pool)
+        cut = ContainerResourceChange(cpu_request_cores=(2, 1))
+        observed = MODEL.project(_baseline([_sample(2, 0.1, 8, 1, cost_total=0.5)], 1.0), cut, pool)
+        modeled = MODEL.project(_baseline([_sample(2, 0.1, 8, 1)], 1.0), cut, pool)
         assert observed.currency == "USD"
         assert modeled.currency == "EUR"
 
@@ -376,10 +376,11 @@ class TestContainerRequestProperties:
         """A 4-core reservation on a 1-core profile never holds more than the whole node's idle and embodied."""
         node, pool = _profile(cores=1.0)
         samples = [_sample(4, 0.1, 0, None)]
-        deletion = MODEL.project(_baseline(samples, 1.0), WorkloadDeletion(), pool)
+        full = MODEL.project(_baseline(samples, 1.0), ContainerResourceChange(cpu_request_cores=(4, 0)), pool)
         idle_g_per_hour = node.idle_watts / 1000 * node.pue * node.grid_intensity_g_per_kwh
-        assert deletion.co2e_breakdown_annual_g.idle_operational == pytest.approx(idle_g_per_hour * HOURS_PER_YEAR)
-        assert deletion.co2e_breakdown_annual_g.embodied == pytest.approx(node.embodied_g_per_hour * HOURS_PER_YEAR)
+        # Capped at the whole 1-core node, less the 0.1 core still in use (a cut never goes below usage).
+        assert full.co2e_breakdown_annual_g.idle_operational == pytest.approx(0.9 * idle_g_per_hour * HOURS_PER_YEAR)
+        assert full.co2e_breakdown_annual_g.embodied == pytest.approx(0.9 * node.embodied_g_per_hour * HOURS_PER_YEAR)
 
         cut = MODEL.project(_baseline(samples, 1.0), ContainerResourceChange(cpu_request_cores=(4, 0.5)), pool)
         # Only the reservation below the node size moves: from the whole node to half of it.
@@ -426,46 +427,6 @@ class TestContainerRequestProperties:
         assert payload["kind"] == "container_resources"
         assert payload["assumptions"]["unit_prices"][0]["source"] == "pricing_catalog"
         assert payload["assumptions"]["change"] == {"cpu_request_cores": [2, 1]}
-
-
-class TestOtherChanges:
-    def test_workload_deletion_uses_observed_allocated_cost_when_known(self):
-        _, pool = _profile()
-        sample = ResourceSample(
-            ref=WorkloadRef("c", "ns", "Pod", "zombie"),
-            hours=1.0,
-            cpu_request_cores=1.0,
-            cpu_usage_cores=0.0,
-            node="n1",
-            observed_cost_total=0.5,
-            observed_cost_cpu=0.3,
-            observed_cost_ram=0.1,
-        )
-        delta = MODEL.project(_baseline([sample], 24.0), WorkloadDeletion(), pool)
-        annual = HOURS_PER_YEAR / 24.0
-        assert delta.allocated_cost_annual == pytest.approx(0.5 * annual)
-        assert delta.cost_breakdown_annual.cpu == pytest.approx(0.3 * annual)
-        assert delta.cost_breakdown_annual.other == pytest.approx(0.1 * annual)
-        assert delta.realization_factor == 1.0
-
-    def test_off_peak_schedule_removes_only_idle_hours(self):
-        _, pool = _profile(realization=0.5)
-        samples = [replace(_sample(1, 0.5, 2, 1), timestamp=START + timedelta(hours=hour)) for hour in range(24)]
-        baseline = _baseline(samples, 24.0)
-        delta = MODEL.project(baseline, ReplicaScheduleChange(frozenset({0, 1, 2, 3})), pool)
-        full = MODEL.project(baseline, WorkloadDeletion(), pool)
-        assert delta.allocated_cost_annual == pytest.approx(full.allocated_cost_annual * 4 / 24)
-        assert delta.realization_factor == 0.5
-        assert delta.capacity_released.replica_hours == pytest.approx(4 * HOURS_PER_YEAR / 24)
-
-    def test_node_removal_prices_whole_nodes(self):
-        node, pool = _profile()
-        delta = MODEL.project(_baseline([]), NodePoolChange(("n1",)), pool)
-        assert delta.allocated_cost_annual == pytest.approx(node.hourly_price * HOURS_PER_YEAR)
-        assert delta.capacity_released.node_hours == HOURS_PER_YEAR
-        assert delta.realization_factor == 1.0
-        assert delta.co2e_breakdown_annual_g.dynamic_operational == 0.0
-        assert delta.co2e_breakdown_annual_g.embodied == pytest.approx(10.0 * HOURS_PER_YEAR)
 
 
 # --------------------------------------------------------------------------- #
@@ -615,14 +576,10 @@ class TestBug15OpenCostTotalOnly:
         ]
         assert {rec.type for rec in recs} == {RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY}
 
-        projector = ImpactProjector.for_context(context)
-        deletion = projector.workload_deletion(projector.workload_ref("prod", "Deployment", "api", "api"), rows)
         observed_annual = sum(row.total_cost for row in rows) * HOURS_PER_YEAR  # 12 x 5 min = the 1 h window
         projected = sum(_savings(rec) for rec in recs)
 
-        assert deletion.allocated_cost_annual == pytest.approx(observed_annual)
         assert projected <= observed_annual + 1e-9
-        assert projected <= deletion.allocated_cost_annual + 1e-9
         for rec in recs:
             (prices,) = _impact(rec)["assumptions"]["unit_prices"]
             assert (prices["source"], prices["detail"]) == ("opencost", "observed_total_apportioned")

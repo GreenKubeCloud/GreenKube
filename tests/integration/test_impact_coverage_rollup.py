@@ -28,6 +28,8 @@ from greenkube.storage.base_workload_usage_repository import create_workload_usa
 GIB = 1024**3
 LOOKBACK_HOURS = 14 * 24
 HOURLY_COST = 0.05
+#: The projected change: a CPU request cut (millicores, current -> proposed).
+CUT = (500, 250)
 SIDE = {"node_infos": [], "hpa_targets": set(), "persistent_volumes": [], "load_balancers": []}
 
 
@@ -134,17 +136,22 @@ async def test_young_workload_is_annualized_over_its_observed_hours(database):
 
     assert context.analysis_window_seconds == pytest.approx(LOOKBACK_HOURS * 3600.0)
     projector = ImpactProjector.for_context(context)
-    young = projector.workload_deletion(
-        projector.workload_ref("apps", "Deployment", "young"), context.workload_rows(("apps", "Deployment", "young"))
+    young = projector.container_resources(
+        projector.workload_ref("apps", "Deployment", "young"),
+        context.container_rows(("apps", "Deployment", "young"), None),
+        cpu_millicores=CUT,
     )
-    old = projector.workload_deletion(
-        projector.workload_ref("apps", "Deployment", "old"), context.workload_rows(("apps", "Deployment", "old"))
+    old = projector.container_resources(
+        projector.workload_ref("apps", "Deployment", "old"),
+        context.container_rows(("apps", "Deployment", "old"), None),
+        cpu_millicores=CUT,
     )
 
-    run_rate = HOURLY_COST * HOURS_PER_YEAR  # 438 per year for both workloads
-    # Before the fix the young workload projected 2 x 0.05 x 8760 / 336 = 2.61 per year.
-    assert young.allocated_cost_annual == pytest.approx(run_rate)
-    assert old.allocated_cost_annual == pytest.approx(run_rate)
+    # Same run-rate, same projection. Before the fix the young workload's two hours were
+    # annualized as if spread over the 336 h lookback (168x lower).
+    assert young.allocated_cost_annual > 0
+    assert young.allocated_cost_annual == pytest.approx(old.allocated_cost_annual)
+    assert young.assumptions["annualization_factor"] == pytest.approx(HOURS_PER_YEAR / 2.0)
     assert young.assumptions["coverage_basis"] == "target_summary"
     assert young.assumptions["coverage_hours"] == pytest.approx(2.0)
     assert young.assumptions["short_coverage"] is True

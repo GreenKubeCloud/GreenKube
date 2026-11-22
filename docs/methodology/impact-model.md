@@ -246,7 +246,7 @@ No observed cost:             p_cpu(s) = p_cpu(node)             p_ram(s) = p_ra
 - The second case is OpenCost's apportioning applied to the container's total. It is the common case today: OpenCost metric rows carry `total_cost` only. When one component is observed and the other is not, only the unsplit remainder of the total is apportioned to the missing one.
 - A component split larger than the total is scaled down to the total.
 - A baseline row aggregates many hours. When only some of them carry the CPU/RAM split (after an upgrade from 0.3.x, the hours re-aggregated from 0.3.x rows carry `total_cost` only), `cost_cpu` and `cost_ram` are the costs of the split hours `h_split`, and the total of the other hours `total_unsplit` is apportioned over their reserved quantities like the second case: `p_cpu(s) = (cost_cpu_s + total_unsplit × w'_cpu / (w'_cpu + w'_mem)) / q_cpu`, with `w'` computed over the unsplit hours only. The single upgrade hour holds both kinds of 5-minute rows: its hourly rollups (`combined_metrics_hourly`, `container_metrics_hourly`, `node_idle_metrics_hourly`, `workload_usage_hourly`) keep its `total_cost` and store NULL `cost_cpu` and `cost_ram`, so it is an unsplit hour. Summing the components there would cover part of the hour while the hour counted as split, and dilute the observed rates. Hours of the row whose observed total is zero count as zero cost (OpenCost said they cost nothing), in neither part: they add reserved quantity and no cost, so the projection stays bounded by the observed cost (BUG-15). When a non-zero unsplit total was apportioned, `detail` is `observed_components_partly_apportioned` with confidence at most 0.8, and `assumptions.unsplit_cost_hours_share` gives the share of the observed hours whose positive cost had no split (these hours and the samples with a total only).
-- In both observed cases, the cost of the sample's CPU and RAM reservation is at most its observed total. A CPU cut and a memory cut on the same container therefore never project more than the container's observed cost, which is also the [workload deletion](#workload-deletion) projection of that container (BUG-15).
+- In both observed cases, the cost of the sample's CPU and RAM reservation is at most its observed total. A CPU cut and a memory cut on the same container therefore never project more than the container's observed cost (BUG-15).
 - Rows without cost have `total_cost = 0` (`DEFAULT_COST`), and negative OpenCost costs are ignored, so these samples use the node prices.
 - A `cost_source` label outside the known sources (for example `mixed` on hourly aggregates) is treated as `opencost` and kept in `assumptions.observed_cost_sources` (and in the node price `detail`, e.g. `observed:mixed`).
 
@@ -304,42 +304,18 @@ share_s         = min(max(current, usage_s), A) − min(max(proposed, usage_s), 
 - Request cuts do not change usage, so **dynamic** power is unchanged. Projected CO₂e is only the idle, memory and embodied share released (BUG-16): a memory cut releases memory power only (`co2e_breakdown_annual_g.memory_operational`).
 - A target below observed usage releases capacity only down to that usage.
 
-### Workload deletion
-
-No built-in recommendation projects this change kind since the zombie-pod and idle-namespace analyzers were removed in 0.4; the model keeps it for the stored projections.
-
-
-- Cost: each sample's observed allocated cost when it has one (OpenCost `totalCost`, split into components when available). Otherwise the modeled reservation cost.
-- CO₂e: the sample's whole allocated share, that is idle, memory and embodied by reservation, dynamic by usage and its attributed GPU power. The reservation shares are capped at the node's allocatable cores and memory and the usage at its capacity, so one workload never carries more than the whole node.
-- Realization factor (model 3.0.0, IMP-05): the pool factor of the nodes the samples ran on, as for a request cut. Deleting pods releases reserved capacity exactly like cutting their requests to zero: the bill only falls when a node goes away. Applied per part:
-
-```text
-expected_billable_cost_annual = factor × (cpu + ram + gpu + other) + (storage + lb + network)   # per-asset costs are billed whole
-co2e_expected_annual_g        = factor × (idle + memory + embodied) + (dynamic + gpu)           # usage-based power is no longer consumed
-```
-
-  On fixed nodes (factor 0) a deletion's expected billable saving is 0 (or its per-asset costs) and its expected CO₂e is the dynamic and GPU part only. A request cut to the usage level and a deletion of the same idle workload differ only by those usage-based terms.
-
 ### Asset deletion (orphaned PersistentVolumes and LoadBalancers)
 
 - Cost: the asset's current allocated rate. This is the OpenCost cost when reported, otherwise `STORAGE_COST_PER_GIB_MONTH` or `LOAD_BALANCER_COST_PER_MONTH` (recorded as `custom_rate`). GreenKube reads it from one `/allocation/compute` query over the last 7 days (`aggregate=namespace`, `accumulate=true`): a volume's cost is the sum of `cost + adjustment` of its entry in each allocation's `pvs` map (key `cluster=<id>:name=<pv>`, `__unmounted__` included), a LoadBalancer's cost the same sum in `lbAllocations`, matched on its exact `namespace/name`. The cost is annualized over the hours the asset existed in the window (`byteHours / capacity` for a volume, `hours` for a load balancer), not over the 7 days. An asset OpenCost knows at cost 0 is an observed zero: no cost saving, `cost_source` `opencost`, never the flat default (COST-03). Recommendation texts print the configured currency code.
 - Realization factor: 1.
 - CO₂e: **not modeled** (`co2e_modeled: false`), so `potential_savings_co2e_grams` stays empty.
 
-### Replica and schedule changes
+### Removed change kinds
 
-No built-in recommendation projects this change kind since the off-peak analyzer was removed in 0.4. Samples whose UTC hour falls in the scale-to-zero window are removed, priced like a workload deletion. The realization factor comes from the pool context, because replicas that leave a node only save money when the node goes away.
-
-### Node pool consolidation
-
-No built-in recommendation projects this change kind since the Karpenter NodePool heuristic was removed in 0.4. With `n` nodes, CPU request utilization `u_cpu` and memory request utilization `u_mem` (against allocatable), it still needs `max(1, ceil(n × max(u_cpu, u_mem)))` nodes. The others are removable, and the model projects removing the cheapest ones (a conservative choice). When no node can be removed, the recommendation has no projection.
-
-```text
-Δcost = Σ_removed (cores × p_cpu + GiB × p_ram) × 8760
-ΔCO₂e = Σ_removed ((P_min + P_mem + P_gpu_idle) / 1000 × PUE × intensity + M_h) × 8760     # dynamic power moves to other nodes
-```
-
-The realization factor is 1, because the consolidation is the action itself.
+The workload deletion, replica schedule and node-pool consolidation projections were removed in 0.4 with the
+advisory analyzers that produced them (zombie pods, idle namespaces, off-peak scaling, the Karpenter NodePool
+heuristic). Projections already stored keep their `impact` object (`kind` `workload_deletion`, `replica_schedule`
+or `node_pool`) as written; nothing recomputes them.
 
 ## Released capacity (WP-08.1)
 
@@ -386,7 +362,7 @@ The controller reads them from its collection cycle, at most every 10 minutes, i
 - Each resolved context is stored (table `realization_context`, migration 0141, IMP-12). A recommendation scan in a process that has not observed the cluster yet (after a restart, Prometheus down) restores the stored context when it is younger than 24 hours; its pools' reasons say it was restored. The next refresh still reads the cluster.
 - Before the controller has observed the cluster and without a stored context (or outside a cluster), the factor is **1.0** with `realization_factor_source: realization_context:unobserved`, so expected savings equal allocated savings, as in model 1.0.0.
 - When the Cluster Autoscaler status or the Karpenter NodePools cannot be read (RBAC, timeout; a missing ConfigMap or CRD is not an error), the affected pools are never treated as "no autoscaler": they keep their previous observation, or the unobserved factor 1.0 before any, and the reason says the input could not be read.
-- Workload deletions take the pool factor for their reserved parts (model 3.0.0, see [Workload deletion](#workload-deletion)); asset deletions (orphaned PersistentVolumes and LoadBalancers, billed per asset) keep a factor of 1, and node-pool consolidation keeps 1 when the consolidation is the action itself.
+- Asset deletions (orphaned PersistentVolumes and LoadBalancers, billed per asset) keep a factor of 1.
 
 ## Carbon price and value
 
