@@ -334,3 +334,56 @@ async def test_node_prices_are_re_read_when_a_node_had_no_price_yet() -> None:
             second = await collector.collect_range(NOW + timedelta(minutes=1), NOW + timedelta(minutes=2))
     assert [metric.source for metric in first + second] == ["none", "opencost_derived"]
     assert answers == []
+
+
+def _node_answers_client(answers: list[dict]):
+    client = AsyncMock()
+    client.is_closed = False
+
+    async def get(url, params=None):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        if (params or {}).get("aggregate") == "node":
+            response.json.return_value = {"data": [answers.pop(0)]}
+        else:
+            response.json.return_value = {"data": [{"greenkube-e2e-apps/prod-lb-backend": small_pod()}]}
+        return response
+
+    client.get.side_effect = get
+    return client
+
+
+@pytest.mark.asyncio
+async def test_a_node_without_a_ram_price_yet_is_re_read_within_the_hour() -> None:
+    """A fresh OpenCost: the node's CPU cost is precise but its RAM cost is not yet (e2e, 2026-11-22).
+
+    The partial price is not kept for the hour: every small pod would stay
+    untrusted until the next hour. It is reused for a few minutes, then re-read.
+    """
+    partial = {**NODE_ALLOCATION, "ramCost": 0.00061}
+    answers = [{"minikube": partial}, {"minikube": NODE_ALLOCATION}]
+    client = _node_answers_client(answers)
+    with patch("greenkube.collectors.opencost_collector.get_async_http_client", return_value=client):
+        collector = OpenCostCollector()
+        with patch.object(collector, "_resolve_url", AsyncMock(return_value="http://opencost/allocation/compute")):
+            first = await collector.collect_range(NOW, NOW + timedelta(minutes=1))
+            soon = await collector.collect_range(NOW + timedelta(minutes=1), NOW + timedelta(minutes=2))
+            later = await collector.collect_range(NOW + timedelta(minutes=6), NOW + timedelta(minutes=7))
+    assert node_unit_prices({"minikube": partial})["minikube"].ram_byte_hour is None
+    assert [metric.source for metric in first + soon + later] == ["none", "none", "opencost_derived"]
+    assert answers == []
+
+
+@pytest.mark.asyncio
+async def test_complete_node_prices_are_still_read_once_per_hour() -> None:
+    answers = [{"minikube": NODE_ALLOCATION}]
+    client = _node_answers_client(answers)
+    with patch("greenkube.collectors.opencost_collector.get_async_http_client", return_value=client):
+        collector = OpenCostCollector()
+        with patch.object(collector, "_resolve_url", AsyncMock(return_value="http://opencost/allocation/compute")):
+            for minute in (0, 6, 12):
+                metrics = await collector.collect_range(
+                    NOW + timedelta(minutes=minute), NOW + timedelta(minutes=minute + 1)
+                )
+                assert [metric.source for metric in metrics] == ["opencost_derived"]
+    assert answers == []

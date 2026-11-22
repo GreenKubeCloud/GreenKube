@@ -27,6 +27,10 @@ set -euo pipefail
 : "${FLUX_VERSION:=v2.9.6}"
 : "${GITEA_CHART_VERSION:=12.7.0}"
 : "${OPENCOST_VERSION:=2.5.33}"
+# Runs that wait for a measurement verdict (E2E_WAIT_VERDICT=1, the default)
+# also wait, at the end, until OpenCost has a precise RAM price for the node.
+: "${E2E_WAIT_VERDICT:=1}"
+: "${OPENCOST_PRICE_TIMEOUT:=900}"
 : "${E2E_GITEA_TOKEN_FILE:=${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gitea-token}"
 GITEA_ADMIN=greenkube
 
@@ -147,6 +151,31 @@ token="$(printf 'machine 127.0.0.1 login %s password %s\n' "${GITEA_ADMIN}" "${a
 [[ -n "${token}" && "${token}" != "null" ]] || die "Gitea did not return a token."
 umask 077
 printf '%s' "${token}" >"${E2E_GITEA_TOKEN_FILE}"
+
+# GreenKube rebuilds sub-precision pod costs from OpenCost's node unit prices,
+# which need a node cost above 0.001 over OpenCost's history: about ten minutes
+# after OpenCost starts for the RAM price. Rows collected before that stay
+# untrusted, and a baseline made of them can never decide a verdict.
+if [[ "${E2E_WAIT_VERDICT}" == "1" ]]; then
+  log "Waiting for a precise OpenCost node RAM price (up to ${OPENCOST_PRICE_TIMEOUT}s)"
+  kubectl -n opencost port-forward svc/opencost 33003:9003 >/dev/null 2>&1 &
+  oc_pid=$!
+  deadline=$((SECONDS + OPENCOST_PRICE_TIMEOUT))
+  ram_cost=0
+  while ((SECONDS < deadline)); do
+    end_ts=$(($(date +%s) - 60))
+    ram_cost="$(curl -fsS --max-time 10 \
+      "http://127.0.0.1:33003/allocation/compute?window=$((end_ts - 86400)),${end_ts}&aggregate=node&accumulate=true&includeIdle=false" \
+      2>/dev/null | jq -r '[.data[0][]? | select(.properties.node != null) | .ramCost // 0] | min // 0' 2>/dev/null || echo 0)"
+    if awk -v v="${ram_cost}" 'BEGIN { exit !(v >= 0.001) }'; then
+      break
+    fi
+    sleep 20
+  done
+  kill "${oc_pid}" >/dev/null 2>&1 || true
+  awk -v v="${ram_cost}" 'BEGIN { exit !(v >= 0.001) }' ||
+    log "OpenCost node RAM cost is still ${ram_cost} (< 0.001); early rows may stay untrusted."
+fi
 
 prometheus_url="http://kps-prometheus.monitoring.svc.cluster.local:9090"
 opencost_url="http://opencost.opencost.svc.cluster.local:9003"
