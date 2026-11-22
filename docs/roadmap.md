@@ -1,6 +1,6 @@
 # GreenKube roadmap
 
-> **Revision 3, updated 2026-11-21.** Baseline: local `dev` after the phase A, A.9 and phase D (collection, measurement and impact, ledger) merges (not pushed; origin `dev` is still `82b3bee1`).
+> **Revision 3, updated 2026-11-22.** Baseline: local `dev` after the phase A, A.9, phase B (B.1, B.3, B.4, B.7) and phase D (collection, measurement and impact, ledger) merges (origin `dev` at `6ff0314f`; later commits not pushed yet).
 > **Audience:** the maintainer, contributors and coding agents. Each task says what to do, where, and how to prove it is done.
 > **Inputs:**
 > - the data-quality audit, [`docs/reviews/data-quality-audit.md`](reviews/data-quality-audit.md): mechanism, evidence and fix of every finding cited here;
@@ -33,6 +33,8 @@
   - static pods, eligibility, singletons and the small items (F-04 to F-10);
   - the two stopped branches, rollups and reads (WP-05) and energy and carbon (WP-04).
 - **A.9 follow-ups:** test thread leak, Bearer key throttling, idle share exposure, impact follow-ups, compressor lock timeout, closed-database errors.
+- **Phase B (section 5):** advisory analyzers, connectors and the chart CronJobs, unused dimensions, the sustainability score and the large Grafana dashboard removed; single consensus policy; trimmed Prometheus exposition.
+- **CI:** Python tests in balanced shards with a combined coverage gate; frontend on SvelteKit 3, npm audit clean.
 - **Phase D, first three lanes (section 7):** collection, measurement and impact, and the ledger (reproducible accruals, clock-skew refusal, materialized totals, keyed chain with sequence key boundaries and key rotation). What remains is listed in section 7.
 
 **Field test (section 4):** the issues found on 2026-11-16 are fixed on `dev`, but not yet re-tested on the field cluster. Follow-ups found while fixing them are listed in A.9.
@@ -117,14 +119,14 @@ Everything else is either a dimension of those numbers (cost, carbon, capacity),
 | Pods | 2 by default: GreenKube and PostgreSQL. The renderer runs only while rendering. |
 | CPU | under 100m averaged over a day; requests 100m in total for GreenKube |
 | Memory | under 300 MiB resident for GreenKube; PostgreSQL under 256 MiB |
-| Database size | under 2 GB steady state at 500 pods with the 14-day raw window, plus under 1 GB per year of hourly history (to confirm with the first C.1 run) |
-| Prometheus load | at most 6 range queries per collection cycle, step 5 minutes |
+| Database size | under 2 GB steady state at 500 pods, plus under 1 GB per year of history (measured 2026-11-22: about 17.8 GB after a year today; about 2.2 GB with the C.3 levers) |
+| Prometheus load | at most 6 range queries per collection cycle, step 5 minutes (11 after B.4, 16 before); measured in samples per cycle, not only queries |
 | Scan | one scan of 500 workloads under 30 s and under 150 MiB extra memory |
 
 **Levers, in order of expected gain** (tasks in phase C):
 1. **Store less, without losing useful detail** (C.3). Lightness must not come from aggregations too coarse to be useful: rightsizing needs per-container percentiles at the collection step, and measurement needs per-pod cost and CO2e. So the granularity stays, and the footprint comes from:
-   - keeping raw 5-minute rows exactly as long as the rightsizing lookback needs them (14 days), so percentiles are computed on raw samples, not on hourly maxima (ROL-04);
-   - keeping per-pod and per-container hourly rows with a bounded retention (default 400 days, enough for a year-over-year comparison), and workload-hour and node-hour rows for long-term history;
+   - keeping the raw 5-minute samples of the 14-day rightsizing lookback as small per-hour arrays, so percentiles are computed on raw samples, not on hourly maxima (ROL-04), with 2 days of raw rows;
+   - keeping per-pod and per-container hourly rows with a bounded retention (D8), and workload-hour and node-hour rows for long-term history;
    - narrower rows (the dimensions of section 2.1 go, unused columns go) and PostgreSQL time partitioning, so retention drops a partition instead of deleting rows.
 2. **Run less** (C.2): one GreenKube process by default (API and controller loops together, single replica). The renderer sandbox becomes an on-demand Kubernetes Job. Loop intervals are relaxed (discovery every 5 minutes, scans every 6 hours).
 3. **Query less** (C.3): fewer PromQL queries per cycle (the removed dimensions go), and reads served by the coarsest table that still answers the question.
@@ -179,6 +181,8 @@ Every surprise becomes an issue in this roadmap. **This is the release gate of p
 - **Cross-repository Git charts (lane: gitops):** blocked with a clear reason; planning them (chart in one repository, values in another) is a feature to design.
 
 ## 5. Phase B: cut the scope
+
+**Status on 2026-11-22.** B.1, B.3, B.4 and B.7 are merged into `dev`, each reviewed independently and gated on SQLite and PostgreSQL (about 15,000 lines removed). B.2 (orphan hardening) and B.6 (legacy verifier, after C.5) are open. Removed settings are accepted and ignored for one release with one start warning (`REMOVED_SETTINGS`, `.env` included); columns of removed dimensions are kept and marked deprecated (migration 0320), to be dropped after a release. Both websites and the Grafana.com dashboard ("GreenKube Operations", `dashboards/README.md`) are aligned locally, not published.
 
 ### B.0 Removal procedure (applies to every B task)
 1. **Code:** remove the source module, its registry entries, API routes, UI pages and tests in one branch per area.
@@ -267,14 +271,26 @@ Kept because it is cheap, simple and gives an immediate saving. It is the highes
 
 ### C.3 Bounded storage at useful granularity (lane: storage and measurement; largest task, start with a design note)
 Lightness must not come from aggregations too coarse to be useful. The granularity stays; the volume is bounded.
-- **Tiers:**
-  - **raw** (`combined_metrics`, `container_metrics`, `node_idle_metrics`, 5-minute step): kept for the rightsizing lookback, 14 days by default (`METRICS_RAW_RETENTION_DAYS`, never below the lookback; a start-up check refuses a lower value). Rightsizing percentiles are computed on these raw samples, not on hourly maxima (ROL-04);
-  - **hourly per pod and per container** (the current hourly tables, with the WP-05 fixes): bounded retention, default 400 days, instead of forever;
-  - **hourly per workload** (`workload_usage_hourly`) and **hourly per node** (new, keeps the idle share, ROL-07): long-term history, kept as long as the ledger needs them.
-- **Footprint levers:**
-  - PostgreSQL range partitioning by day (raw) and by month (hourly), so retention drops a partition instead of running large `DELETE`s, and vacuum stays cheap;
-  - narrower rows: the dimensions removed by B.4 go, and the hourly tables keep only the columns a read path uses (STO-14);
-  - each read is served by the coarsest tier that answers it (UI ranges over 14 days read hourly, the ledger reads workload-hours).
+- **Measured baseline (2026-11-22, synthetic 10 to 5,000 pods on PostgreSQL, report in the maintainer's audit workspace `perf/resource-analysis.md`):**
+  - linear in pods: writes, compression, dashboard reads, scan (about 10.5 ms and 0.11 MiB per pod), Kubernetes lists;
+  - super-linear: the collection cycle (n^1.38, `core/historical_range_processor.py:1866-1878`);
+  - growing with time, unbounded: hourly tables (no retention), the ledger (48 entries per applied recommendation per day), the full chain verification, the summary refresher's one-year window;
+  - at 500 pods: raw 180 to 300 MB per day (2.5 to 4.2 GB for 14 days), hourly tiers about 14 GB per year; live 55-pod install: controller 17 mCPU and 232 MiB, API 204 MiB.
+- **Tiers** (revised by the measurement):
+  - **raw** (`combined_metrics`, `container_metrics`, `node_idle_metrics`, 5-minute step): 2 days, only what the compressor has not folded yet;
+  - **per container-hour sample arrays:** the 12 five-minute CPU and memory samples of each hour kept as small arrays in the hourly row for the 14-day rightsizing lookback, so percentiles stay exact on raw samples (ROL-04) at a fraction of the raw size (about 0.35 GB at 500 pods instead of 2.5 to 4.2 GB);
+  - **hourly per pod and per container:** bounded retention (D8: 60 days proposed, 400 days planned before);
+  - **hourly per workload** (`workload_usage_hourly`): kept for the lookback plus 2 days, its only readers being the scan and phantom repair; **hourly per node** (new, keeps the idle share, ROL-07) and workload-hour rows for long-term history, as long as the ledger needs them.
+- **Footprint levers**, ranked by measured gain, none losing useful detail:
+  1. store estimation reasons and source columns as codes (about −35 % per raw row; the English reason text is 45 % of a live row);
+  2. drop the duplicate index on `combined_metrics` (−13.5 % of that table);
+  3. incremental usage rollup instead of re-rolling 24 hours every hour (77 s to 3.7 s per hour at 5,000 pods);
+  4. day-grain ledger entries and a persisted verification checkpoint (LED-09, moved here from phase D: −96 % entries, daily check in O(new entries));
+  5. accrual only when an hourly slot is due; incremental summary refresher (18,347 queries and 80 s per hour at 5,000 pods today); batched scan writes; the quadratic loop of the collection cycle;
+  6. Kubernetes lists once per cycle; lazy import of the Kubernetes client (67 MiB per process);
+  7. PostgreSQL range partitioning by day (raw) and by month (hourly), so retention drops a partition.
+  Projected at 500 pods with 100 applied recommendations after one year: about 2.2 GB and 1.1 GB per year, against about 17.8 GB and 16 GB per year today.
+- **Read paths:** each read is served by the coarsest tier that answers it (UI ranges over 14 days read hourly, the ledger reads workload-hours).
 - **Measurement** (`verify/series.py`) reads per-pod hourly rows for the baseline and post windows, as today; the baseline snapshot freezes them. The audit findings marked "re-check after C3" in the appendix are re-checked and closed.
 - **Acceptance:**
   - the rightsizing p95 on a fixture with a short spike equals the raw-sample p95, not the hourly maximum;
@@ -328,7 +344,7 @@ The appendix lists all 173 audit findings with their status:
 4. **Ledger rest:**
    - LED-06 item 2: never accrue a slot beyond the newest complete collection watermark;
    - LED-06 item 3: a repair command that supersedes future rows and resets the watermark;
-   - LED-09 items 1, 3 and 4: day grain, an indexed projection sweep, segmented and resumable verification;
+   - LED-09 items 1, 3 and 4 (day grain, indexed projection sweep, resumable verification): moved to C.3, lever 4;
    - LED-05 rest: an external checkpoint of the signed head and a database role that cannot rewrite the ledger. The documented residuals stay until then: a full keyless rewrite with a missing status row, and a leaked previous key plus a lost status row, which only an explicit, audited trust step accepts;
    - IMP-08 and LED-07, the calibration loop (E.2).
 5. **Energy rest (WP-04.5, WP-04.6):** NRG-14, NRG-16, NRG-17; with the A.9 hourly provenance.
@@ -363,10 +379,11 @@ The appendix lists all 173 audit findings with their status:
 | D1 | Scope table of section 2.1 | **Decided 2026-11-20:** connectors and advisory analyzers removed; carbon kept as it is (Wattnet, Boavizta and DCGM stay); collectors kept |
 | D2 | One SQL dialect | **Decided 2026-11-20:** PostgreSQL only (C.4) |
 | D3 | Deletion recommendations | **Decided 2026-11-20:** orphaned LoadBalancer and PersistentVolume detection kept and hardened (B.2) |
-| D4 | KRR CronJob in the chart | Open; proposed: remove, document a push example |
+| D4 | KRR CronJob in the chart | **Done (B.3):** removed; `docs/sources/krr.md` gives a push CronJob |
 | D5 | Footprint budget of section 3 | **Decided 2026-11-20:** lightness must not cost useful granularity (C.3); numbers revised after the first C.1 run |
 | D6 | Push the two website repositories (local `main` commits not pushed; pushing may deploy) | Open; proposed: push after reading the diff |
 | D7 | Footprint pages, FOCUS export, `patch` and `ci` delivery modes | Open; proposed: keep the Footprint pages, remove the other three |
+| D8 | Per-pod hourly retention (C.3) | Open; the resource analysis proposes 60 days per pod, then workload-hour and node-hour rows, to meet 1 GB per year at 500 pods (14 GB per year with 400 days). Cost: no per-pod drill-down after 60 days |
 
 ## 10. Execution conventions
 
