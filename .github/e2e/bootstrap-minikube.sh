@@ -142,7 +142,7 @@ done
 # The admin password reaches curl on stdin (--netrc-file), never on its command line.
 token="$(printf 'machine 127.0.0.1 login %s password %s\n' "${GITEA_ADMIN}" "${admin_password}" |
   curl -fsS --netrc-file /dev/stdin -X POST -H 'Content-Type: application/json' \
-    --data "{\"name\":\"greenkube-e2e-$(date +%s)\",\"scopes\":[\"write:repository\",\"write:user\",\"write:organization\"]}" \
+    --data "{\"name\":\"greenkube-e2e-$(date +%s)\",\"scopes\":[\"write:repository\",\"write:issue\",\"write:user\",\"write:organization\"]}" \
     "http://127.0.0.1:33001/api/v1/users/${GITEA_ADMIN}/tokens" | jq -r .sha1)"
 [[ -n "${token}" && "${token}" != "null" ]] || die "Gitea did not return a token."
 umask 077
