@@ -134,8 +134,6 @@ Run statuses: `succeeded` (authoritative), `incomplete`, `failed`, `unavailable`
 
 `krr` and `push` emit signals only: they create no v1 recommendation and reach recommendations only through consensus, where GreenKube's measured value decides the size and they move the confidence. They read what was pushed over HTTP (the inbox, migration `0070`) into each scan, so pushed advice goes through the same runner, validation and storage as everything else. Built-in sources may emit signals under another source id declared in `also_emits` (`vpa` emits `goldilocks`; `push` emits `push:<client>`); plugins may not.
 
-The native advisory analyzers (`greenkube.zombie`, `greenkube.autoscaling`, `greenkube.off_peak`, `greenkube.idle_namespace`, `greenkube.carbon_aware`, `greenkube.nodes`) and the NodePool heuristic (`greenkube.nodepool`) were removed in 0.4: their `sources.settings` entries are accepted and ignored, with one warning at start.
-
 Native analyzers run through the analyzer adapter (`AnalyzerSource`), VPA through the v1 connector adapter (`RecommendationSourceAdapter`); their internals are unchanged and they keep emitting the same v1 recommendations. All native analyzers form the v1 source `greenkube` in `optimization_runs`: when one of them fails, `greenkube` is incomplete for that run and none of its recommendations go stale.
 
 ## Configuration

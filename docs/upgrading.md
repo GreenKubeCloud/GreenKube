@@ -130,12 +130,10 @@ An upgrade that reuses a 0.3.x values file keeps working: the chart maps the old
 | `automation.workerMetricsPort` | `worker.metricsPort` |
 | `rendererSandbox.*` | `renderer.*`; `rendererSandbox.enabled` is ignored |
 | `automation.policy.minSamples`, `config.recommendations.verification.minSamples` | still honoured for their gate; prefer `config.recommendations.minSamples` |
-| `config.recommendations.sourcePriority` | ignored (see [Removed connectors](#removed-connectors-and-consensus-policies)) |
-| `config.recommendations.karpenterEnabled` | ignored: the Karpenter NodePool source was removed (see [Removed advisory analyzers](#removed-advisory-analyzers)) |
-| `config.recommendations.zombieCostThreshold`, `zombieEnergyThreshold`, `autoscalingCvThreshold`, `autoscalingSpikeRatio`, `offPeakIdleThreshold`, `offPeakMinIdleHours`, `idleNamespaceEnergyThreshold`, `carbonAwareThreshold`, `nodeUtilizationThreshold` | ignored: their analyzers were removed (see [Removed advisory analyzers](#removed-advisory-analyzers)) |
-| `sources.settings` of `greenkube.zombie`, `greenkube.autoscaling`, `greenkube.off_peak`, `greenkube.idle_namespace`, `greenkube.carbon_aware`, `greenkube.nodes`, `greenkube.nodepool` | ignored: these sources were removed (see [Removed advisory analyzers](#removed-advisory-analyzers)) |
 | `config.db.type: postgres`, `config.db.path` | ignored |
 | `config.db.type: sqlite` | the upgrade fails with the migration commands, see below |
+
+The values of removed features are not in this list: see [Removed connectors](#removed-connectors-and-consensus-policies) and [Removed advisory analyzers](#removed-advisory-analyzers).
 
 ### Removed connectors and consensus policies
 
@@ -144,11 +142,11 @@ down, and a source alone never creates a recommendation. What was removed, and w
 
 | Removed | On upgrade |
 |---|---|
-| The Kubecost, GKE recommender, Azure Advisor and Polaris connectors | Their `SOURCES_CONFIG` / `sources.settings.<id>` entries (`kubecost`, `gke`, `azure_advisor`, `polaris`) are accepted and ignored, with one warning at start and a line under DEPRECATED VALUES. Push their advice to `POST /api/v1/signals` instead ([Push API](sources/push.md)). |
+| The Kubecost, GKE recommender, Azure Advisor and Polaris connectors | Their `SOURCES_CONFIG` / `sources.settings.<id>` entries (`kubecost`, `gke`, `azure_advisor`, `polaris`) no longer exist. Push their advice to `POST /api/v1/signals` instead ([Push API](sources/push.md)). |
 | `POST /api/v1/sources/polaris/reports` | Answers `404` for every key, a leftover CronJob's `signals:report` or `signals:write` key included; nothing is stored. Delete the job. |
-| The chart's KRR and Polaris CronJobs (`sources.krr.job.*`, `sources.polaris.job.*`) | Ignored with a line under DEPRECATED VALUES; the CronJobs, their ServiceAccounts and ClusterRoles are deleted by the upgrade. Run KRR yourself and push its report: [Robusta KRR](sources/krr.md) has a ready-made CronJob. |
-| `RECOMMENDATION_CONSENSUS_POLICY` (`safest`, `median`, `weighted`, `priority`; Helm `config.recommendations.consensusPolicy`) | Accepted and ignored, with one warning at start (and a line under DEPRECATED VALUES). |
-| `RECOMMENDATION_SOURCE_PRIORITY` (Helm `sources.priority`, `config.recommendations.sourcePriority`) | Accepted and ignored, with one warning at start (and a line under DEPRECATED VALUES). |
+| The chart's KRR and Polaris CronJobs (`sources.krr.job.*`, `sources.polaris.job.*`) | These values no longer exist; the CronJobs, their ServiceAccounts and ClusterRoles are deleted by the upgrade. Run KRR yourself and push its report: [Robusta KRR](sources/krr.md) has a ready-made CronJob. |
+| `RECOMMENDATION_CONSENSUS_POLICY` (`safest`, `median`, `weighted`, `priority`; Helm `config.recommendations.consensusPolicy`) | The setting and the value no longer exist. |
+| `RECOMMENDATION_SOURCE_PRIORITY` (Helm `sources.priority`, `config.recommendations.sourcePriority`) | The setting and the values no longer exist. |
 
 Migration `0310` retires the **active** recommendations whose chosen source was one of the removed connectors: they
 become `stale` with a `stale` event of reason `type_removed`. Recommendations in a pull request, being measured or
@@ -157,13 +155,12 @@ removed connectors stay in their tables (nothing writes them any more); a later 
 backup note here. A recommendation stored before keeps the consensus `policy` it was built with; the next scan
 rebuilds it with the native value, which may change its proposed value (a new revision).
 
-These values are refused in a later release: remove them from your values file.
+These settings and values no longer exist: remove them from your values file and environment. Leftover ones are ignored (a `SOURCES_CONFIG` / `sources.settings` entry of a removed source is reported as `unknown_source` in the source problems).
 
 Intentional references to the removed names stay in the code (the B.0 grep exceptions):
 `greenkube.core.optimization.eligibility._PUSHED_SOURCE_IDS` keeps `polaris`, so votes of records stored before the
-removal still count as pushed (one independent vote); the removed-settings and removed-source lists
-(`REMOVED_SETTINGS` in `greenkube.core.config`, `REMOVED_SOURCE_IDS` in `greenkube.signals.registry`, the chart's
-deprecation notes and migration `0310`) name them to ignore and warn about them; and `kubecost` as a cost provenance
+removal still count as pushed (one independent vote); migration `0310` names them to retire their
+recommendations; and `kubecost` as a cost provenance
 (`cost_source`) and a protected namespace is OpenCost-compatible cost data, not the removed connector.
 
 Note that `automation.enabled: false` now means *discovery, previews and measurement run, no pull request is
@@ -185,9 +182,8 @@ PersistentVolume detection stay. On upgrade:
 - `RECOMMENDATION_KARPENTER_ENABLED` and the analyzer thresholds (`ZOMBIE_COST_THRESHOLD`,
   `ZOMBIE_ENERGY_THRESHOLD`, `AUTOSCALING_CV_THRESHOLD`, `AUTOSCALING_SPIKE_RATIO`, `OFF_PEAK_IDLE_THRESHOLD`,
   `OFF_PEAK_MIN_IDLE_HOURS`, `IDLE_NAMESPACE_ENERGY_THRESHOLD`, `CARBON_AWARE_THRESHOLD`,
-  `NODE_UTILIZATION_THRESHOLD`) are accepted and ignored for this release, with one warning at start; their Helm
-  values are no longer rendered and the notes name them;
-- `sources.settings` entries of the removed sources are accepted and ignored, named in the same warning.
+  `NODE_UTILIZATION_THRESHOLD`), their Helm values (`config.recommendations.karpenterEnabled` and the
+  threshold values) and the `sources.settings` entries of the removed sources no longer exist. Remove them from your values file and environment. Leftover ones are ignored (a `SOURCES_CONFIG` / `sources.settings` entry of a removed source is reported as `unknown_source` in the source problems).
 
 The Karpenter, Cluster Autoscaler and HPA reads stay: the realization factor and the rightsizing evidence use them.
 

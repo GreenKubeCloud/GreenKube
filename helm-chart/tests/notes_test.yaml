@@ -134,26 +134,24 @@ tests:
       - notMatchRegexRaw:
           pattern: DEPRECATED VALUES
 
-  - it: warns about the values removed with the connectors and the consensus policies (B.3)
+  - it: lists nothing for values of removed features left in an old values file
     set:
       sources.priority: vpa,greenkube
       sources.krr.job.enabled: true
       sources.polaris.job.enabled: true
-      sources.settings.kubecost.url: http://kubecost
+      sources.settings:
+        kubecost:
+          url: http://kubecost
+        greenkube.nodepool:
+          enabled: auto
       config.recommendations.consensusPolicy: median
+      config.recommendations.karpenterEnabled: false
+      config.recommendations.zombieCostThreshold: 0.5
     asserts:
-      - matchRegexRaw:
+      - notMatchRegexRaw:
           pattern: DEPRECATED VALUES
-      - matchRegexRaw:
-          pattern: sources.priority is removed and ignored
-      - matchRegexRaw:
-          pattern: "sources.krr is removed and ignored: the chart no longer runs KRR"
-      - matchRegexRaw:
-          pattern: sources.polaris is removed and ignored
-      - matchRegexRaw:
-          pattern: sources.settings.kubecost is ignored
-      - matchRegexRaw:
-          pattern: config.recommendations.consensusPolicy is removed and ignored
+      - notMatchRegexRaw:
+          pattern: zombieCostThreshold
 
   - it: reports every mapped 0.3.x value (F17)
     set:
@@ -177,40 +175,6 @@ tests:
           pattern: production.\* is mapped
       - matchRegexRaw:
           pattern: pauseDelivery is true
-
-  - it: names the removed Karpenter flag and the settings of removed sources (B.1)
-    set:
-      config.recommendations.karpenterEnabled: false
-      sources.settings:
-        greenkube.carbon_aware:
-          enabled: false
-        greenkube.nodepool:
-          enabled: auto
-        vpa:
-          enabled: auto
-    asserts:
-      - matchRegexRaw:
-          pattern: DEPRECATED VALUES
-      - matchRegexRaw:
-          pattern: "config.recommendations.karpenterEnabled is ignored: the Karpenter NodePool recommendation source was removed"
-      - matchRegexRaw:
-          pattern: "sources.settings.greenkube.carbon_aware is ignored: that source was removed"
-      - matchRegexRaw:
-          pattern: "sources.settings.greenkube.nodepool is ignored: that source was removed"
-      - notMatchRegexRaw:
-          pattern: "sources.settings.vpa is ignored"
-
-  - it: names the removed analyzer thresholds and renders none of them (B.1)
-    set:
-      config.recommendations.zombieCostThreshold: 0.5
-      config.recommendations.nodeUtilizationThreshold: 0.3
-    asserts:
-      - matchRegexRaw:
-          pattern: "config.recommendations.zombieCostThreshold is ignored: its advisory analyzer was removed"
-      - matchRegexRaw:
-          pattern: "config.recommendations.nodeUtilizationThreshold is ignored: its advisory analyzer was removed"
-      - notMatchRegexRaw:
-          pattern: "offPeakIdleThreshold is ignored"
 
   - it: keeps the dashboard URLs when the deprecated config.api.enabled is false
     set:

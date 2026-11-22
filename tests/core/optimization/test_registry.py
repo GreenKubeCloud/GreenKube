@@ -19,7 +19,3 @@ class TestBuildSources:
         cfg.RECOMMENDATION_VPA_ENABLED = False
         sources = build_sources(cfg)
         assert [s.name for s in sources] == ["greenkube"]
-
-    def test_the_removed_karpenter_flag_changes_nothing(self):
-        cfg = Config(RECOMMENDATION_KARPENTER_ENABLED=True)
-        assert [s.name for s in build_sources(cfg)] == ["vpa", "greenkube"]

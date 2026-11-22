@@ -343,32 +343,27 @@ tests:
           path: data.GITOPS_POLICY_JSON
           pattern: '"minSamples":20'
 
-  - it: renders no source precedence nor consensus policy, even when the removed values are set (B.3)
+  - it: installs an old values file that still sets keys of removed features and renders nothing from them
     set:
       sources.priority: greenkube,vpa
-      config.recommendations.sourcePriority: karpenter,greenkube
       config.recommendations.consensusPolicy: median
+      config.recommendations.karpenterEnabled: false
+      config.recommendations.zombieCostThreshold: 0.5
     asserts:
+      - hasDocuments:
+          count: 1
       - notExists:
-          path: data.RECOMMENDATION_SOURCE_PRIORITY
+          path: data.ZOMBIE_COST_THRESHOLD
+      - notExists:
+          path: data.RECOMMENDATION_KARPENTER_ENABLED
       - notExists:
           path: data.RECOMMENDATION_CONSENSUS_POLICY
+      - notExists:
+          path: data.RECOMMENDATION_SOURCE_PRIORITY
 
   # --------------------------------------------------------------------------
   # Recommendation engine config
   # --------------------------------------------------------------------------
-  - it: renders none of the removed analyzer thresholds, even when set (B.1)
-    set:
-      config.recommendations.zombieCostThreshold: 0.5
-      config.recommendations.carbonAwareThreshold: 2
-    asserts:
-      - notExists:
-          path: data.ZOMBIE_COST_THRESHOLD
-      - notExists:
-          path: data.CARBON_AWARE_THRESHOLD
-      - notExists:
-          path: data.NODE_UTILIZATION_THRESHOLD
-
   - it: should set RECOMMENDATION_LOOKBACK_DAYS
     asserts:
       - equal:
@@ -470,27 +465,22 @@ tests:
   # --------------------------------------------------------------------------
   # Verification & automation (Phases 3–4)
   # --------------------------------------------------------------------------
-  - it: should enable the VPA connector by default and no longer render the removed Karpenter flag
+  - it: should enable the VPA connector by default
     asserts:
       - equal:
           path: data.RECOMMENDATION_VPA_ENABLED
           value: "true"
-      - notExists:
-          path: data.RECOMMENDATION_KARPENTER_ENABLED
       - equal:
           path: data.KUBERNETES_METRICS_API_ENABLED
           value: "true"
 
-  - it: should disable the VPA connector and ignore the removed karpenterEnabled
+  - it: should disable the VPA connector
     set:
       config.recommendations.vpaEnabled: false
-      config.recommendations.karpenterEnabled: false
     asserts:
       - equal:
           path: data.RECOMMENDATION_VPA_ENABLED
           value: "false"
-      - notExists:
-          path: data.RECOMMENDATION_KARPENTER_ENABLED
 
   - it: should load source plugins with no per-source settings by default
     asserts:

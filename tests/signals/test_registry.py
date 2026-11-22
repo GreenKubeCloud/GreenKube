@@ -103,19 +103,16 @@ class TestBuiltins:
         ids = [s.source_id for s in build_signal_sources(config, entry_points=lambda: [])]
         assert "vpa" not in ids and "greenkube.rightsizing_cpu" in ids
 
-    def test_settings_of_removed_connectors_are_ignored_without_a_problem(self):
-        """B.3: SOURCES_CONFIG of kubecost, polaris, gke and azure_advisor is accepted and ignored."""
-        config = _config(SOURCES_CONFIG='{"kubecost": {"url": "http://kubecost"}, "gke": {}, "nope": {}}')
+    def test_settings_of_a_removed_source_are_an_unknown_source(self):
+        """A SOURCES_CONFIG entry of a source removed in phase B is reported like any unknown id, never a crash."""
+        config = _config(SOURCES_CONFIG='{"kubecost": {"url": "http://kubecost"}, "greenkube.nodepool": {}}')
         registry, configured = build_source_registry(config, entry_points=lambda: [])
-        assert [(p.code, p.source_id) for p in registry.problems] == [("unknown_source", "nope")]
-        assert not {"kubecost", "polaris", "gke", "azure_advisor"} & {item.id for item in configured}
-
-    def test_settings_of_removed_analyzers_are_ignored_without_a_problem(self):
-        """B.1: SOURCES_CONFIG of the removed advisory analyzers and NodePool heuristic is accepted and ignored."""
-        config = _config(SOURCES_CONFIG='{"greenkube.carbon_aware": {"enabled": false}, "greenkube.nodepool": {}}')
-        registry, configured = build_source_registry(config, entry_points=lambda: [])
-        assert registry.problems == []
-        assert not {"greenkube.carbon_aware", "greenkube.nodepool"} & {item.id for item in configured}
+        assert [(p.code, p.source_id) for p in registry.problems] == [
+            ("unknown_source", "greenkube.nodepool"),
+            ("unknown_source", "kubecost"),
+        ]
+        assert not {"kubecost", "greenkube.nodepool"} & {item.id for item in configured}
+        assert build_signal_sources(config, entry_points=lambda: [])
 
 
 class TestPlugins:

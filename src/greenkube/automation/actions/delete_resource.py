@@ -64,8 +64,8 @@ class DeletableTarget:
 
 
 #: Recommendation types whose resource GreenKube can delete through a pull request.
-#: Zombie workloads and idle namespaces stay manual: deleting a Namespace manifest
-#: removes everything in it, and a zombie owner may be recreated by its own controller.
+#: Every other type stays manual, stored rows of the retired workload and namespace types
+#: included: deleting a Namespace manifest removes everything in it.
 DELETABLE_TARGETS: Mapping[str, DeletableTarget] = {
     "ORPHANED_LOAD_BALANCER": DeletableTarget("v1", "Service", True, "LoadBalancer Service"),
     "ORPHANED_PERSISTENT_VOLUME": DeletableTarget("v1", "PersistentVolume", False, "PersistentVolume"),

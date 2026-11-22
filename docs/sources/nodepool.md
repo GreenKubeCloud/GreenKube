@@ -23,4 +23,4 @@ These feed the [RealizationContext](../methodology/impact-model.md#realization-f
 
 ## Configuration
 
-The realization factor can be pinned with `impact.realizationFactor`, and the autoscaler of nodes outside Karpenter pools named with `impact.autoscalerHint` when detection cannot see it. `config.recommendations.karpenterEnabled` and `sources.settings["greenkube.nodepool"]` are ignored since 0.4 (the chart's notes name them).
+The realization factor can be pinned with `impact.realizationFactor`, and the autoscaler of nodes outside Karpenter pools named with `impact.autoscalerHint` when detection cannot see it.
