@@ -260,8 +260,6 @@ All collectors are fully asynchronous and implement a common pattern.
 - **Metrics collected:**
   - CPU usage (cores) per pod/container
   - Memory usage (bytes) per pod
-  - Network I/O (bytes received/transmitted) per pod
-  - Disk I/O (bytes read/written) per pod
   - Pod restart counts
   - Node instance type labels
 - **Features:**
@@ -272,7 +270,7 @@ All collectors are fully asynchronous and implement a common pattern.
   - Kubernetes Metrics API container samples that fill the latest step of a pod measured only at pod level are stored with `usage_source = metrics_server` and the reason `metrics_api_point_sample` (COL-05), and scaled down to the pod cgroup value when they add up to more than it (cri-dockerd counts page cache in a container's working set); the rows are flagged `container_usage_exceeds_pod`
   - Range queries raise `PrometheusQueryError` when Prometheus is unreachable, so an outage is never stored as an empty window
   - TLS/authentication support (basic auth, bearer token)
-  - Concurrent query execution (8 queries via `asyncio.gather`)
+  - Concurrent query execution (the range queries of a chunk via `asyncio.gather`)
   - Robust error handling with detailed logging
 - **Implementation:** Uses `httpx.AsyncClient` for non-blocking HTTP requests
 - **Emits:** `PrometheusMetric` (aggregated result with all metric lists)
@@ -293,7 +291,6 @@ All collectors are fully asynchronous and implement a common pattern.
 - **Data collected:**
   - CPU requests (millicores)
   - Memory requests (bytes)
-  - Ephemeral storage requests (bytes)
   - Owner references (Deployment, StatefulSet, etc.)
 - **Implementation:** Async K8s API with label-based filtering
 - **Emits:** `List[PodMetric]`
@@ -459,7 +456,7 @@ Implementations:
 #### **CombinedMetricRepository**
 Stores final aggregated metrics (energy + carbon + cost + resources).
 
-Schema (33 columns):
+Main columns:
 - Core: pod_name, namespace, timestamp, duration_seconds
 - Energy: joules, co2e_grams, grid_intensity, pue
 - Cost: total_cost and its components cost_cpu, cost_ram, cost_storage, cost_network, cost_lb
