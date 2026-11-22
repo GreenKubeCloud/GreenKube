@@ -5,12 +5,16 @@
 #   metrics-server          minikube addon
 #   kube-prometheus-stack   namespace monitoring, 30s scrapes (Prometheus Operator,
 #                           kube-state-metrics, kubelet/cAdvisor)
+#   OpenCost                namespace opencost, reading that Prometheus: the
+#                           verifier only counts OpenCost-priced samples as
+#                           trusted, so without it every verdict is inconclusive
 #   Argo CD                 namespace argocd
 #   Flux                    namespace flux-system
 #   Gitea                   namespace gitea (SQLite), admin user "greenkube"
 #
 # Writes a Gitea API token for the harness to E2E_GITEA_TOKEN_FILE and, on
-# GitHub Actions, exports GITEA_TOKEN_FILE and PROMETHEUS_URL to later steps.
+# GitHub Actions, exports GITEA_TOKEN_FILE, PROMETHEUS_URL and OPENCOST_URL to
+# later steps.
 #
 # It installs cluster-wide components, so it refuses to run outside GitHub
 # Actions unless E2E_BOOTSTRAP_ALLOW=1, and always requires the kubectl
@@ -22,6 +26,7 @@ set -euo pipefail
 : "${ARGOCD_VERSION:=v3.3.2}"
 : "${FLUX_VERSION:=v2.9.6}"
 : "${GITEA_CHART_VERSION:=12.7.0}"
+: "${OPENCOST_VERSION:=2.5.33}"
 : "${E2E_GITEA_TOKEN_FILE:=${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gitea-token}"
 GITEA_ADMIN=greenkube
 
@@ -55,6 +60,18 @@ helm upgrade --install kps kube-prometheus-stack \
   --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
   --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
   --set prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues=false \
+  --wait --timeout 10m >/dev/null
+
+log "OpenCost ${OPENCOST_VERSION}"
+helm upgrade --install opencost opencost \
+  --repo https://opencost.github.io/opencost-helm-chart --version "${OPENCOST_VERSION}" \
+  --namespace opencost --create-namespace \
+  --set opencost.prometheus.internal.enabled=true \
+  --set opencost.prometheus.internal.serviceName=kps-prometheus \
+  --set opencost.prometheus.internal.namespaceName=monitoring \
+  --set opencost.prometheus.internal.port=9090 \
+  --set opencost.metrics.serviceMonitor.enabled=true \
+  --set opencost.ui.enabled=false \
   --wait --timeout 10m >/dev/null
 
 log "Argo CD ${ARGOCD_VERSION}"
@@ -132,11 +149,13 @@ umask 077
 printf '%s' "${token}" >"${E2E_GITEA_TOKEN_FILE}"
 
 prometheus_url="http://kps-prometheus.monitoring.svc.cluster.local:9090"
+opencost_url="http://opencost.opencost.svc.cluster.local:9003"
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   echo "::add-mask::${token}"
   {
     echo "GITEA_TOKEN_FILE=${E2E_GITEA_TOKEN_FILE}"
     echo "PROMETHEUS_URL=${prometheus_url}"
+    echo "OPENCOST_URL=${opencost_url}"
   } >>"${GITHUB_ENV}"
 fi
-log "Ready: GITEA_TOKEN_FILE=${E2E_GITEA_TOKEN_FILE} PROMETHEUS_URL=${prometheus_url}"
+log "Ready: GITEA_TOKEN_FILE=${E2E_GITEA_TOKEN_FILE} PROMETHEUS_URL=${prometheus_url} OPENCOST_URL=${opencost_url}"
