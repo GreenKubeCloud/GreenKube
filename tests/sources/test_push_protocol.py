@@ -9,18 +9,18 @@ from pathlib import Path
 import pytest
 
 from greenkube.core.config import Config
-from greenkube.signals.connectors.inbox import InboxBatch
+from greenkube.signals.connectors.inbox import InboxBatch, InboxSettings
 from greenkube.signals.connectors.push import (
     BATCH_SCHEMA_FILE,
     SIGNAL_SCHEMA_FILE,
     PushSignal,
+    PushSignalSource,
     batch_schema,
     json_pointer,
     parse_batch,
     render,
     signal_schema,
 )
-from greenkube.signals.connectors.replay import InboxSettings, PushSignalSource
 from greenkube.signals.model import ContainerResourcesProposal, SignalOrigin, SourceSignal
 from greenkube.signals.runtime import SourceRunner, SourceRunStatus
 from greenkube.signals.sdk import Diagnostic, SourceDeps, SourceHealthStatus, SourceSettings

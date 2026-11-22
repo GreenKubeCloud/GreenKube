@@ -5,9 +5,7 @@ Engine-level integration with the real connectors and their recorded fixtures:
 * VPA connector over ``goldilocks_vpas.json`` (one Goldilocks VPA at 300m,
   one user VPA at 250m, both 512Mi, on ``shop/Deployment/api/web``);
 * KRR report parser over ``krr_report.json`` (250m, 512Mi on the same container);
-* Kubecost 2.x connector over ``kubecost/v2.json`` (250m, 512Mi) through an
-  HTTP mock transport;
-* push batches parsed by ``parse_batch`` and replayed by the push source.
+* push batches parsed by ``parse_batch`` and read by the push source.
 
 Every source runs through the engine's source runner and the consensus
 engine; nothing between them is mocked.
@@ -20,23 +18,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import httpx
-
 from greenkube.core.config import Config
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.core.optimization.providers.vpa import VpaSignalSource, VpaSource
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType
-from greenkube.signals.connectors.inbox import InboxBatch
+from greenkube.signals.connectors.inbox import InboxBatch, InboxSettings
 from greenkube.signals.connectors.krr import KrrSource, parse_krr_report
-from greenkube.signals.connectors.kubecost import KubecostSettings, KubecostSource
-from greenkube.signals.connectors.push import parse_batch
-from greenkube.signals.connectors.replay import InboxSettings, PushSignalSource
+from greenkube.signals.connectors.push import PushSignalSource, parse_batch
 from greenkube.signals.consensus import Consensus
 from greenkube.signals.sdk import SourceDeps, SourceSettings
 from tests.sources.fake_inbox import MemoryInbox  # pyrefly: ignore[missing-import]
 from tests.sources.test_goldilocks_provenance import FixtureCollector  # pyrefly: ignore[missing-import]
-from tests.sources.test_kubecost_connector import URL, FakeKubecost  # pyrefly: ignore[missing-import]
 
 FIXTURES = Path(__file__).resolve().parents[1] / "sources" / "fixtures"
 MIB = 1024 * 1024
@@ -49,7 +42,7 @@ def _now() -> datetime:
 
 
 def _config() -> Config:
-    return Config().model_copy(update={"CLUSTER_NAME": CLUSTER, "RECOMMENDATION_CONSENSUS_POLICY": "safest"})
+    return Config().model_copy(update={"CLUSTER_NAME": CLUSTER})
 
 
 def _context(config: Config) -> OptimizationContext:
@@ -132,14 +125,6 @@ def _native(config: Config):
     )
 
 
-def _kubecost(config: Config) -> KubecostSource:
-    return KubecostSource(
-        KubecostSettings(url=URL),
-        _deps(config),
-        transport=httpx.MockTransport(FakeKubecost("v2")),
-    )
-
-
 def _resources_signal(cpu: Optional[str] = None, memory: Optional[int] = None, **extra: Any) -> Dict[str, Any]:
     kind = "RIGHTSIZING_CPU" if cpu is not None else "RIGHTSIZING_MEMORY"
     proposed: Dict[str, Any] = {}
@@ -205,39 +190,37 @@ def _consensus(rec: Recommendation) -> Consensus:
 async def test_every_connector_becomes_one_consolidated_recommendation_per_resource():
     """Every external source votes next to GreenKube's own measurement (alone they stay signals, A.5)."""
     pushed = {"push:ci": [_resources_signal(cpu="260"), _resources_signal(memory=512 * MIB)]}
-    recs = await _recommendations([_native, _vpa, _krr, _kubecost, lambda config: _push(config, pushed)])
+    recs = await _recommendations([_native, _vpa, _krr, lambda config: _push(config, pushed)])
 
     cpu = _on_target(recs, RecommendationType.RIGHTSIZING_CPU)
     consensus = _consensus(cpu)
-    # safest: the least aggressive proposal, Goldilocks' 300m (the user VPA says 250m).
-    assert cpu.recommended_cpu_request_millicores == 300
-    assert consensus.value == 300 and consensus.policy == "safest"
+    # The native measured value decides (B.3); Goldilocks' 300m only moves the confidence.
+    assert cpu.recommended_cpu_request_millicores == 250
+    assert consensus.value == 250 and consensus.policy == "native"
     assert consensus.spread["cpu_request_m"] == {
         "goldilocks": 300,
         "vpa": 250,
         "krr": 250,
-        "kubecost": 250,
         "push:ci": 260,
         "greenkube": 250,
     }
     # Goldilocks and the user VPA run one engine: one vote, not two. KRR's uploaded report
     # and the push client are both pushed through the API: together one vote. Plus GreenKube's own.
-    assert consensus.independent_votes == 4
+    assert consensus.independent_votes == 3
     assert {vote.family for vote in consensus.votes if vote.source_id in ("goldilocks", "vpa")} == {"vpa"}
     assert sum(vote.counted for vote in consensus.votes if vote.family == "vpa") == 1
     assert consensus.agreement == round(1 - 50 / 300, 4)
     # Provenance: every supporting source id, the chosen one first (UI badges).
-    assert consensus.source_ids[0] == "goldilocks"
-    assert set(consensus.source_ids) == {"goldilocks", "vpa", "krr", "kubecost", "push:ci", "greenkube"}
-    # The consolidated value is projected again by the Impact Model, never copied from a source.
-    assert cpu.description.endswith("safest consensus of 4 sources.")
+    assert consensus.source_ids[0] == "greenkube"
+    assert set(consensus.source_ids) == {"goldilocks", "vpa", "krr", "push:ci", "greenkube"}
+    assert str(getattr(cpu.source, "value", cpu.source)) == "greenkube"
 
     memory = _on_target(recs, RecommendationType.RIGHTSIZING_MEMORY)
     memory_consensus = _consensus(memory)
     assert memory.recommended_memory_request_bytes == 512 * MIB
     assert memory_consensus.agreement == 1.0
-    assert memory_consensus.independent_votes == 4
-    assert set(memory_consensus.source_ids) == {"goldilocks", "vpa", "krr", "kubecost", "push:ci", "greenkube"}
+    assert memory_consensus.independent_votes == 3
+    assert set(memory_consensus.source_ids) == {"goldilocks", "vpa", "krr", "push:ci", "greenkube"}
 
 
 async def test_a_disputed_vpa_object_still_reaches_consensus():
@@ -246,11 +229,11 @@ async def test_a_disputed_vpa_object_still_reaches_consensus():
 
     cpu = _on_target(recs, RecommendationType.RIGHTSIZING_CPU)
     consensus = _consensus(cpu)
-    assert cpu.recommended_cpu_request_millicores == 300
+    assert cpu.recommended_cpu_request_millicores == 250
     assert consensus.independent_votes == 2
-    assert consensus.source_ids[0] == "goldilocks"
+    assert consensus.source_ids[0] == "greenkube"
     assert set(consensus.source_ids) == {"goldilocks", "vpa", "greenkube"}
-    assert str(getattr(cpu.source, "value", cpu.source)) == "vpa"
+    assert str(getattr(cpu.source, "value", cpu.source)) == "greenkube"
 
 
 async def test_a_push_client_counts_once_whatever_engines_it_declares():
@@ -278,7 +261,8 @@ async def test_a_push_client_relaying_vpa_cannot_replace_the_vpa_vote():
     consensus = _consensus(cpu)
     # The relay joins the VPA family: no extra vote, and VPA's own value stands for the family.
     assert consensus.independent_votes == 2
-    assert cpu.recommended_cpu_request_millicores == 300
+    assert consensus.spread["cpu_request_m"]["goldilocks"] == 300
+    assert cpu.recommended_cpu_request_millicores == 250
     relay = next(vote for vote in consensus.votes if vote.source_id == "push:relay")
     assert relay.family == "vpa" and relay.counted is False
 
@@ -312,35 +296,3 @@ async def test_a_pushed_deletion_supports_a_deletion_another_source_proposes():
     consensus = _consensus(zombie)
     assert set(consensus.source_ids) == {"greenkube", "push:janitor"}
     assert str(getattr(zombie.source, "value", zombie.source)) == "greenkube"
-
-
-def _gke(config: Config):
-    from greenkube.signals.connectors.gke import GkeRecommenderSource, GkeSettings
-    from tests.sources.test_gke_connector import API, METADATA, FakeGoogle  # pyrefly: ignore[missing-import]
-
-    return GkeRecommenderSource(
-        GkeSettings(),
-        _deps(config),
-        transport=httpx.MockTransport(FakeGoogle()),
-        metadata_url=METADATA,
-        api_url=API,
-    )
-
-
-async def test_consensus_spans_three_independent_wave4_sources():
-    """G7 x E6: VPA (Goldilocks), KRR and the GKE recommender vote on one container (three engine families)."""
-    recs = await _recommendations([_native, _vpa, _krr, _gke])
-
-    cpu = _on_target(recs, RecommendationType.RIGHTSIZING_CPU)
-    consensus = _consensus(cpu)
-    assert consensus.spread["cpu_request_m"] == {
-        "greenkube": 250,
-        "goldilocks": 300,
-        "vpa": 250,
-        "krr": 250,
-        "gke": 260,
-    }
-    assert consensus.independent_votes == 4
-    assert {"vpa", "krr", "gke"} <= set(consensus.source_ids)
-    # safest keeps the least aggressive value.
-    assert cpu.recommended_cpu_request_millicores == 300

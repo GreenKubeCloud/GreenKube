@@ -403,8 +403,8 @@ What a pull request can change is defined by a registry of action kinds (see [Ar
   increases](recommendation.md#how-greenkube-sizes-increases) (per-replica p99 bounded by the pod, warm-up excluded,
   one step capped at `rightsizingMaxIncreaseFactor`). Those bounds belong to GreenKube's own analyzer, so an increase
   becomes a pull request only when the consensus chose GreenKube's value (`source` or `consensus.chosen_from`) backed
-  by usage samples. An increase chosen from VPA, Goldilocks or a pushed signal alone (the `SAFEST` consensus picks the
-  highest value) stays advisory.
+  by usage samples. Since the consensus always takes GreenKube's measured value, a record whose value came from VPA,
+  Goldilocks or a pushed signal (stored before that rule) stays advisory.
 - **Limits.** The limit advice of the rightsizing rules (`config.recommendations.limitsPolicy`) travels with the
   request change as `evidence.limit_changes`:
   - an increase raises a CPU limit below the new request or throttled, and a memory limit below the request or

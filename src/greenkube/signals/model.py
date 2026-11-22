@@ -305,7 +305,7 @@ def missing_resource_value(capability: Any, proposal: Any, kind: Optional[str] =
       be compared by identity and lose every source's value (and the native
       OOM floor).
 
-    Advice of another kind (a GKE ``WORKLOAD_UNDERPROVISIONED`` advisory) and
+    Advice of another kind (a pushed ``WORKLOAD_UNDERPROVISIONED`` advisory) and
     other capabilities pass.
     """
     name = str(getattr(capability, "value", capability))

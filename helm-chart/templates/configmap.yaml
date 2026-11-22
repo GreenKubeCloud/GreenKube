@@ -213,15 +213,6 @@ data:
   RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS: {{ .minDecreaseCoverageDays | default 7 | quote }}
   RECOMMENDATION_TARGET_MAX_STALENESS_HOURS: {{ .targetMaxStalenessHours | default 2 | quote }}
   RECOMMENDATION_LIMITS_POLICY: {{ .limitsPolicy | default "keep" | quote }}
-  ZOMBIE_COST_THRESHOLD: {{ .zombieCostThreshold | quote }}
-  ZOMBIE_ENERGY_THRESHOLD: {{ .zombieEnergyThreshold | quote }}
-  AUTOSCALING_CV_THRESHOLD: {{ .autoscalingCvThreshold | quote }}
-  AUTOSCALING_SPIKE_RATIO: {{ .autoscalingSpikeRatio | quote }}
-  OFF_PEAK_IDLE_THRESHOLD: {{ .offPeakIdleThreshold | quote }}
-  OFF_PEAK_MIN_IDLE_HOURS: {{ .offPeakMinIdleHours | quote }}
-  IDLE_NAMESPACE_ENERGY_THRESHOLD: {{ .idleNamespaceEnergyThreshold | quote }}
-  CARBON_AWARE_THRESHOLD: {{ .carbonAwareThreshold | quote }}
-  NODE_UTILIZATION_THRESHOLD: {{ .nodeUtilizationThreshold | quote }}
   STORAGE_COST_PER_GIB_MONTH: {{ .storageCostPerGibMonth | default 0.1 | quote }}
   DELETION_MIN_UNUSED_DAYS: {{ .deletionMinUnusedDays | default 7 | quote }}
   LOAD_BALANCER_COST_PER_MONTH: {{ .loadBalancerCostPerMonth | default 18.0 | quote }}
@@ -230,8 +221,6 @@ data:
   RECOMMENDATION_MIN_MEMORY_BYTES: {{ .minMemoryBytes | default 16777216 | int | quote }}
   RECOMMENDATION_APPLY_TOLERANCE: {{ .applyTolerance | default 0.25 | quote }}
   RECOMMENDATION_VPA_ENABLED: {{ $v.vpaEnabled | quote }}
-  RECOMMENDATION_SOURCE_PRIORITY: {{ $v.sourcePriority | quote }}
-  RECOMMENDATION_CONSENSUS_POLICY: {{ .consensusPolicy | default "safest" | quote }}
   RECOMMENDATION_TTL_DAYS: {{ .ttlDays | default 14 | int | quote }}
   RECOMMENDATION_RANKING_PROFILE: {{ .rankingProfile | default "balanced" | quote }}
   RECOMMENDATION_RANKING_WEIGHTS: {{ .rankingWeights | default "" | quote }}

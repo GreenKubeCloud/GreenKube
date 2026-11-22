@@ -5,8 +5,6 @@ templates:
   - templates/postgres-statefulset.yaml
   - templates/pdb.yaml
   - templates/tests/test-connection.yaml
-  - templates/krr-cronjob.yaml
-  - templates/polaris-cronjob.yaml
   - templates/configmap.yaml
   - templates/secret.yaml
 
@@ -377,31 +375,3 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "set either a tag with @sha256 or a digest, not both"
-
-  - it: renders the global pull secrets on the KRR CronJob
-    template: templates/krr-cronjob.yaml
-    set:
-      global.imagePullSecrets: [regcred]
-      sources.krr.job.enabled: true
-      sources.krr.job.apiKeySecret.name: gk-krr
-    asserts:
-      - equal:
-          path: spec.jobTemplate.spec.template.spec.imagePullSecrets[0].name
-          value: regcred
-        documentSelector:
-          path: kind
-          value: CronJob
-
-  - it: renders the global pull secrets on the Polaris CronJob
-    template: templates/polaris-cronjob.yaml
-    set:
-      global.imagePullSecrets: [regcred]
-      sources.polaris.job.enabled: true
-      sources.polaris.job.apiKeySecret.name: gk-polaris
-    asserts:
-      - equal:
-          path: spec.jobTemplate.spec.template.spec.imagePullSecrets[0].name
-          value: regcred
-        documentSelector:
-          path: kind
-          value: CronJob

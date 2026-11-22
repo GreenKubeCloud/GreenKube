@@ -1,8 +1,8 @@
 <script>
 	/**
 	 * Footprint charts (K7): CO₂e, cost, energy and pods of the selected
-	 * period, moved here from the Overview. Supporting context only; the
-	 * bundled Grafana dashboard is the deep-analysis surface.
+	 * period, moved here from the Overview. Footprint data is analysed here and
+	 * in the Report section (CSV and JSON exports); it is not exported to Prometheus.
 	 */
 	import { onDestroy } from 'svelte';
 	import { currentUser, hasScope, selectedNamespace, selectedTimeRange } from '#lib/stores.js';
@@ -151,7 +151,7 @@
 		<div>
 			<h1 class="text-2xl font-bold text-dark-100">Footprint</h1>
 			<p class="text-sm text-dark-500 mt-1">
-				Emissions, cost and energy of the selected period. For deeper analysis, use the GreenKube Grafana dashboard.
+				Emissions, cost and energy of the selected period. For per-namespace and per-pod detail, build a report and export it as CSV or JSON.
 			</p>
 		</div>
 		<div class="flex items-center gap-3 flex-wrap">

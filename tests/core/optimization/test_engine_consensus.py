@@ -114,27 +114,27 @@ async def _only(repo) -> RecommendationRecord:
 
 
 class TestConsensusScan:
-    async def test_roadmap_fixture_vpa_krr_native_gives_safest_300m(self, repo):
+    async def test_roadmap_fixture_vpa_krr_native_gives_the_native_280m(self, repo):
         engine = _engine([FakeConnector("vpa", [_cpu(300, "vpa")]), _krr(250), FakeConnector("greenkube", [_cpu(280)])])
 
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
         record = await _only(repo)
-        assert record.recommended_cpu_request_millicores == 300
-        assert record.source == SourceName.VPA
-        assert set(record.sources) == {"vpa", "krr", "greenkube"} and record.sources[0] == "vpa"
+        assert record.recommended_cpu_request_millicores == 280
+        assert record.source == SourceName.GREENKUBE
+        assert set(record.sources) == {"vpa", "krr", "greenkube"} and record.sources[0] == "greenkube"
         consensus = record.consensus or {}
-        assert consensus["policy"] == "safest"
+        assert consensus["policy"] == "native"
         assert consensus["agreement"] == pytest.approx(0.83, abs=0.005)
         assert consensus["contested"] is False
         assert consensus["spread"]["cpu_request_m"] == {"vpa": 300, "krr": 250, "greenkube": 280}
         # The v2 identity, target and proposal are persisted with the record.
         assert record.fingerprint_v4 and len(record.fingerprint_v4) == 64
         assert (record.target or {})["kind"] == "Deployment"
-        assert (record.proposal or {})["proposed"]["cpu_request_m"] == 300
+        assert (record.proposal or {})["proposed"]["cpu_request_m"] == 280
         assert record.revision == 1
-        # The projection is the chosen source's own (VPA proposed 300m).
-        assert record.potential_savings_cost == 200.0
+        # The projection is the native analysis's own (280m).
+        assert record.potential_savings_cost == 220.0
 
     async def test_consensus_reaches_the_evidence_and_rewards_agreement(self):
         engine = _engine([FakeConnector("vpa", [_cpu(300, "vpa")]), FakeConnector("greenkube", [_cpu(290)])])
@@ -151,35 +151,26 @@ class TestConsensusScan:
         if single.confidence is not None and agreed.confidence is not None and single.confidence < 1:
             assert agreed.confidence > single.confidence
 
-    async def test_a_signal_only_source_can_carry_the_consensus(self, repo):
+    async def test_a_signal_only_source_never_carries_the_value(self, repo):
         engine = _engine([_krr(350), FakeConnector("greenkube", [_cpu(280)])])
 
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
         record = await _only(repo)
-        assert record.recommended_cpu_request_millicores == 350
-        assert record.source == "krr"
-        # KRR's own savings claim is never copied: the value is projected again (or left unknown).
-        assert record.potential_savings_cost != 220.0
-        assert "Consensus across sources" in record.reason
+        assert record.recommended_cpu_request_millicores == 280
+        assert record.source == SourceName.GREENKUBE
+        assert record.sources == ["greenkube", "krr"]
+        assert record.potential_savings_cost == 220.0
 
-    async def test_priority_policy_keeps_the_former_arbitration(self, repo, monkeypatch):
-        engine = _engine([FakeConnector("vpa", [_cpu(200, "vpa")]), FakeConnector("greenkube", [_cpu(280)])])
-        monkeypatch.setattr(engine.config, "RECOMMENDATION_CONSENSUS_POLICY", "priority")
+    async def test_a_source_keeping_the_current_request_never_cancels_the_native_value(self, repo):
+        # KRR reports 500m, the current request: a "keep" vote lowers the agreement, not the value.
+        engine = _engine([_krr(500), FakeConnector("greenkube", [_cpu(280)])])
 
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
         record = await _only(repo)
-        assert (record.source, record.recommended_cpu_request_millicores) == (SourceName.VPA, 200)
-
-    async def test_a_source_keeping_the_current_request_means_no_recommendation(self, repo):
-        # KRR reports 500m, the current request: under safest nothing should change.
-        engine = _engine([_krr(500), FakeConnector("greenkube", [_cpu(280)])])
-
-        persisted = await engine.refresh(AsyncMock(), AsyncMock(), repo)
-
-        assert persisted == []
-        assert await repo.get_active_recommendations() == []
+        assert record.recommended_cpu_request_millicores == 280
+        assert (record.consensus or {})["agreement"] < 0.8
 
 
 class TestRevisionsAcrossScans:
@@ -194,14 +185,20 @@ class TestRevisionsAcrossScans:
         ).refresh(AsyncMock(), AsyncMock(), repo)
         assert (await _only(repo)).revision == 1
 
+        # Another VPA value only moves the confidence: same advice, same revision.
         await _engine(
             [FakeConnector("vpa", [_cpu(320, "vpa")]), _krr(250), FakeConnector("greenkube", [_cpu(240)])]
+        ).refresh(AsyncMock(), AsyncMock(), repo)
+        assert (await _only(repo)).revision == 1
+
+        await _engine(
+            [FakeConnector("vpa", [_cpu(320, "vpa")]), _krr(250), FakeConnector("greenkube", [_cpu(320)])]
         ).refresh(AsyncMock(), AsyncMock(), repo)
         second = await _only(repo)
         assert (second.id, second.revision, second.recommended_cpu_request_millicores) == (first.id, 2, 320)
         [superseded] = await repo.get_revisions(first.id)
-        assert (superseded.revision, superseded.snapshot["recommended_cpu_request_millicores"]) == (1, 300)
-        assert (superseded.consensus or {})["value"] == 300
+        assert (superseded.revision, superseded.snapshot["recommended_cpu_request_millicores"]) == (1, 240)
+        assert (superseded.consensus or {})["value"] == 240
 
 
 class TestPerSourceReconciliation:
@@ -212,7 +209,7 @@ class TestPerSourceReconciliation:
             [FakeConnector("vpa", [_cpu(300, "vpa")]), _krr(250), FakeConnector("greenkube", [_cpu(240)])]
         ).refresh(AsyncMock(), AsyncMock(), repo)
 
-        # VPA is down: KRR alone (250m) must not overwrite the 300m consensus VPA supported.
+        # VPA is down: the native value stands and VPA still supports it through its last known vote.
         engine = _engine(
             [
                 FakeConnector("vpa", error=RuntimeError("apiserver timeout")),
@@ -223,8 +220,10 @@ class TestPerSourceReconciliation:
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
         record = await _only(repo)
-        assert record.recommended_cpu_request_millicores == 300
+        assert record.recommended_cpu_request_millicores == 240
         assert record.revision == 1
+        assert "vpa" in record.sources
+        assert (record.consensus or {})["last_known"] == {"vpa": 300}
 
     async def test_a_failed_supporter_never_holds_back_a_safer_native_value(self, repo):
         await _engine([_krr(250), FakeConnector("greenkube", [_cpu(280)])]).refresh(AsyncMock(), AsyncMock(), repo)
@@ -251,11 +250,11 @@ class TestPerSourceReconciliation:
         record = await _only(repo)
         assert record.recommended_cpu_request_millicores == 700
 
-    async def test_safest_with_a_failed_supporter_follows_the_native_value_above_its_last_vote(self, repo):
+    async def test_a_failed_external_supporter_follows_the_lower_native_value(self, repo):
         await _engine([_krr(250), FakeConnector("greenkube", [_cpu(300)])]).refresh(AsyncMock(), AsyncMock(), repo)
 
-        # safest(native 260m, KRR last known 250m) = 260m. A lower request is a new revision
-        # once three consecutive scans proposed it (IMP-13).
+        # The native value decides (B.3): KRR's last known vote never holds it. A lower request
+        # is a new revision once three consecutive scans proposed it (IMP-13).
         for _ in range(3):
             await _engine([_krr(fail=True), FakeConnector("greenkube", [_cpu(260)])]).refresh(
                 AsyncMock(), AsyncMock(), repo
@@ -263,24 +262,26 @@ class TestPerSourceReconciliation:
 
         assert (await _only(repo)).recommended_cpu_request_millicores == 260
 
-    async def test_safest_with_a_failed_supporter_keeps_its_higher_last_vote(self, repo):
+    async def test_a_failed_supporter_with_a_higher_last_vote_never_holds_the_native_value(self, repo):
         await _engine([_krr(320), FakeConnector("greenkube", [_cpu(280)])]).refresh(AsyncMock(), AsyncMock(), repo)
+        assert (await _only(repo)).recommended_cpu_request_millicores == 280
 
-        # safest(native 260m, KRR last known 320m) = 320m: the last known record stays.
-        await _engine([_krr(fail=True), FakeConnector("greenkube", [_cpu(260)])]).refresh(
-            AsyncMock(), AsyncMock(), repo
-        )
+        for _ in range(3):
+            await _engine([_krr(fail=True), FakeConnector("greenkube", [_cpu(250)])]).refresh(
+                AsyncMock(), AsyncMock(), repo
+            )
 
         record = await _only(repo)
-        assert (record.recommended_cpu_request_millicores, record.revision) == (320, 1)
+        assert (record.recommended_cpu_request_millicores, record.revision) == (250, 2)
+        assert (record.consensus or {})["last_known"] == {"krr": 320}
 
-    async def test_a_failed_signal_only_source_never_makes_its_advice_stale(self, repo):
+    async def test_a_failed_signal_only_supporter_never_makes_the_advice_stale(self, repo):
         await _engine([_krr(350), FakeConnector("greenkube", [_cpu(280)])]).refresh(AsyncMock(), AsyncMock(), repo)
 
         await _engine([_krr(fail=True), FakeConnector("greenkube", [])]).refresh(AsyncMock(), AsyncMock(), repo)
 
         record = await _only(repo)
-        assert record.status is RecommendationStatus.ACTIVE and record.source == "krr"
+        assert record.status is RecommendationStatus.ACTIVE and "krr" in record.sources
 
     async def test_stale_only_when_every_supporting_source_completed_without_it(self, repo):
         await _engine(

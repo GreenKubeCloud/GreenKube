@@ -77,25 +77,22 @@ def test_parse_last_duration_wraps_invalid_values():
 
 
 @pytest.mark.asyncio
-async def test_write_combined_metrics_to_database_saves_and_updates_gauges():
+async def test_write_combined_metrics_to_database_saves_rows():
     metric = _metric()
     repo = _MemoryMetrics()
     processor = MagicMock()
     processor.run_range = AsyncMock(return_value=[metric])
     processor.close = AsyncMock()
-    update_cluster_metrics = MagicMock()
     watermarks = _MemoryWatermarks()
 
     with patch("greenkube.cli.utils.get_combined_metrics_repository", return_value=repo):
         with patch("greenkube.cli.utils.get_processor", return_value=processor):
             with patch("greenkube.cli.utils.get_collection_watermark_repository", return_value=watermarks):
-                with patch("greenkube.cli.utils.update_cluster_metrics", update_cluster_metrics):
-                    report = await utils.write_combined_metrics_to_database(last="10min")
+                report = await utils.write_combined_metrics_to_database(last="10min")
 
     assert report is not None and report.succeeded
     assert processor.run_range.await_count == 1
     assert repo.windows == [[metric]]
-    update_cluster_metrics.assert_called_once_with([metric])
     assert watermarks.value is not None
     processor.close.assert_awaited_once()
 
@@ -143,27 +140,6 @@ async def test_write_combined_metrics_to_database_keeps_watermark_after_processi
 
     assert report is not None and not report.succeeded
     assert watermarks.value == before
-    processor.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_write_combined_metrics_to_database_ignores_gauge_update_failure():
-    metric = _metric()
-    repo = _MemoryMetrics()
-    processor = MagicMock()
-    processor.run_range = AsyncMock(return_value=[metric])
-    processor.close = AsyncMock()
-
-    with patch("greenkube.cli.utils.get_combined_metrics_repository", return_value=repo):
-        with patch("greenkube.cli.utils.get_processor", return_value=processor):
-            with patch(
-                "greenkube.cli.utils.get_collection_watermark_repository",
-                return_value=_MemoryWatermarks(_recent_watermark()),
-            ):
-                with patch("greenkube.cli.utils.update_cluster_metrics", side_effect=RuntimeError("gauge failed")):
-                    await utils.write_combined_metrics_to_database()
-
-    assert repo.windows == [[metric]]
     processor.close.assert_awaited_once()
 
 

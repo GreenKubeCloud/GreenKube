@@ -6,7 +6,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube) [![Build in Public](https://img.shields.io/badge/Build%20in%20Public-blueviolet)](CHANGELOG.md)
 
-Your cluster already has plenty of optimization advice: VPA, Goldilocks, KRR, Kubecost and your cloud console all produce lists, and they often disagree. Nobody wants to resize pods by hand, GitOps reverts anything changed outside Git, and almost no tool tells you what a change really saved once it shipped.
+Your cluster already has plenty of optimization advice: VPA, Goldilocks, KRR and your cloud console all produce lists, and they often disagree. Nobody wants to resize pods by hand, GitOps reverts anything changed outside Git, and almost no tool tells you what a change really saved once it shipped.
 
 GreenKube turns that advice into reviewed pull requests in your GitOps repository, then measures each merged change against its projection: in money, in CO₂e, and in CPU and memory released.
 
@@ -14,8 +14,8 @@ GreenKube turns that advice into reviewed pull requests in your GitOps repositor
 
 ## How it works
 
-1. **Aggregate.** Recommendations from [VPA](docs/sources/vpa.md), [Goldilocks](docs/sources/goldilocks.md), [Robusta KRR](docs/sources/krr.md), [Kubecost](docs/sources/kubecost.md), [Fairwinds Polaris](docs/sources/polaris.md), the [GKE recommender](docs/sources/gke.md) and [Azure Advisor](docs/sources/azure-advisor.md), GreenKube's own analyzers, and any tool through a [push API](docs/sources/push.md), in one model.
-2. **Decide.** A consensus engine weighs the sources (one vote per engine, contested advice labeled), and each recommendation gets evidence, a projected impact, a risk level, a confidence score and a risk-adjusted ranking.
+1. **Aggregate.** GreenKube's own measurements, corroborated by [VPA](docs/sources/vpa.md), [Goldilocks](docs/sources/goldilocks.md), [Robusta KRR](docs/sources/krr.md) and any tool through a [push API](docs/sources/push.md), in one model.
+2. **Decide.** GreenKube's measured value decides each size; the other sources raise or lower the confidence (one vote per engine, contested advice labeled), and each recommendation gets evidence, a projected impact, a risk level, a confidence score and a risk-adjusted ranking.
 3. **Deliver.** GreenKube finds the workload's source in Git through Argo CD or Flux (plain YAML, Kustomize, Helm), shows the exact diff, and opens a pull request on GitHub, GitLab or Gitea once you approve the plan.
 4. **Prove.** It follows the merge through the sync and the rollout, then measures the change against a counterfactual baseline, with confounders and health gates, and records the outcome in an append-only, hash-chained ledger.
 
@@ -74,7 +74,7 @@ The **Setup** page lists what is active and the fix for anything missing. Recomm
 - [Installation](docs/installation.md) and [Upgrading](docs/upgrading.md): external PostgreSQL, Ingress/TLS, high availability, upgrades from 0.3.x.
 - [GitOps automation](docs/automation.md), [Recommendation lifecycle](docs/recommendation.md), [Recommendation sources](docs/sources.md).
 - [Impact model](docs/methodology/impact-model.md) and [Savings measurement](docs/methodology/savings-measurement.md): how cost, CO₂e and released capacity are projected and measured.
-- [Configuration](docs/configuration.md), [API](docs/api.md), [CLI](docs/cli.md), [Architecture](docs/architecture.md), [Prometheus & Grafana](docs/prometheus-grafana.md) (dashboard also on [Grafana.com](https://grafana.com/grafana/dashboards/25377-greenkube-fingreenops-dashboard/)).
+- [Configuration](docs/configuration.md), [API](docs/api.md), [CLI](docs/cli.md), [Architecture](docs/architecture.md), [Prometheus & Grafana](docs/prometheus-grafana.md) (operations dashboard and alerts).
 - [Roadmap](docs/roadmap.md) and [Changelog](CHANGELOG.md): new features land in the *Unreleased* section before each release.
 
 ## Contributing

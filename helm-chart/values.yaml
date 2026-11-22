@@ -595,26 +595,14 @@ config:
     minDecreaseCoverageDays: 7
     # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.
     limitsPolicy: keep
-    # Inputs of the sustainability score only (the advisory analyzers that also
-    # read them were removed in 0.4).
-    zombieCostThreshold: 0.01
-    zombieEnergyThreshold: 1000
-    autoscalingCvThreshold: 0.7
-    autoscalingSpikeRatio: 3.0
-    offPeakIdleThreshold: 0.05
-    offPeakMinIdleHours: 4
-    idleNamespaceEnergyThreshold: 1000
-    carbonAwareThreshold: 1.5
-    nodeUtilizationThreshold: 0.2
     # Assumed monthly cost per GiB of provisioned storage (USD), used to estimate
     # the annual cost savings of deleting orphaned PersistentVolumes.
     storageCostPerGibMonth: 0.1
     # Assumed monthly cost of a provisioned cloud LoadBalancer (USD), used to
     # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
     loadBalancerCostPerMonth: 18.0
-    # Days a LoadBalancer or PersistentVolume must look unused continuously (zombie
-    # workloads and idle namespaces: be observed idle) before its deletion is
-    # recommended. Deletions are never automated; see docs/recommendation.md.
+    # Days a LoadBalancer or PersistentVolume must look unused continuously before
+    # its deletion is recommended. Deletions are never automated; see docs/recommendation.md.
     deletionMinUnusedDays: 7
     # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
     recommendSystemNamespaces: false
@@ -623,10 +611,6 @@ config:
     minMemoryBytes: '16777216'  # 16 MiB — quoted to prevent YAML float serialization
     # Tolerance for considering a recommendation "applied" (e.g. 0.25 = 25% deviation allowed)
     applyTolerance: 0.25
-    # How the proposals of several sources on one target are combined:
-    # safest (least aggressive value, default) | median | weighted (median
-    # weighted by each source's measured track record) | priority (sources.priority wins).
-    consensusPolicy: safest
     # --- Ranking & review ---
     # Time-to-live of a recommendation before it is considered expired (days).
     ttlDays: 14
@@ -733,82 +717,10 @@ sources:
   #     greenkube.orphaned_lb: { enabled: false }
   #     vpa: { enabled: auto }
   # Do not put credentials here: this map is rendered into the ConfigMap.
-  # Connector settings (docs/sources/): krr and push { max_age_hours },
-  # kubecost { url, version, window, cluster_id, paths, ... }.
+  # Connector settings (docs/sources/): krr and push { max_age_hours }.
+  # GreenKube's measured value decides every size; VPA, KRR and pushed signals
+  # move the confidence up or down (docs/recommendation.md).
   settings: {}
-  # Source precedence used to arbitrate conflicts (highest priority first).
-  # Replaces config.recommendations.sourcePriority.
-  priority: vpa,greenkube
-  # Robusta KRR (docs/sources/krr.md). Reports pushed to
-  # POST /api/v1/sources/krr/reports (from CI or this job) become signals.
-  krr:
-    # Optional job mode: a CronJob runs KRR and pushes its JSON report.
-    job:
-      enabled: false
-      schedule: "17 3 * * *"
-      # KRR strategy (`krr <strategy>`); `simple` is CPU p95, memory max + 15%.
-      strategy: simple
-      # Pinned by digest (multi-arch index of the tag).
-      image:
-        repository: robustadev/krr
-        tag: v1.31.1
-        digest: sha256:835bf3b6fec4d8f27d96d236a36542bd87bfcb4f12f3537f8dce7f886916ed9c
-      # Prometheus URL for KRR (`-p`); empty lets KRR discover it in the cluster.
-      prometheusUrl: ""
-      # Extra KRR arguments, e.g. ["--namespace", "shop", "--history_duration", "168"].
-      extraArgs: []
-      # Secret holding a GreenKube API key with scope signals:report (required; a
-      # signals:write key is still accepted, deprecated).
-      apiKeySecret:
-        name: ""
-        key: api-key
-      activeDeadlineSeconds: 3600
-      resources:
-        requests:
-          cpu: 100m
-          memory: 512Mi
-        limits:
-          memory: 2Gi
-      # Create the job's ServiceAccount and read-only ClusterRole; set false
-      # and serviceAccountName to bring your own.
-      rbac:
-        create: true
-      serviceAccountName: ""
-  # Fairwinds Polaris (docs/sources/polaris.md). Audits pushed to
-  # POST /api/v1/sources/polaris/reports (from CI or this job) become hygiene
-  # findings; missing requests get a request computed from observed usage.
-  polaris:
-    # Optional job mode: a CronJob runs `polaris audit` and pushes its JSON report.
-    job:
-      enabled: false
-      schedule: "37 3 * * *"
-      # Pinned by digest (multi-arch index of the tag).
-      image:
-        repository: quay.io/fairwinds/polaris
-        tag: "10.1.8"
-        digest: sha256:7af688527df75c3825395ded8aeb3775fad2027228aa06c9959d39ae6c00e999
-      # Extra `polaris audit` arguments, e.g. ["--namespace", "shop"].
-      extraArgs: []
-      # true: each audit replaces every earlier Polaris finding. Set false when
-      # extraArgs narrows the audit (one namespace): findings are added or refreshed.
-      complete: true
-      # Secret holding a GreenKube API key with scope signals:report (required; a
-      # signals:write key is still accepted, deprecated).
-      apiKeySecret:
-        name: ""
-        key: api-key
-      activeDeadlineSeconds: 1800
-      resources:
-        requests:
-          cpu: 50m
-          memory: 128Mi
-        limits:
-          memory: 512Mi
-      # Create the job's ServiceAccount and read-only ClusterRole; set false
-      # and serviceAccountName to bring your own.
-      rbac:
-        create: true
-      serviceAccountName: ""
   # Known minimum each tool proposes, per engine family or source id (roadmap
   # A.5). A proposal equal to it is the tool's floor, not a signal of need, and
   # is not counted in the consensus. Defaults: KRR `simple` (--mem-min 100,
@@ -1189,7 +1101,8 @@ postgres:
 # Prometheus → GreenKube monitoring integration (optional).
 # This controls whether Prometheus scrapes GreenKube's own /prometheus/metrics endpoint.
 # This is NOT required for GreenKube to collect metrics FROM Prometheus — that works automatically.
-# Enable this only if you want GreenKube-computed metrics (CO₂e, cost, energy) in Grafana.
+# Enable it to alert on GreenKube itself (collection, loops, scans, measurement, ledger health) and to
+# chart the ledger savings counters (dashboards/greenkube-operations.json).
 # IMPORTANT: ServiceMonitor requires the Prometheus Operator CRDs to be installed
 # (e.g. via kube-prometheus-stack). If you don't have Prometheus Operator,
 # leave serviceMonitor.enabled=false to avoid installation errors.

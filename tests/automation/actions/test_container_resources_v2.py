@@ -127,8 +127,8 @@ def test_an_increase_not_sized_by_greenkube_stays_advisory(
     source: str, consensus: dict | None, sample_count: int
 ) -> None:
     """Regression (review, H1): the wave-3a increase bounds (pod-bounded usage, 2x cap, warm-up
-    exclusion) live in the native analyzer only. A 5x VPA increase chosen by the SAFEST consensus
-    must not become a deliverable action."""
+    exclusion) live in the native analyzer only. A 5x VPA increase stored with a VPA-chosen
+    consensus (before B.3) must not become a deliverable action."""
     recommendation = _recommendation(
         current=512 * MIB, proposed=5 * 512 * MIB, source=source, consensus=consensus, sample_count=sample_count
     )

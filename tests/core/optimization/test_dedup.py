@@ -44,7 +44,7 @@ def test_single_source_gets_provenance():
     assert recs[0].sources == ["greenkube"]
 
 
-def test_safest_consensus_keeps_the_least_aggressive_proposal():
+def test_the_native_value_decides_and_vpa_supports_it():
     native = _workload_rec(source=RecommendationSource.GREENKUBE, cpu=250)
     vpa = _workload_rec(source=RecommendationSource.VPA, cpu=200)
 
@@ -56,47 +56,31 @@ def test_safest_consensus_keeps_the_least_aggressive_proposal():
     assert recs[0].sources == ["greenkube", "vpa"]
     assert recs[0].recommended_cpu_request_millicores == 250
     consensus = recs[0].consensus or {}
-    assert consensus["policy"] == "safest"
+    assert consensus["policy"] == "native"
     assert consensus["spread"]["cpu_request_m"] == {"greenkube": 250, "vpa": 200}
     assert consensus["agreement"] == 0.8
 
 
-def test_priority_policy_keeps_the_former_arbitration():
-    cfg = Config()
-    cfg.RECOMMENDATION_CONSENSUS_POLICY = "priority"
-    native = _workload_rec(source=RecommendationSource.GREENKUBE, cpu=250)
-    vpa = _workload_rec(source=RecommendationSource.VPA, cpu=200)
+def test_a_lower_or_higher_vpa_value_never_replaces_the_native_one():
+    for vpa_cpu in (100, 400):
+        native = _workload_rec(source=RecommendationSource.GREENKUBE, cpu=250)
+        vpa = _workload_rec(source=RecommendationSource.VPA, cpu=vpa_cpu)
 
-    recs = finalize_recommendations([native, vpa], cfg)
+        [rec] = finalize_recommendations([native, vpa], Config())
 
-    assert len(recs) == 1
-    assert recs[0].source == RecommendationSource.VPA
-    assert recs[0].sources == ["vpa", "greenkube"]
-    assert recs[0].recommended_cpu_request_millicores == 200
+        assert rec.source == RecommendationSource.GREENKUBE
+        assert rec.recommended_cpu_request_millicores == 250
 
 
-def test_source_priority_breaks_ties_between_equal_proposals():
+def test_equal_proposals_are_carried_by_the_native_record():
     native = _workload_rec(source=RecommendationSource.GREENKUBE, cpu=200)
     vpa = _workload_rec(source=RecommendationSource.VPA, cpu=200)
 
     recs = finalize_recommendations([native, vpa], Config())
 
     assert len(recs) == 1
-    assert recs[0].source == RecommendationSource.VPA
-    assert (recs[0].consensus or {})["chosen_from"] == ["greenkube", "vpa"]
-
-
-def test_priority_config_can_flip_winner():
-    cfg = Config()
-    cfg.RECOMMENDATION_CONSENSUS_POLICY = "priority"
-    cfg.RECOMMENDATION_SOURCE_PRIORITY = "greenkube,vpa"
-    native = _workload_rec(source=RecommendationSource.GREENKUBE, cpu=250)
-    vpa = _workload_rec(source=RecommendationSource.VPA, cpu=200)
-
-    recs = finalize_recommendations([native, vpa], cfg)
-
-    assert len(recs) == 1
     assert recs[0].source == RecommendationSource.GREENKUBE
+    assert (recs[0].consensus or {})["chosen_from"] == ["greenkube", "vpa"]
 
 
 def test_distinct_capabilities_coexist():
@@ -150,25 +134,28 @@ def _krr_entry(cpu: int, current: int = 500) -> SignalEntry:
     return (signal, "krr", None)
 
 
-def test_a_consensus_that_keeps_the_current_request_is_no_recommendation():
-    """KRR reports a value for every container: 'keep 500m' wins under safest, so nothing changes."""
+def test_a_keep_vote_never_cancels_the_native_value():
+    """KRR reports a value for every container: its 'keep 500m' lowers the agreement, not the native value."""
     native = _workload_rec(cpu=280).model_copy(update={"current_cpu_request_millicores": 500})
     entries = entries_for_recommendations([native]) + [_krr_entry(500)]
 
-    assert finalize_entries(entries, Config()) == []
+    [rec] = finalize_entries(entries, Config())
+
+    assert rec.recommended_cpu_request_millicores == 280
 
 
 def test_a_signal_only_source_alone_at_the_current_request_is_no_recommendation():
     assert finalize_entries([_krr_entry(500)], Config()) == []
 
 
-def test_a_signal_only_source_below_the_current_request_still_counts():
+def test_a_signal_only_source_below_the_current_request_supports_the_native_value():
     native = _workload_rec(cpu=280).model_copy(update={"current_cpu_request_millicores": 500})
     entries = entries_for_recommendations([native]) + [_krr_entry(300)]
 
     [rec] = finalize_entries(entries, Config())
 
-    assert (rec.recommended_cpu_request_millicores, rec.current_cpu_request_millicores) == (300, 500)
+    assert (rec.recommended_cpu_request_millicores, rec.current_cpu_request_millicores) == (280, 500)
+    assert rec.sources == ["greenkube", "krr"]
 
 
 def test_a_floored_value_equal_to_the_current_request_is_no_recommendation():

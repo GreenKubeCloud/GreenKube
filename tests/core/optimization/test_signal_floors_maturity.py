@@ -3,8 +3,10 @@
 The field scenarios of the report are pinned here:
 
 * seaweedfs-volume: GreenKube measured 42 Mi, VPA (Fairwinds chart floor) and KRR
-  (``simple`` floor) both proposed 100 Mi; ``safest`` kept 100 Mi. A value equal to
-  a known tool minimum is not a signal of need: the native value must win.
+  (``simple`` floor) both proposed 100 Mi; the former ``safest`` policy kept 100 Mi.
+  A value equal to a known tool minimum is not a signal of need: the native value
+  must win (since B.3 it always decides; the floor screen keeps such a value out
+  of the agreement too).
 * csi-nfs-controller ``liveness-probe`` sidecar: KRR alone (no native proposal)
   raised 20 Mi to 100 Mi with ``agreement: 1.0``. A source alone never creates a
   recommendation.
@@ -193,10 +195,16 @@ class TestFieldScenarios:
         # VPA 490m on a 500m request is a 2 % change: below 5 % it votes "keep 500m", like VPA 500m would.
         engine = _engine([FakeConnector("greenkube", [_cpu(400)]), FakeConnector("vpa", [_cpu(490, "vpa")])])
 
-        assert await engine.refresh(AsyncMock(), AsyncMock(), repo) == []
+        await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
-    async def test_a_small_change_holds_the_value_like_a_keep_vote(self, repo):
-        # Current 400 Mi, native 200 Mi: VPA 400 Mi holds 400 Mi under safest, so VPA 410 Mi must too.
+        [record] = await repo.get_active_recommendations()
+        assert record.recommended_cpu_request_millicores == 400
+        consensus = record.consensus or {}
+        assert consensus["spread"]["cpu_request_m"]["vpa"] == 500
+        assert {vote["source_id"]: vote["reason"] for vote in consensus["ignored_votes"]} == {"vpa": "below_min_change"}
+
+    async def test_a_keep_vote_lowers_the_agreement_never_the_native_value(self, repo):
+        # Current 400 Mi, native 200 Mi: VPA 400 Mi (or 410 Mi, a keep vote) does not hold 400 Mi.
         for vpa_value in (400 * MIB, 410 * MIB):
             engine = _engine(
                 [
@@ -205,10 +213,12 @@ class TestFieldScenarios:
                 ]
             )
 
-            assert await engine.refresh(AsyncMock(), AsyncMock(), repo) == [], vpa_value
+            [rec] = await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
-    @pytest.mark.parametrize("policy", ["safest", "priority", "median", "weighted"])
-    async def test_a_small_change_never_holds_back_a_native_increase(self, repo, monkeypatch, policy):
+            assert rec.recommended_memory_request_bytes == 200 * MIB, vpa_value
+            assert (rec.consensus or {})["agreement"] == 0.5
+
+    async def test_a_small_change_never_holds_back_a_native_increase(self, repo):
         # Current 400 Mi, native 600 Mi (an increase, e.g. OOM-driven), VPA 410 Mi (below the minimum)
         # and KRR 380 Mi: "keep 400 Mi" must not win and cancel the increase.
         engine = _engine(
@@ -218,7 +228,6 @@ class TestFieldScenarios:
                 _krr(("seaweedfs", "StatefulSet", "seaweedfs-volume", "volume", 400 * MIB, 380 * MIB)),
             ]
         )
-        monkeypatch.setattr(engine.config, "RECOMMENDATION_CONSENSUS_POLICY", policy)
 
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
@@ -249,13 +258,13 @@ class TestFieldScenarios:
             *ballots_for_signal(signal("vpa", 410 * MIB)),
         ]
 
-        [outcome] = consolidate(ballots, "safest", screen=VoteScreen())
+        [outcome] = consolidate(ballots, screen=VoteScreen())
 
         consensus = outcome.consensus
         assert [(vote.source_id, vote.reason) for vote in consensus.ignored_votes] == [("vpa", "below_min_change")]
-        # The VPA vote counts at the current request (400 Mi), not at 410 Mi, and holds it.
+        # The VPA vote counts at the current request (400 Mi), not at 410 Mi; the native value decides.
         assert consensus.spread["memory_request_bytes"]["vpa"] == 400 * MIB
-        assert consensus.value == 400 * MIB
+        assert consensus.value == 200 * MIB
 
     async def test_a_measured_external_vote_above_the_floor_still_counts(self, repo):
         engine = _engine(
@@ -268,9 +277,11 @@ class TestFieldScenarios:
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
         [record] = await repo.get_active_recommendations()
-        # safest: KRR's measured 128 Mi is a real signal and is the safer value.
-        assert record.recommended_memory_request_bytes == 128 * MIB
-        assert (record.consensus or {}).get("ignored_votes") == []
+        # KRR's measured 128 Mi is a real vote (it counts in the agreement), but the native value decides.
+        assert record.recommended_memory_request_bytes == NATIVE_SEAWEEDFS
+        consensus = record.consensus or {}
+        assert consensus.get("ignored_votes") == []
+        assert consensus["spread"]["memory_request_bytes"]["krr"] == 128 * MIB
 
     async def test_floors_are_configurable_per_source(self, repo, monkeypatch):
         engine = _engine(
@@ -285,7 +296,8 @@ class TestFieldScenarios:
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
         [record] = await repo.get_active_recommendations()
-        assert record.recommended_memory_request_bytes == 100 * MIB
+        assert record.recommended_memory_request_bytes == NATIVE_SEAWEEDFS
+        assert (record.consensus or {}).get("ignored_votes") == []
 
 
 class TestVpaMaturity:
@@ -389,13 +401,11 @@ class TestVpaMaturity:
 
         assert recs
 
-    @pytest.mark.parametrize("policy", ["priority", "median", "weighted"])
-    async def test_unknown_maturity_never_pushes_a_decrease(self, policy, monkeypatch):
+    async def test_unknown_maturity_never_corroborates_a_decrease(self):
         from greenkube.core.optimization.providers.vpa import VpaSignalSource, VpaSource
         from greenkube.models.metrics import CombinedMetric
 
         cfg = get_config()
-        monkeypatch.setattr(cfg, "RECOMMENDATION_CONSENSUS_POLICY", policy)
         # No checkpoint: maturity unknown. VPA proposes 50m where GreenKube measured a need of 400m.
         vpa = self._vpa()
         vpa.cpu_target_millicores = 50

@@ -44,9 +44,15 @@ logger = logging.getLogger(__name__)
 #: Maximum length of a problem message kept for the API.
 _MESSAGE_LIMIT = 300
 
-#: Built-in source ids removed in 0.4 (roadmap B): their SOURCES_CONFIG entries are ignored for one release.
+#: Built-in sources removed in phase B: their ``SOURCES_CONFIG`` entries are accepted and
+#: ignored for one release, with a warning (roadmap B.0). B.3: the connectors; B.1: the native
+#: advisory analyzers and the Karpenter NodePool heuristic.
 REMOVED_SOURCE_IDS = frozenset(
     {
+        "kubecost",
+        "polaris",
+        "gke",
+        "azure_advisor",
         "greenkube.zombie",
         "greenkube.autoscaling",
         "greenkube.off_peak",
@@ -214,17 +220,11 @@ class SourceRegistry:
                 continue
             enabled = settings.enabled or defaults.get(descriptor.id) or cls.default_enabled
             configured.append(ConfiguredSource(descriptor=descriptor, enabled=EnabledMode(enabled), settings=settings))
-        for unknown in sorted(set(settings_by_id) - set(self._descriptors)):
-            if unknown in REMOVED_SOURCE_IDS:
-                # Accepted and ignored for one release (roadmap B.0).
-                self.problems.append(
-                    RegistryProblem(
-                        code="removed_source",
-                        message=f"SOURCES_CONFIG names '{unknown}', which was removed in 0.4: its settings are ignored",
-                        source_id=unknown,
-                    )
-                )
-                continue
+        removed = sorted((set(settings_by_id) & REMOVED_SOURCE_IDS) - set(self._descriptors))
+        if removed:
+            # Warned once at start by the configuration (removed_settings_in_use).
+            logger.debug("Ignoring SOURCES_CONFIG of removed source(s) %s.", ", ".join(removed))
+        for unknown in sorted(set(settings_by_id) - set(self._descriptors) - REMOVED_SOURCE_IDS):
             self.problems.append(
                 RegistryProblem(
                     code="unknown_source",

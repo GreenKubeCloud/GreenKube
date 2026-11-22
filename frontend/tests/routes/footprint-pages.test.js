@@ -125,7 +125,8 @@ describe('/footprint charts', () => {
 		expect(within(charts).getByText('Active Pods')).toBeInTheDocument();
 		expect(within(charts).getByText('CO₂ Emissions Over Time')).toBeInTheDocument();
 		expect(within(charts).getByText('Top Pods by CO₂')).toBeInTheDocument();
-		expect(screen.getByText(/Grafana dashboard/)).toBeInTheDocument();
+		expect(screen.getByText(/export it as CSV or JSON/)).toBeInTheDocument();
+		expect(screen.queryByText(/Grafana/)).not.toBeInTheDocument();
 	});
 
 	it('shows the node idle share and the cluster total next to the allocated totals', async () => {

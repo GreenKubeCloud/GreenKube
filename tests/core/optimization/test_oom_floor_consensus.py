@@ -1,12 +1,13 @@
-"""A native OOM-driven memory increase is a lower bound of every consensus policy.
+"""A native OOM-driven memory increase is a lower bound of the consensus.
 
 The OOM kill proves the container needs more than its limit: no external
 ballot (VPA, KRR, a pushed or plugin signal) may bring the consolidated value
-below GreenKube's OOM-driven increase, whatever ``RECOMMENDATION_CONSENSUS_POLICY``
-says. Before the fix the analyzer's ``oom_kills`` trigger only reached the
-recommendation as reason text: under ``priority`` (``vpa`` first), ``median`` or
-``weighted`` with three voters, VPA 450 Mi or KRR 500 Mi replaced a native
-600 Mi increase.
+below GreenKube's OOM-driven increase. Before the fix the analyzer's
+``oom_kills`` trigger only reached the recommendation as reason text: under the
+former ``priority``, ``median`` or ``weighted`` policies, VPA 450 Mi or KRR
+500 Mi replaced a native 600 Mi increase. Since B.3 the native value decides;
+the floor still raises a native representative that chose less (a decrease of
+the same engine family) and is recorded in every case.
 """
 
 from __future__ import annotations
@@ -42,7 +43,6 @@ from tests.core.optimization.test_signal_floors_maturity import (  # pyrefly: ig
 )
 
 MIB = 1024 * 1024
-POLICIES = ["safest", "priority", "median", "weighted"]
 
 
 @pytest.fixture
@@ -72,36 +72,29 @@ def _sources(*, oom: bool):
 
 
 class TestOomFloor:
-    @pytest.mark.parametrize("policy", POLICIES)
-    async def test_an_oom_driven_native_increase_is_never_lowered(self, repo, monkeypatch, policy):
+    async def test_an_oom_driven_native_increase_is_never_lowered(self, repo):
         engine = _engine(_sources(oom=True))
-        monkeypatch.setattr(engine.config, "RECOMMENDATION_CONSENSUS_POLICY", policy)
 
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
         [record] = await repo.get_active_recommendations()
         assert record.recommended_memory_request_bytes == 600 * MIB
         floor = (record.consensus or {}).get("floor")
-        assert floor is not None, policy
+        assert floor is not None
         assert floor["reason"] == "oom_kills"
         assert floor["source_id"] == "greenkube"
         assert floor["value"] == 600 * MIB
-        # safest already picks 600 Mi: the floor is recorded, but it changed nothing.
-        assert floor["applied"] is (policy != "safest")
+        # The native value already is 600 Mi: the floor is recorded, but it changed nothing.
+        assert floor["applied"] is False
         assert record.consensus["value"] == 600 * MIB
 
-    @pytest.mark.parametrize(
-        ("policy", "expected"),
-        [("safest", 600), ("priority", 450), ("median", 500), ("weighted", 500)],
-    )
-    async def test_a_non_oom_native_increase_keeps_the_policy_behaviour(self, repo, monkeypatch, policy, expected):
+    async def test_a_non_oom_native_increase_is_still_the_native_value(self, repo):
         engine = _engine(_sources(oom=False))
-        monkeypatch.setattr(engine.config, "RECOMMENDATION_CONSENSUS_POLICY", policy)
 
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
         [record] = await repo.get_active_recommendations()
-        assert record.recommended_memory_request_bytes == expected * MIB
+        assert record.recommended_memory_request_bytes == 600 * MIB
         assert (record.consensus or {}).get("floor") is None
 
     async def test_the_floor_is_stored_in_the_consensus_evidence(self, repo, monkeypatch):
@@ -111,7 +104,6 @@ class TestOomFloor:
         # The scan has no metric series here: give every recommendation an evidence block to fill.
         monkeypatch.setattr(enrich, "build_evidence", lambda rec, context: RecommendationEvidence())
         engine = _engine(_sources(oom=True))
-        monkeypatch.setattr(engine.config, "RECOMMENDATION_CONSENSUS_POLICY", "priority")
 
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
@@ -123,8 +115,8 @@ class TestOomFloor:
             "signal_id": floor["signal_id"],
             "value": 600 * MIB,
             "reason": "oom_kills",
-            "policy_value": 450 * MIB,
-            "applied": True,
+            "policy_value": 600 * MIB,
+            "applied": False,
         }
         assert record.consensus["floor"] == floor
         # The chosen source is the native analyzer, so the record keeps its OOM explanation.
@@ -147,15 +139,14 @@ def _signal(source_id: str, proposed: int) -> SourceSignal:
 
 
 class TestConsolidateFloor:
-    @pytest.mark.parametrize("policy", POLICIES)
-    def test_the_floor_holds_without_a_vote_screen(self, policy):
+    def test_the_floor_holds_without_a_vote_screen(self):
         ballots = [
             *ballots_for_signal(_signal("greenkube", 600 * MIB), source="greenkube", floor_reason="oom_kills"),
             *ballots_for_signal(_signal("vpa", 450 * MIB), source="vpa"),
             *ballots_for_signal(_signal("krr", 500 * MIB)),
         ]
 
-        [outcome] = consolidate(ballots, policy, priorities={"vpa": 30, "krr": 20, "greenkube": 10})
+        [outcome] = consolidate(ballots)
 
         assert outcome.consensus.value == 600 * MIB
         assert outcome.chosen.source == "greenkube"
@@ -170,9 +161,9 @@ class TestConsolidateFloor:
             *ballots_for_signal(_signal("krr", 500 * MIB)),
         ]
 
-        [outcome] = consolidate(ballots, "median")
+        [outcome] = consolidate(ballots)
 
-        assert outcome.consensus.value == 500 * MIB
+        assert outcome.consensus.value == 450 * MIB
         assert outcome.consensus.floor is None
 
 
@@ -195,14 +186,13 @@ class TestAnalyzerMarker:
 
 
 class TestScanPath:
-    async def test_the_real_analyzer_floor_survives_the_scan_under_priority(self, monkeypatch):
+    async def test_the_real_analyzer_floor_survives_the_scan(self):
         """The native analyzer's own recommendation reaches the consensus with its marker."""
         from greenkube.core.config import get_config
         from greenkube.signals.adapters import analyzer_source_class
         from greenkube.signals.sdk import SourceDeps, SourceSettings
 
         cfg = get_config()
-        monkeypatch.setattr(cfg, "RECOMMENDATION_CONSENSUS_POLICY", "priority")
         context = OptimizationContext(config=cfg, usage=_snapshot(_summary(oom_kill_count=2)))
         native = analyzer_source_class(MemoryRightsizingAnalyzer)(
             SourceSettings(), SourceDeps(config=cfg, cluster_uid="c1")
@@ -215,8 +205,8 @@ class TestScanPath:
         [rec] = (await engine.collect(context)).recommendations
 
         assert rec.recommended_memory_request_bytes == 96 * MIB
-        assert (rec.consensus or {})["floor"]["applied"] is True
-        assert rec.consensus["floor"]["policy_value"] == 80 * MIB
+        assert (rec.consensus or {})["floor"]["value"] == 96 * MIB
+        assert rec.consensus["floor"]["applied"] is False
 
 
 def _limit_only(source_id: str = "push:evil", capability: Capability = Capability.CONTAINER_REQUESTS) -> SourceSignal:
@@ -276,15 +266,14 @@ PUSHED_LIMIT_ONLY = {
 class TestNonNumericBallots:
     """Review finding 1: a request-group ballot without a request value disabled the floor."""
 
-    @pytest.mark.parametrize("policy", POLICIES)
-    def test_a_ballot_without_a_request_value_is_ignored_and_the_floor_holds(self, policy):
+    def test_a_ballot_without_a_request_value_is_ignored_and_the_floor_holds(self):
         from greenkube.core.optimization.dedup import materialize
         from greenkube.signals.consensus import VoteScreen
 
         ballots = [*_native_and_vpa_ballots(), *ballots_for_signal(_limit_only())]
         assert len({ballot.group_key for ballot in ballots}) == 1
 
-        [outcome] = consolidate(ballots, policy, priorities={"vpa": 30, "greenkube": 10}, screen=VoteScreen())
+        [outcome] = consolidate(ballots, screen=VoteScreen())
         rec = materialize(outcome)
 
         assert rec is not None and rec.recommended_memory_request_bytes == 600 * MIB
@@ -344,7 +333,7 @@ class TestNonNumericBallots:
                     signals=[
                         _limit_only("acme.sizer"),
                         advisory("RIGHTSIZING_MEMORY"),
-                        # Advice of its own kind (like GKE's WORKLOAD_UNDERPROVISIONED) never joins a value group.
+                        # Advice of its own kind (WORKLOAD_UNDERPROVISIONED) never joins a value group.
                         advisory("WORKLOAD_UNDERPROVISIONED"),
                         _signal("acme.sizer", 300 * MIB),
                     ]
@@ -369,7 +358,7 @@ class TestNonNumericBallots:
 
         advice = _signal("greenkube", 1).model_copy(update={"proposal": AdvisoryProposal(text="check it")})
 
-        [outcome] = consolidate(ballots_for_signal(advice, source="greenkube"), "safest")
+        [outcome] = consolidate(ballots_for_signal(advice, source="greenkube"))
 
         assert outcome.consensus.ignored_votes == []
 
@@ -399,7 +388,7 @@ class TestFloorFollowUps:
         assert out.recommended_memory_request_bytes == 580 * MIB
 
     def test_an_external_ballot_tied_with_the_floor_never_carries_the_record(self):
-        """Review finding 3: on an exact tie the higher-priority external record was used."""
+        """Review finding 3: on an exact tie an external record was used."""
         ballots = [
             *ballots_for_signal(
                 _signal("greenkube", 600 * MIB), source="greenkube", floor_reason="oom_kills", payload="NATIVE"
@@ -410,33 +399,59 @@ class TestFloorFollowUps:
             *ballots_for_signal(_signal("other", 430 * MIB)),
         ]
 
-        [outcome] = consolidate(ballots, "median", priorities={"vpa": 30, "krr": 20, "greenkube": 10})
+        [outcome] = consolidate(ballots)
 
-        assert outcome.consensus.floor is not None and outcome.consensus.floor.applied
+        assert outcome.consensus.floor is not None
         assert outcome.chosen.source == "greenkube" and outcome.chosen.payload == "NATIVE"
         assert set(outcome.consensus.chosen_from) == {"greenkube", "vpa"}
 
-    async def test_the_reason_names_an_applied_floor(self, monkeypatch):
-        """Review finding 4: the summary with the floor note never reached the reason."""
+    async def test_the_reason_is_unchanged_when_the_floor_did_not_apply(self):
         from greenkube.core.config import get_config
 
         engine = _engine(_sources(oom=True))
-        monkeypatch.setattr(engine.config, "RECOMMENDATION_CONSENSUS_POLICY", "priority")
-        context = OptimizationContext(config=get_config(), metrics=[])
-
-        [rec] = (await engine.collect(context)).recommendations
-
-        assert rec.consensus is not None and rec.consensus["floor"]["applied"] is True
-        assert "oom_kills floor 600Mi" in rec.reason
-
-    async def test_the_reason_is_unchanged_when_the_floor_did_not_apply(self, monkeypatch):
-        from greenkube.core.config import get_config
-
-        engine = _engine(_sources(oom=True))
-        monkeypatch.setattr(engine.config, "RECOMMENDATION_CONSENSUS_POLICY", "safest")
         context = OptimizationContext(config=get_config(), metrics=[])
 
         [rec] = (await engine.collect(context)).recommendations
 
         assert rec.consensus is not None and rec.consensus["floor"]["applied"] is False
         assert "floor" not in rec.reason
+
+
+class TestFloorRaisesTheValue:
+    """The floor is not only recorded: it raises a consensus that chose less (review of B.3).
+
+    Two native ballots of one engine family (``greenkube``) are one vote: the
+    family's representative is the one with a v1 recommendation, here a 300 Mi
+    decrease. The OOM-driven 600 Mi increase of the same family has no payload,
+    so only the floor brings the value back to 600 Mi.
+    """
+
+    @staticmethod
+    def _ballots():
+        decrease = _memory(300 * MIB, current=400 * MIB)
+        return [
+            *ballots_for_signal(
+                _signal("greenkube", 300 * MIB),
+                source="greenkube",
+                payload=decrease,
+                payload_kind="RIGHTSIZING_MEMORY",
+            ),
+            *ballots_for_signal(_signal("greenkube", 600 * MIB), source="greenkube", floor_reason="oom_kills"),
+            *ballots_for_signal(_signal("vpa", 450 * MIB), source="vpa"),
+        ]
+
+    @pytest.mark.parametrize("screened", [False, True])
+    def test_the_oom_floor_raises_the_native_representative(self, screened):
+        from greenkube.core.optimization.dedup import materialize
+        from greenkube.signals.consensus import VoteScreen
+
+        [outcome] = consolidate(self._ballots(), screen=VoteScreen() if screened else None)
+
+        floor = outcome.consensus.floor
+        assert floor is not None and floor.applied is True
+        assert floor.policy_value == 300 * MIB
+        assert outcome.consensus.value == 600 * MIB
+        assert outcome.chosen.floor_reason == "oom_kills"
+        rec = materialize(outcome)
+        assert rec is not None and rec.recommended_memory_request_bytes == 600 * MIB
+        assert "oom_kills floor" in (rec.reason or "")

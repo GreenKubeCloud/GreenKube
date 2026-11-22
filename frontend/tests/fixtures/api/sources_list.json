@@ -235,7 +235,7 @@
         "container_requests"
       ],
       "consecutive_failures": 0,
-      "description": "Container request recommendations from KRR JSON reports pushed to POST /api/v1/sources/krr/reports (from CI or the optional CronJob).",
+      "description": "Container request recommendations from KRR JSON reports pushed to POST /api/v1/sources/krr/reports (from CI or a CronJob, see docs/sources/krr.md).",
       "display_name": "Robusta KRR",
       "distribution": null,
       "enabled": "auto",
@@ -259,39 +259,6 @@
       "status": "pending",
       "status_reason": "no scan has run this source yet",
       "tier": "oss",
-      "version": null
-    },
-    {
-      "capabilities": [
-        "cleanup",
-        "container_requests",
-        "node_pool"
-      ],
-      "consecutive_failures": 0,
-      "description": "Kubecost savings APIs: container request sizing, abandoned workloads (review only) and node-group sizing.",
-      "display_name": "Kubecost",
-      "distribution": null,
-      "enabled": "auto",
-      "entry_point": null,
-      "health": null,
-      "id": "kubecost",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": null,
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 180.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 1800.0,
-        "probe_timeout_seconds": 15.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "pending",
-      "status_reason": "no scan has run this source yet",
-      "tier": "commercial",
       "version": null
     },
     {
@@ -331,101 +298,6 @@
       "status": "pending",
       "status_reason": "no scan has run this source yet",
       "tier": "custom",
-      "version": null
-    },
-    {
-      "capabilities": [
-        "container_requests",
-        "hygiene"
-      ],
-      "consecutive_failures": 0,
-      "description": "Hygiene findings from Polaris audit reports pushed to POST /api/v1/sources/polaris/reports (from CI or the optional CronJob); missing requests get a request computed from observed usage.",
-      "display_name": "Fairwinds Polaris",
-      "distribution": null,
-      "enabled": "auto",
-      "entry_point": null,
-      "health": null,
-      "id": "polaris",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": null,
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 60.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 0.0,
-        "probe_timeout_seconds": 15.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "pending",
-      "status_reason": "no scan has run this source yet",
-      "tier": "oss",
-      "version": null
-    },
-    {
-      "capabilities": [
-        "container_requests"
-      ],
-      "consecutive_failures": 0,
-      "description": "Google Recommender insights about over- and under-provisioned GKE workloads (Workload Identity, read only).",
-      "display_name": "GKE recommender",
-      "distribution": null,
-      "enabled": "auto",
-      "entry_point": null,
-      "health": null,
-      "id": "gke",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": null,
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 180.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 3600.0,
-        "probe_timeout_seconds": 15.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "pending",
-      "status_reason": "no scan has run this source yet",
-      "tier": "cloud",
-      "version": null
-    },
-    {
-      "capabilities": [
-        "hygiene",
-        "node_pool"
-      ],
-      "consecutive_failures": 0,
-      "description": "Azure Advisor configuration advice about this AKS cluster (advisory only; Workload Identity, read only).",
-      "display_name": "Azure Advisor (AKS)",
-      "distribution": null,
-      "enabled": "auto",
-      "entry_point": null,
-      "health": null,
-      "id": "azure_advisor",
-      "last_run": null,
-      "last_success_at": null,
-      "legacy_source": null,
-      "limits": {
-        "circuit_cooldown_seconds": 900.0,
-        "collect_timeout_seconds": 120.0,
-        "failure_threshold": 3,
-        "max_signals": 50000,
-        "min_interval_seconds": 3600.0,
-        "probe_timeout_seconds": 15.0
-      },
-      "origin": "builtin",
-      "recommendation_count": 0,
-      "signal_count": 0,
-      "status": "pending",
-      "status_reason": "no scan has run this source yet",
-      "tier": "cloud",
       "version": null
     },
     {

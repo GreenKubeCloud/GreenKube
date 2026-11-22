@@ -4,10 +4,10 @@
 The engine passes the signals of every source, each with the v1 recommendation
 of built-in sources (native analyzers, VPA). Signals
 are grouped by target, capability and finding kind and combined by the
-:mod:`consensus engine <greenkube.signals.consensus>` (policy
-``RECOMMENDATION_CONSENSUS_POLICY``); no source's proposal is discarded
-unseen any more: every supporting source is listed in ``sources`` and in the
-consensus spread.
+:mod:`consensus engine <greenkube.signals.consensus>`: GreenKube's measured
+value decides the size and the other sources move the confidence (roadmap
+B.3). No source's proposal is discarded unseen: every supporting source is
+listed in ``sources`` and in the consensus spread.
 
 The consolidated recommendation is built on the v1 recommendation of the
 source whose proposal was chosen. When the chosen proposal comes from a
@@ -42,18 +42,15 @@ from greenkube.signals.consensus import (
     KIND_REQUEST_RESOURCES,
     Ballot,
     ConsensusOutcome,
-    ConsensusPolicy,
     VoteScreen,
     ballots_for_signal,
     consolidate,
-    parse_policy,
 )
 from greenkube.signals.mapping import recommendation_from_signal, signal_from_recommendation
 from greenkube.signals.model import Capability, SourceSignal
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
-    from greenkube.core.optimization.track_record import TrackRecordBook
     from greenkube.signals.runtime import SourceReport
 
 logger = logging.getLogger(__name__)
@@ -75,21 +72,6 @@ def _source_value(rec: Recommendation) -> str:
 
 def _type_value(rec: Recommendation) -> str:
     return source_text(rec.type)
-
-
-def _source_priority_map(config: "Config") -> Dict[str, int]:
-    from greenkube.core.optimization.registry import parse_source_priority
-
-    return parse_source_priority(getattr(config, "RECOMMENDATION_SOURCE_PRIORITY", None))
-
-
-def consensus_policy(config: "Config") -> ConsensusPolicy:
-    """The configured consensus policy (``safest`` when unset or invalid)."""
-    try:
-        return parse_policy(getattr(config, "RECOMMENDATION_CONSENSUS_POLICY", None))
-    except ValueError:
-        logger.warning("Invalid RECOMMENDATION_CONSENSUS_POLICY; using safest.")
-        return ConsensusPolicy.SAFEST
 
 
 def tool_floors(config: "Config") -> Dict[str, Dict[str, int]]:
@@ -220,28 +202,13 @@ def consensus_refiner(context: Any) -> Refine:
     return refine
 
 
-def track_record_weights(book: Optional["TrackRecordBook"]) -> Optional[Callable[[Ballot], float]]:
-    """Weights of the ``weighted`` policy: each source's realization rate (Beta mean, I3)."""
-    if book is None or not book.records:
-        return None
-    from greenkube.models.metrics import capability_for_type
-
-    def weight(ballot: Ballot) -> float:
-        try:
-            capability = capability_for_type(RecommendationType(ballot.kind))
-        except ValueError:
-            return 1.0
-        return book.get(ballot.source, capability).mean
-
-    return weight
-
-
 def apply_consensus_assessment(recs: Sequence[Recommendation], config: "Config") -> List[Recommendation]:
-    """Puts each consensus in the evidence and rewards agreement between independent sources (E6).
+    """Puts each consensus in the evidence and lets the other sources move the confidence (E6, B.3).
 
     Agreement of at least 0.8 between two or more independent sources raises
-    the confidence (capped at 1); the per-source spread is shown with the
-    evidence. Recommendations whose confidence changed are scored again.
+    the confidence (capped at 1); a contested consensus (sources disagreeing on
+    the direction, or far apart) lowers it. The per-source spread is shown with
+    the evidence. Recommendations whose confidence changed are scored again.
     """
     from greenkube.core.optimization.scoring import score_recommendations
     from greenkube.signals.consensus import Consensus
@@ -259,10 +226,10 @@ def apply_consensus_assessment(recs: Sequence[Recommendation], config: "Config")
             continue
         update: Dict[str, Any] = {}
         evidence = rec.evidence
-        bonus = consensus.confidence_bonus
+        factor = consensus.confidence_factor
         confidence = rec.confidence
-        if bonus > 1.0 and confidence is not None:
-            confidence = round(min(1.0, confidence * bonus), 4)
+        if factor != 1.0 and confidence is not None:
+            confidence = round(max(0.0, min(1.0, confidence * factor)), 4)
             update["confidence"] = confidence
             rescore = True
         if evidence is not None:
@@ -271,7 +238,7 @@ def apply_consensus_assessment(recs: Sequence[Recommendation], config: "Config")
                 evidence_update["confidence"] = confidence
                 evidence_update["confidence_factors"] = {
                     **(evidence.confidence_factors or {}),
-                    "consensus_agreement": bonus,
+                    "consensus_agreement": factor,
                 }
             update["evidence"] = evidence.model_copy(update=evidence_update)
         result.append(rec.model_copy(update=update) if update else rec)
@@ -405,7 +372,7 @@ def materialize(outcome: ConsensusOutcome, refine: Optional[Refine] = None) -> O
 
     rec, value_changed = _with_value(rec, consensus.resource, consensus.value, chosen.current)
     if proposes_no_change(rec):
-        # A source that says "keep the current request" wins under safest: nothing to change.
+        # The consolidated value is the current request: nothing to change.
         logger.debug("Consensus for %s keeps the current request; no recommendation.", outcome.key)
         return None
     restated = value_changed or base_ballot is not chosen
@@ -425,7 +392,7 @@ def materialize(outcome: ConsensusOutcome, refine: Optional[Refine] = None) -> O
     if restated:
         rec = _describe(rec, outcome)
     elif consensus.floor is not None and consensus.floor.applied:
-        # The record is the native one, but the policy chose less: say the OOM floor held.
+        # The record is the native one, but the consensus chose less: say the OOM floor held.
         note = f"Consensus across sources: {consensus.summary()}."
         rec = rec.model_copy(update={"reason": f"{rec.reason} {note}" if rec.reason else note})
 
@@ -449,16 +416,9 @@ def consolidate_entries(
     config: "Config",
     *,
     refine: Optional[Refine] = None,
-    weight_for: Optional[Callable[[Ballot], float]] = None,
 ) -> List[Recommendation]:
     """One recommendation per target, capability and kind, by consensus across sources."""
-    outcomes = consolidate(
-        ballots_for_entries(entries),
-        consensus_policy(config),
-        priorities=_source_priority_map(config),
-        weight_for=weight_for,
-        screen=vote_screen(config),
-    )
+    outcomes = consolidate(ballots_for_entries(entries), screen=vote_screen(config))
     result: List[Recommendation] = []
     for outcome in outcomes:
         rec = materialize(outcome, refine)
@@ -487,10 +447,9 @@ def finalize_entries(
     config: "Config",
     *,
     refine: Optional[Refine] = None,
-    weight_for: Optional[Callable[[Ballot], float]] = None,
 ) -> List[Recommendation]:
     """Consolidates by consensus, deduplicates and clamps values."""
-    consolidated = consolidate_entries(entries, config, refine=refine, weight_for=weight_for)
+    consolidated = consolidate_entries(entries, config, refine=refine)
     clamped = [apply_minimum_thresholds(rec, config) for rec in deduplicate(consolidated)]
     return [rec for rec in clamped if not proposes_no_change(rec)]
 
@@ -689,7 +648,6 @@ __all__ = [
     "SignalEntry",
     "apply_revision_hysteresis",
     "hysteresis_band",
-    "consensus_policy",
     "consolidate_entries",
     "deduplicate",
     "entries_for_recommendations",

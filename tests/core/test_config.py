@@ -417,13 +417,15 @@ class TestRemovedSettings:
         import greenkube.core.config as config_module
 
         monkeypatch.setattr(config_module, "_REMOVED_WARNED", set())
-        with patch.dict(os.environ, {"RECOMMENDATION_KARPENTER_ENABLED": "false"}, clear=True):
+        with patch.dict(
+            os.environ, {"RECOMMENDATION_KARPENTER_ENABLED": "false", "ZOMBIE_COST_THRESHOLD": "0.5"}, clear=True
+        ):
             with caplog.at_level(logging.WARNING):
                 Config()
                 Config()
-        warnings = [record.getMessage() for record in caplog.records if "Removed settings" in record.getMessage()]
+        warnings = [record.getMessage() for record in caplog.records if "removed setting" in record.getMessage()]
         assert len(warnings) == 1
-        assert "RECOMMENDATION_KARPENTER_ENABLED" in warnings[0]
+        assert "RECOMMENDATION_KARPENTER_ENABLED" in warnings[0] and "ZOMBIE_COST_THRESHOLD" in warnings[0]
 
     def test_no_warning_when_no_removed_setting_is_set(self, caplog, monkeypatch):
         import greenkube.core.config as config_module
@@ -432,4 +434,4 @@ class TestRemovedSettings:
         with patch.dict(os.environ, {}, clear=True):
             with caplog.at_level(logging.WARNING):
                 Config()
-        assert "Removed settings" not in caplog.text
+        assert "removed setting" not in caplog.text

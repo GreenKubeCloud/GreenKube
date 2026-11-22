@@ -52,7 +52,7 @@ data is preserved: the bundled PostgreSQL StatefulSet, its volume and its Secret
 | Renderer only with automation | Renderer always deployed (25m / 96Mi) |
 | SQLite in Helm (`config.db.type`, `config.db.path`, `config.persistence`) | PostgreSQL only; SQLite stays for `greenkube demo` and local development |
 | Three `minSamples` knobs | One: `config.recommendations.minSamples` |
-| `config.recommendations.sourcePriority`, `vpaEnabled`, `karpenterEnabled` | `sources.priority`, `sources.settings.<id>.enabled` |
+| `config.recommendations.sourcePriority`, `vpaEnabled`, `karpenterEnabled` | `sources.settings.<id>.enabled`; the source priority is removed (see [Removed connectors](#removed-connectors-and-consensus-policies)) |
 | ConfigMap `<release>` (a Helm hook) | ConfigMap `<release>-config` (a regular release resource) |
 
 ### Metric measures in double precision (PostgreSQL)
@@ -109,11 +109,41 @@ An upgrade that reuses a 0.3.x values file keeps working: the chart maps the old
 | `automation.workerMetricsPort` | `worker.metricsPort` |
 | `rendererSandbox.*` | `renderer.*`; `rendererSandbox.enabled` is ignored |
 | `automation.policy.minSamples`, `config.recommendations.verification.minSamples` | still honoured for their gate; prefer `config.recommendations.minSamples` |
-| `config.recommendations.sourcePriority` | `sources.priority` |
-| `config.recommendations.karpenterEnabled` | ignored: the Karpenter NodePool source was removed (see below) |
-| `sources.settings` of `greenkube.zombie`, `greenkube.autoscaling`, `greenkube.off_peak`, `greenkube.idle_namespace`, `greenkube.carbon_aware`, `greenkube.nodes`, `greenkube.nodepool` | ignored: these sources were removed (see below) |
+| `config.recommendations.sourcePriority` | ignored (see [Removed connectors](#removed-connectors-and-consensus-policies)) |
+| `config.recommendations.karpenterEnabled` | ignored: the Karpenter NodePool source was removed (see [Removed advisory analyzers](#removed-advisory-analyzers)) |
+| `config.recommendations.zombieCostThreshold`, `zombieEnergyThreshold`, `autoscalingCvThreshold`, `autoscalingSpikeRatio`, `offPeakIdleThreshold`, `offPeakMinIdleHours`, `idleNamespaceEnergyThreshold`, `carbonAwareThreshold`, `nodeUtilizationThreshold` | ignored: their analyzers were removed (see [Removed advisory analyzers](#removed-advisory-analyzers)) |
+| `sources.settings` of `greenkube.zombie`, `greenkube.autoscaling`, `greenkube.off_peak`, `greenkube.idle_namespace`, `greenkube.carbon_aware`, `greenkube.nodes`, `greenkube.nodepool` | ignored: these sources were removed (see [Removed advisory analyzers](#removed-advisory-analyzers)) |
 | `config.db.type: postgres`, `config.db.path` | ignored |
 | `config.db.type: sqlite` | the upgrade fails with the migration commands, see below |
+
+### Removed connectors and consensus policies
+
+GreenKube's measured value now decides every size; VPA, Goldilocks, KRR and pushed signals move the confidence up or
+down, and a source alone never creates a recommendation. What was removed, and what happens to an existing install:
+
+| Removed | On upgrade |
+|---|---|
+| The Kubecost, GKE recommender, Azure Advisor and Polaris connectors | Their `SOURCES_CONFIG` / `sources.settings.<id>` entries (`kubecost`, `gke`, `azure_advisor`, `polaris`) are accepted and ignored, with one warning at start and a line under DEPRECATED VALUES. Push their advice to `POST /api/v1/signals` instead ([Push API](sources/push.md)). |
+| `POST /api/v1/sources/polaris/reports` | Answers `404` for every key, a leftover CronJob's `signals:report` or `signals:write` key included; nothing is stored. Delete the job. |
+| The chart's KRR and Polaris CronJobs (`sources.krr.job.*`, `sources.polaris.job.*`) | Ignored with a line under DEPRECATED VALUES; the CronJobs, their ServiceAccounts and ClusterRoles are deleted by the upgrade. Run KRR yourself and push its report: [Robusta KRR](sources/krr.md) has a ready-made CronJob. |
+| `RECOMMENDATION_CONSENSUS_POLICY` (`safest`, `median`, `weighted`, `priority`; Helm `config.recommendations.consensusPolicy`) | Accepted and ignored, with one warning at start (and a line under DEPRECATED VALUES). |
+| `RECOMMENDATION_SOURCE_PRIORITY` (Helm `sources.priority`, `config.recommendations.sourcePriority`) | Accepted and ignored, with one warning at start (and a line under DEPRECATED VALUES). |
+
+Migration `0310` retires the **active** recommendations whose chosen source was one of the removed connectors: they
+become `stale` with a `stale` event of reason `type_removed`. Recommendations in a pull request, being measured or
+already in the ledger are untouched, and the ledger is never rewritten. The signals, runs and inbox rows of the
+removed connectors stay in their tables (nothing writes them any more); a later release drops what is left, after a
+backup note here. A recommendation stored before keeps the consensus `policy` it was built with; the next scan
+rebuilds it with the native value, which may change its proposed value (a new revision).
+
+These values are refused in a later release: remove them from your values file.
+
+Intentional references to the removed names stay in the code (the B.0 grep exceptions):
+`greenkube.core.optimization.eligibility._PUSHED_SOURCE_IDS` keeps `polaris`, so votes of records stored before the
+removal still count as pushed (one independent vote); the removed-settings and removed-source lists
+(`REMOVED_SETTINGS` in `greenkube.core.config`, `REMOVED_SOURCE_IDS` in `greenkube.signals.registry`, the chart's
+deprecation notes and migration `0310`) name them to ignore and warn about them; and `kubecost` as a cost provenance
+(`cost_source`) and a protected namespace is OpenCost-compatible cost data, not the removed connector.
 
 Note that `automation.enabled: false` now means *discovery, previews and measurement run, no pull request is
 opened*. To keep the Git tokens out of every pod, also remove `automation.providers` and do not create
@@ -130,10 +160,12 @@ PersistentVolume detection stay. On upgrade:
   `OFF_PEAK_SCALING`, `AUTOSCALING_CANDIDATE`, `CARBON_AWARE_SCHEDULING`, `OVERPROVISIONED_NODE`,
   `UNDERUTILIZED_NODE`), active or ignored, `stale` with a `stale` event of reason `type_removed`. No row is
   deleted, applied and measured ones keep their status, and the savings ledger is not touched;
-- `RECOMMENDATION_KARPENTER_ENABLED` is accepted and ignored for this release, with one warning at start;
-  `config.recommendations.karpenterEnabled` is no longer rendered and the notes name it;
-- `sources.settings` entries of the removed sources are ignored and listed as `removed_source` problems by
-  `GET /api/v1/sources`.
+- `RECOMMENDATION_KARPENTER_ENABLED` and the analyzer thresholds (`ZOMBIE_COST_THRESHOLD`,
+  `ZOMBIE_ENERGY_THRESHOLD`, `AUTOSCALING_CV_THRESHOLD`, `AUTOSCALING_SPIKE_RATIO`, `OFF_PEAK_IDLE_THRESHOLD`,
+  `OFF_PEAK_MIN_IDLE_HOURS`, `IDLE_NAMESPACE_ENERGY_THRESHOLD`, `CARBON_AWARE_THRESHOLD`,
+  `NODE_UTILIZATION_THRESHOLD`) are accepted and ignored for this release, with one warning at start; their Helm
+  values are no longer rendered and the notes name them;
+- `sources.settings` entries of the removed sources are accepted and ignored, named in the same warning.
 
 The Karpenter, Cluster Autoscaler and HPA reads stay: the realization factor and the rightsizing evidence use them.
 
@@ -319,6 +351,38 @@ target. `monitoring.serviceMonitor.namespace` now defaults to empty, the release
 
 After the upgrade, `kubectl get servicemonitors -A -l app.kubernetes.io/name=greenkube` lists them, and the
 Prometheus targets page shows `serviceMonitor/<namespace>/<release>/0` up.
+
+### Prometheus metrics, sustainability score and Grafana dashboard
+
+`/prometheus/metrics` now exports GreenKube's own health and the savings ledger counters only. Per-pod and
+per-namespace footprint series are gone: on a 40-pod test fixture the API endpoint drops from 75 metric families and
+3,066 series (680 with a `pod` label, 2,321 with a `namespace` label) to 7 families and 27 series. Footprint data stays
+in the Footprint pages, `GET /api/v1/report/summary`, `GET /api/v1/report/export` and `GET /api/v1/nodes`.
+No HTTP API route is removed, no setting or Helm value changes, and no data is deleted: the score was never stored.
+
+**Removed series.** Recording rules, alerts or dashboards of your own that read them return no data after the upgrade:
+
+| Removed | Replacement |
+|---|---|
+| `greenkube_sustainability_score`, `greenkube_sustainability_dimension_score` | None: the score had no defined method (audit API-06) |
+| `greenkube_pod_*` (cost, CO₂e, embodied CO₂e, energy, CPU and memory requests, usage and efficiency, network, disk, restart count), `greenkube_pue`, `greenkube_grid_intensity_gco2_kwh` | Footprint pages and `GET /api/v1/report/export`; usage from your Prometheus (cAdvisor, kube-state-metrics) |
+| `greenkube_namespace_*` and `greenkube_cluster_*` footprint totals, `greenkube_cluster_idle_*`, `greenkube_cluster_with_idle_*`, `greenkube_cluster_pod_count`, `greenkube_cluster_namespace_count` | `GET /api/v1/report/summary`, `GET /api/v1/metrics/summary` |
+| `greenkube_node_info`, `greenkube_node_cpu_capacity_millicores`, `greenkube_node_memory_capacity_bytes`, `greenkube_node_cpu_allocated_millicores`, `greenkube_node_memory_allocated_bytes`, `greenkube_node_embodied_emissions_kg` | `GET /api/v1/nodes` (Footprint, nodes); kube-state-metrics |
+| `greenkube_carbon_intensity_score`, `greenkube_carbon_intensity_zone`, `greenkube_zone_grid_intensity_gco2_kwh` | The Footprint report |
+| `greenkube_dashboard_summary_*` | `GET /api/v1/metrics/dashboard-summary` |
+| `greenkube_dashboard_savings_co2e_grams_total`, `greenkube_dashboard_savings_cost_dollars_total`, `greenkube_dashboard_savings_accrued_co2e_grams`, `greenkube_dashboard_savings_accrued_cost_dollars` | `increase()` of `greenkube_*_savings_attributed_*_total` minus `greenkube_*_savings_reversed_*_total` over the window, filtered on `method` |
+| `greenkube_savings_run_rate_annual_co2e_grams`, `greenkube_savings_run_rate_annual_cost_dollars`, `greenkube_cluster_co2e_saved_grams_total`, `greenkube_cluster_cost_saved_dollars_total` | `GET /api/v1/recommendations/savings` |
+| `greenkube_recommendations_total`, `greenkube_recommendations_implemented_total`, `greenkube_recommendations_savings_co2e_grams`, `greenkube_recommendations_savings_cost_dollars`, `greenkube_namespace_recommendation_savings_co2e_grams_total`, `greenkube_namespace_recommendation_savings_cost_dollars_total`, `greenkube_top_recommendations` | `GET /api/v1/recommendations`; scan health from `greenkube_optimization_runs_total` and `greenkube_recommendations_generated_total` |
+| `greenkube_estimated_metrics_ratio` | `greenkube_metric_rows_written_total{source}` (controller) |
+
+Kept: `greenkube_last_collection_timestamp_seconds`, `greenkube_metrics_total`, the four ledger counters
+`greenkube_{co2e,cost}_savings_{attributed,reversed}_*_total`, `greenkube_savings_measured_vs_projected_ratio`, and
+every control-loop family. The chart PrometheusRule reads none of the removed series.
+
+**Grafana.** `dashboards/greenkube-grafana.json` (uid `greenkube-fingreenops`, also published on Grafana.com as
+dashboard 25377) is removed, with its generator `scripts/build_grafana_dashboard.py`. Import
+`dashboards/greenkube-operations.json` (**GreenKube Operations**, the new revision of Grafana.com dashboard 25377) instead and delete the old dashboard from Grafana:
+its panels show "No data" after the upgrade ([Grafana dashboard](prometheus-grafana.md#4-grafana-dashboard)).
 
 ### Checking an upgrade without a cluster
 

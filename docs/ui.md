@@ -24,7 +24,7 @@ API paths are under `/api/v1` unless they say `/api/v2`.
 
 On `/footprint/nodes`, a node whose GPU power is estimated from the TDP (`gpu_tdp_estimate`) or not counted (`unmeasured`) because no DCGM exporter sample reached GreenKube shows a "GPU power estimated" or "GPU power not measured" badge, and a notice above the list counts such nodes (NRG-13).
 
-The old `/report` and `/nodes` routes redirect to `/footprint/report` and `/footprint/nodes` (query string kept), so bookmarks keep working. The footprint is supporting context; the bundled Grafana dashboard stays the deep-analysis surface (see [Prometheus and Grafana](prometheus-grafana.md)).
+The old `/report` and `/nodes` routes redirect to `/footprint/report` and `/footprint/nodes` (query string kept), so bookmarks keep working. The footprint is supporting context, with CSV and JSON exports; it is not exposed as Prometheus series, and the bundled Grafana dashboard covers GreenKube operations only (see [Prometheus and Grafana](prometheus-grafana.md)).
 
 ## Changes board
 

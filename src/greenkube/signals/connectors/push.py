@@ -23,10 +23,11 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from greenkube.signals.connectors.inbox import InboxSource
 from greenkube.signals.model import (
     CLUSTER_SCOPED_KINDS,
     KIND_API_VERSIONS,
@@ -42,6 +43,7 @@ from greenkube.signals.model import (
     missing_resource_value,
     trim_raw,
 )
+from greenkube.signals.sdk import SourceTier
 
 SIGNAL_SCHEMA_ID = "https://greenkube.io/schemas/signal.v1alpha1.json"
 BATCH_SCHEMA_ID = "https://greenkube.io/schemas/signal-batch.v1alpha1.json"
@@ -278,6 +280,22 @@ def write_schemas(directory: Path) -> List[Path]:
         path.write_text(render(schema), encoding="utf-8")
         written.append(path)
     return written
+
+
+class PushSignalSource(InboxSource):
+    """Signals pushed by any tool through ``POST /api/v1/signals`` (roadmap G6)."""
+
+    id: ClassVar[str] = "push"
+    display_name: ClassVar[str] = "Push API"
+    tier: ClassVar[SourceTier] = SourceTier.CUSTOM
+    capabilities: ClassVar[FrozenSet[Capability]] = frozenset(Capability)
+    also_emits: ClassVar[FrozenSet[str]] = frozenset({PUSH_PREFIX})
+    description: ClassVar[str] = (
+        "Signals pushed by external tools to POST /api/v1/signals (source ids push:<client>); "
+        "they become recommendations only through consensus."
+    )
+    inbox_prefix: ClassVar[Optional[str]] = PUSH_PREFIX
+    push_hint: ClassVar[str] = "POST a signal batch to /api/v1/signals with a signals:write API key"
 
 
 if __name__ == "__main__":  # pragma: no cover - maintenance entry point

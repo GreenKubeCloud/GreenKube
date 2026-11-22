@@ -43,13 +43,9 @@ A **source** produces optimization advice as **signals** (one proposal for one t
 
 Each recommendation records its `source`, a source-specific reference (`source_ref`, for example `namespace/vpa-name`), and the list of every source that reported the same issue (`sources`).
 
-When several sources recommend the same change type for the same target, GreenKube combines their values by **consensus** (`RECOMMENDATION_CONSENSUS_POLICY`, default `safest`: the least aggressive value) and shows how much they agree, with the value of each source. Sources that run the same engine (Goldilocks and VPA) count once. See [Consensus across sources](recommendation.md#consensus-across-sources).
+When several sources recommend the same change type for the same target, GreenKube combines them by **consensus**: GreenKube's own measured value decides the size, and the other sources move the confidence up (they agree) or down (they disagree). A source alone never creates a recommendation. Sources that run the same engine (Goldilocks and VPA) count once. See [Consensus across sources](recommendation.md#consensus-across-sources).
 
-Signals of third-party sources become recommendations through the same consensus.
-
-*(Planned)*
-- KRR, Kubecost, Polaris and cloud recommenders as additional sources.
-- A public API so that any tool can push signals.
+[Robusta KRR](sources/krr.md) reports and any other tool's advice reach GreenKube through the [push API](sources/push.md); they join the same consensus.
 
 ## Recommendation
 

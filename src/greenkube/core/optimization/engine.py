@@ -31,18 +31,15 @@ from greenkube.core.optimization.dedup import (
     RESOURCE_FIELDS,
     apply_consensus_assessment,
     apply_revision_hysteresis,
-    consensus_policy,
     consensus_refiner,
     entries_for_reports,
     finalize_entries,
-    track_record_weights,
 )
 from greenkube.core.optimization.enrich import enrich_recommendations, rescore_with_track_record
 from greenkube.core.optimization.evidence import build_patch
 from greenkube.core.optimization.providers.base import RecommendationSource
 from greenkube.core.optimization.registry import build_signal_sources, cluster_uid
 from greenkube.core.optimization.targeting import is_static_pod_kind
-from greenkube.core.optimization.track_record import TrackRecordBook, load_track_record
 from greenkube.core.recommendation_reconciliation import RecommendationDiff, compute_diff, supporting_sources
 from greenkube.models.metrics import (
     RETIRED_RECOMMENDATION_TYPES,
@@ -62,7 +59,7 @@ from greenkube.models.optimization_run import (
 from greenkube.models.recommendation_v2 import with_v2_fields
 from greenkube.models.workload_usage import POD_LEVEL
 from greenkube.signals.adapters import adapt_recommendation_source, observed_window, workload_inventory
-from greenkube.signals.consensus import KIND_REQUEST_RESOURCES, ConsensusPolicy
+from greenkube.signals.consensus import KIND_REQUEST_RESOURCES
 from greenkube.signals.runtime import SourceReport, SourceRunner, SourceRunRecord, legacy_outcomes
 from greenkube.signals.sdk import CollectContext, Source, SourceDeps
 
@@ -191,21 +188,14 @@ class OptimizationEngine:
             optimization=context,
         )
 
-    async def collect(
-        self, context: OptimizationContext, track_record: Optional["TrackRecordBook"] = None
-    ) -> GenerationResult:
-        """Runs every source in isolation and builds one recommendation per target by consensus (E6).
-
-        ``track_record`` weighs the sources under the ``weighted`` policy (I3);
-        without it every source weighs the same.
-        """
+    async def collect(self, context: OptimizationContext) -> GenerationResult:
+        """Runs every source in isolation and builds one recommendation per target by consensus (E6)."""
         previous = await self._previous_source_runs()
         reports = await self.runner.run_all(self.sources, self.collect_context(context), previous)
         finalized = finalize_entries(
             entries_for_reports(reports, self.cluster_uid),
             self.config,
             refine=consensus_refiner(context),
-            weight_for=track_record_weights(track_record),
         )
         enriched = apply_consensus_assessment(enrich_recommendations(finalized, context, self.config), self.config)
         return GenerationResult(
@@ -297,10 +287,7 @@ class OptimizationEngine:
                 len(context.metrics) + len(context.container_metrics),
                 _peak_resident_memory_bytes(),
             )
-            track_record = None
-            if consensus_policy(self.config) is ConsensusPolicy.WEIGHTED:
-                track_record = await load_track_record(reco_repo)
-            generation = await self.collect(context, track_record)
+            generation = await self.collect(context)
             outcomes = generation.source_outcomes
             reports = generation.source_reports
             await self.record_source_runs(reports, run)
@@ -577,12 +564,12 @@ class OptimizationEngine:
 
         * the new proposal is at least the previous one (a higher request, or
           an increase replacing a decrease): the new recommendation is written;
-        * under ``safest``, every incomplete supporter's last known value is at
-          most the new proposal: ``safest`` of the new and last known votes is
-          the new proposal, which is written;
-        * otherwise (the new proposal is more aggressive than what the last
-          known votes support, or a non-numeric proposal) the last known
-          record stays until that source completes again (or expires).
+        * every incomplete supporter is an external source: GreenKube's
+          measured value decides the size (B.3), so their last known votes
+          could only move the confidence, and the new proposal is written;
+        * otherwise (a native supporter is incomplete and the new proposal is
+          more aggressive, or a non-numeric proposal) the last known record
+          stays until that source completes again (or expires).
 
         A written recommendation keeps the incomplete sources among its
         supporting sources, with their last known values in ``consensus.last_known``.
@@ -590,7 +577,6 @@ class OptimizationEngine:
         if not incomplete_sources or not previous:
             return recommendations
         previous_by_fp = {record.fingerprint: record for record in previous if record.fingerprint}
-        policy = consensus_policy(self.config)
         kept: List[Recommendation] = []
         for recommendation in recommendations:
             fingerprint = RecommendationRecord.from_recommendation(recommendation).fingerprint
@@ -600,7 +586,7 @@ class OptimizationEngine:
                 current_support = supporting_sources(recommendation.source, recommendation.sources)
                 missing = sorted((previous_support - current_support) & set(incomplete_sources))
                 if missing:
-                    merged = _with_last_known_votes(recommendation, before, missing, policy)
+                    merged = _with_last_known_votes(recommendation, before, missing)
                     if merged is None:
                         logger.info(
                             "Keeping last known recommendation %s while %s is incomplete.",
@@ -678,13 +664,13 @@ def _with_last_known_votes(
     recommendation: Recommendation,
     before: RecommendationRecord,
     missing: Sequence[str],
-    policy: ConsensusPolicy,
 ) -> Optional[Recommendation]:
     """``recommendation`` supported by the incomplete sources' last known votes, or None to keep ``before``.
 
     A higher request is always the safer one (a smaller decrease, or an
-    increase that protects reliability), so the new proposal is written when
-    it is not more aggressive than what the last known votes support.
+    increase that protects reliability), so it is written. A lower one is
+    written when only external sources are incomplete: their votes never set
+    the value (B.3).
     """
     resource = KIND_REQUEST_RESOURCES.get(str(getattr(recommendation.type, "value", recommendation.type)))
     if resource is None:
@@ -695,19 +681,9 @@ def _with_last_known_votes(
     if new_value is None or old_value is None:
         return None
     last_known = _last_known_values(before, missing, resource)
-    known_units = {
-        vote.get("source")
-        for vote in (before.consensus or {}).get("votes") or []
-        if isinstance(vote, dict) and vote.get("source_id") in last_known
-    }
-    every_vote_known = all(unit in known_units for unit in missing)
     safer_or_equal = int(new_value) >= int(old_value)
-    safest_holds = (
-        policy is ConsensusPolicy.SAFEST
-        and every_vote_known
-        and all(value <= int(new_value) for value in last_known.values())
-    )
-    if not (safer_or_equal or safest_holds):
+    externals_only = not any(unit == "greenkube" or unit.startswith("greenkube.") for unit in missing)
+    if not (safer_or_equal or externals_only):
         return None
     sources = list(recommendation.sources or [])
     for unit in missing:

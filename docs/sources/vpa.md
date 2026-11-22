@@ -33,7 +33,7 @@ Minutes after a VPA is created, its recommender has a few samples and very wide 
 - otherwise the sample history of the container's checkpoint must cover `sources.vpa.minSampleHours` (`VPA_MIN_SAMPLE_HOURS`, default `24`): the span from `firstSampleStart` to `lastSampleStart`, or `totalSamplesCount` at one sample a minute when the timestamps are missing; a container without a checkpoint has no samples when the recommender checkpoints the VPA's other containers or the VPA is younger than `minSampleHours`;
 - `0` turns the check off.
 
-An immature VPA yields neither a signal nor a recommendation and is counted in the `immature_vpas` diagnostic. When the checkpoints cannot be read (for example the ClusterRole lacks `verticalpodautoscalercheckpoints`) or the recommender keeps none for an older VPA (`--storage=prometheus`), maturity is unknown: the `vpa_maturity_unknown` warning names the count, and the VPA may still hold or raise a value but never pushes a decrease under the `priority`, `median` or `weighted` policies (`ignored_votes` reason `maturity_unknown`; under `safest` a lower value never wins anyway).
+An immature VPA yields neither a signal nor a recommendation and is counted in the `immature_vpas` diagnostic. When the checkpoints cannot be read (for example the ClusterRole lacks `verticalpodautoscalercheckpoints`) or the recommender keeps none for an older VPA (`--storage=prometheus`), maturity is unknown: the `vpa_maturity_unknown` warning names the count, and the VPA still votes, but a decrease it proposes never corroborates a decrease (`ignored_votes` reason `maturity_unknown`). A VPA never sets the value: GreenKube's measured value decides the size and VPA moves the confidence.
 
 ## Tool floors and small changes
 

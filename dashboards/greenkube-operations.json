@@ -1,0 +1,1038 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus that scrapes the GreenKube API and controller",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__elements": {},
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "text",
+      "name": "Text",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    }
+  ],
+  "id": null,
+  "title": "GreenKube Operations",
+  "description": "Health of a GreenKube install (collection, controller loops, recommendation scans, change measurement, savings ledger integrity) and its measured and projected savings from the ledger counters.",
+  "tags": [
+    "greenkube",
+    "kubernetes",
+    "finops",
+    "rightsizing",
+    "operations"
+  ],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "graphTooltip": 1,
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "title": "GreenKube docs",
+      "type": "link",
+      "url": "https://docs.greenkube.cloud",
+      "targetBlank": true,
+      "icon": "doc"
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": {
+          "query": "label_values(greenkube_controller_leader, namespace)",
+          "refId": "namespace"
+        },
+        "definition": "label_values(greenkube_controller_leader, namespace)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "cluster",
+        "label": "Cluster",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": {
+          "query": "label_values(greenkube_last_collection_timestamp_seconds, cluster)",
+          "refId": "cluster"
+        },
+        "definition": "label_values(greenkube_last_collection_timestamp_seconds, cluster)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "text",
+      "id": 1,
+      "title": "About GreenKube",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 5
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**GreenKube** proves what a Kubernetes optimization actually saved: it recommends CPU and memory requests and limits from its own measurements, delivers them as reviewed GitOps pull requests, measures what each merged change realized (cost, CO2e, released capacity) against a counterfactual, and records it in an append-only, hash-chained savings ledger.\n\nThis dashboard watches GreenKube itself: collection, controller loops, recommendation scans, change measurement, ledger integrity, and the ledger savings counters. Panels marked *(all clusters)* read controller series, which have no `cluster` label; filter them with **Namespace**.\n\nDocs: [docs.greenkube.cloud](https://docs.greenkube.cloud) · Source: [github.com/GreenKubeCloud/GreenKube](https://github.com/GreenKubeCloud/GreenKube)"
+      }
+    },
+    {
+      "type": "row",
+      "id": 2,
+      "title": "Collection",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Collection data age",
+      "description": "Age of the newest stored metric row (API). Above 15 minutes, collection is stale.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 600
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - max(greenkube_last_collection_timestamp_seconds{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "legendFormat": "age"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Collection watermark lag (all clusters)",
+      "description": "How far the collection watermark is behind now, per source (leader only). Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 6,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (source) (greenkube_collection_watermark_lag_seconds{namespace=~\"$namespace\"} * on (job, instance) group_left () greenkube_controller_leader{namespace=~\"$namespace\"})",
+          "legendFormat": "{{source}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Collection coverage (all clusters)",
+      "description": "Share of the backfill horizon collected or confirmed empty, per source. Holes: GET /api/v1/collection/coverage. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "min by (source) (greenkube_collection_coverage_ratio{namespace=~\"$namespace\"} * on (job, instance) group_left () greenkube_controller_leader{namespace=~\"$namespace\"})",
+          "legendFormat": "{{source}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 6,
+      "title": "Abandoned and degraded windows (1h) (all clusters)",
+      "description": "Windows skipped beyond COLLECTION_MAX_BACKFILL, and windows stored without a working Kubernetes list. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 6,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (source) (increase(greenkube_collection_gap_windows_total{namespace=~\"$namespace\"}[1h]))",
+          "legendFormat": "gap {{source}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (list) (increase(greenkube_collection_degraded_windows_total{namespace=~\"$namespace\"}[1h]))",
+          "legendFormat": "degraded {{list}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 7,
+      "title": "Loops and scans",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 8,
+      "title": "Active controller (all clusters)",
+      "description": "1 when a controller replica holds the Lease and runs the leader-only loops. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 4,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "NONE"
+                },
+                "1": {
+                  "text": "OK"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max(greenkube_controller_leader{namespace=~\"$namespace\"}) or vector(0)",
+          "legendFormat": "leader"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 9,
+      "title": "Loop consecutive failures (all clusters)",
+      "description": "Failed or timed-out ticks since the last success, per loop. The alert fires at 3. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 14,
+        "w": 10,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (loop) (greenkube_loop_consecutive_failures{namespace=~\"$namespace\"})",
+          "legendFormat": "{{loop}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Time since last loop success (all clusters)",
+      "description": "Per loop; compare with each loop interval (GET /loops on the controller metrics port). Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 14,
+        "w": 10,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - max by (loop) (greenkube_loop_last_success_timestamp_seconds{namespace=~\"$namespace\"} > 0)",
+          "legendFormat": "{{loop}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 11,
+      "title": "Time since last successful scan (all clusters)",
+      "description": "Last fully successful recommendation scan. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 4,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 10800
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - max(greenkube_last_successful_optimization_run_timestamp_seconds{namespace=~\"$namespace\"} > 0)",
+          "legendFormat": "age"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Recommendation scans (1h) (all clusters)",
+      "description": "Completed optimization runs by status. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 21,
+        "w": 10,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (status) (increase(greenkube_optimization_runs_total{namespace=~\"$namespace\"}[1h]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "Recommendation source failures (1h) (all clusters)",
+      "description": "Failures by recommendation source; a run with some failed sources still succeeds. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 21,
+        "w": 10,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (source) (increase(greenkube_optimization_analyzer_failures_total{namespace=~\"$namespace\"}[1h]))",
+          "legendFormat": "{{source}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 14,
+      "title": "Measurement and ledger",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 15,
+      "title": "Measurement loop age (all clusters)",
+      "description": "Time since the change measurement loop (recommendation-lifecycle) last succeeded. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 4,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1800
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - max(greenkube_loop_last_success_timestamp_seconds{loop=\"recommendation-lifecycle\", namespace=~\"$namespace\"})",
+          "legendFormat": "age"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 16,
+      "title": "Ledger chain (all clusters)",
+      "description": "Last hash-chain verification of the savings ledger, per cluster uid. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 29,
+        "w": 4,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "FAILED"
+                },
+                "1": {
+                  "text": "OK"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "min by (cluster_uid) (greenkube_ledger_chain_ok{namespace=~\"$namespace\"})",
+          "legendFormat": "{{cluster_uid}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 17,
+      "title": "Ledger reconciliation (all clusters)",
+      "description": "Ledger v2 accrued book matches the v1 rows, per cluster uid. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 29,
+        "w": 4,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "FAILED"
+                },
+                "1": {
+                  "text": "OK"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "min by (cluster_uid) (greenkube_ledger_reconciliation_ok{namespace=~\"$namespace\"})",
+          "legendFormat": "{{cluster_uid}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 18,
+      "title": "Ledger projection backlog (all clusters)",
+      "description": "Source rows not yet projected into the ledger, per table. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 29,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (source_table) (greenkube_ledger_unprojected_rows{namespace=~\"$namespace\"})",
+          "legendFormat": "{{source_table}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 19,
+      "title": "Ledger errors (1h) (all clusters)",
+      "description": "Ledger write errors and chain verification failures, by reason. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 29,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (reason) (increase(greenkube_ledger_write_errors_total{namespace=~\"$namespace\"}[1h]))",
+          "legendFormat": "write {{reason}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (reason) (increase(greenkube_ledger_chain_verification_failures_total{namespace=~\"$namespace\"}[1h]))",
+          "legendFormat": "chain {{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 20,
+      "title": "Savings (ledger v2)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Net cost savings accrued, by method",
+      "description": "Attributed minus reversed. Every API replica serves the same database-backed counters, so each series is deduplicated with max before the sum. Never add methods: only measured is realized.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 10,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (method) (max by (cluster, recommendation_type, method) (greenkube_cost_savings_attributed_dollars_total{cluster=~\"$cluster\", namespace=~\"$namespace\"})) - sum by (method) (max by (cluster, recommendation_type, method) (greenkube_cost_savings_reversed_dollars_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{method}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "Net CO2e savings accrued, by method",
+      "description": "Attributed minus reversed, in grams. Every API replica serves the same database-backed counters, so each series is deduplicated with max before the sum. Never add methods: only measured is realized.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 37,
+        "w": 10,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "massg"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (method) (max by (cluster, recommendation_type, method) (greenkube_co2e_savings_attributed_grams_total{cluster=~\"$cluster\", namespace=~\"$namespace\"})) - sum by (method) (max by (cluster, recommendation_type, method) (greenkube_co2e_savings_reversed_grams_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{method}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 23,
+      "title": "Measured share",
+      "description": "Share of net accrued CO2e savings that is measured rather than projected.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 37,
+        "w": 4,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max(greenkube_savings_measured_vs_projected_ratio{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "legendFormat": "measured"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "row",
+      "id": 24,
+      "title": "Automation",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 25,
+      "title": "Automation backlog (all clusters)",
+      "description": "Plan operations, plans and webhook deliveries by queue and state; stuck and failed states raise alerts. Controller series carry no cluster label: this panel ignores the Cluster variable and shows every GreenKube controller in the selected namespaces.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 45,
+        "w": 24,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (queue, state) (greenkube_automation_backlog{namespace=~\"$namespace\"})",
+          "legendFormat": "{{queue}} {{state}}"
+        }
+      ]
+    }
+  ]
+}

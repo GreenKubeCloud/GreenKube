@@ -190,7 +190,8 @@ class TestBug22FailedSourceDoesNotBlockOthers:
         assert result.source_outcomes[0].error == "timeout"
         assert result.status == OptimizationRunStatus.SUCCEEDED
 
-    async def test_higher_priority_last_known_advice_survives_a_failed_source(self, sqlite_db):
+    async def test_a_failed_external_source_never_holds_the_native_value(self, sqlite_db):
+        """B.3: VPA's last known 300m does not hold the record; the native 150m waits for confirmation (IMP-13)."""
         repo = SQLiteRecommendationRepository(sqlite_db)
         vpa_advice = _rec("api", source="vpa", cpu=300).model_copy(update={"sources": ["vpa", "greenkube"]})
         await _seed(repo, vpa_advice)
@@ -201,8 +202,11 @@ class TestBug22FailedSourceDoesNotBlockOthers:
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
         kept = (await _active(repo))["api"]
-        assert kept.source == SourceName.VPA
+        assert kept.source == SourceName.GREENKUBE
+        assert kept.sources == ["greenkube", "vpa"]
+        # A lower request becomes a new revision after three consecutive scans, whatever VPA said.
         assert kept.recommended_cpu_request_millicores == 300
+        assert kept.pending_revision == {"value": 150, "scans": 1}
 
 
 class TestRunOutcome:
@@ -385,6 +389,5 @@ class TestRunCountsReflectPersistence:
         result = await engine.run_scan(AsyncMock(), AsyncMock(), repo)
 
         run = await _stored(runs, _run_id(result))
-        assert run.recommendation_count == 0
-        assert result.recommendations == []
-        assert (run.new_count, run.changed_count, run.resolved_count, run.unchanged_count) == (0, 0, 0, 1)
+        assert run.recommendation_count == len(result.recommendations) == 1
+        assert (run.new_count, run.changed_count, run.resolved_count, run.unchanged_count) == (0, 1, 0, 0)
