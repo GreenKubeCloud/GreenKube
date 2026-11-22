@@ -331,11 +331,12 @@ def collected_steps_from_rows(rows: Sequence[Any], step_seconds: float) -> Dict[
 
     Each distinct row timestamp covers the longest row at that time (one step
     for a raw row, its ``duration_seconds`` for an hourly row read for older
-    hours). A row that crosses an hour boundary (a sample not aligned on the
-    step grid) covers each hour for the part of it inside that hour, so the
-    next hour is not counted as a gap. Each hour is capped at 3600 seconds.
-    Empty for rollup baseline rows, whose timestamps are not sample times (the
-    usage snapshot gives their collection).
+    hours), counted in the hour the row starts and capped at the hour. This is
+    the rule of the rollup (``workload_usage_hourly.step_count`` counts the
+    steps that start in each hour bucket), so the raw-row and rollup paths give
+    the same coverage: collection runs on wall-clock steps, so a step never
+    crosses an hour. Empty for rollup baseline rows, whose timestamps are not
+    sample times (the usage snapshot gives their collection).
     """
     if step_seconds <= 0:
         return {}
@@ -348,13 +349,8 @@ def collected_steps_from_rows(rows: Sequence[Any], step_seconds: float) -> Dict[
             continue
         duration = getattr(row, "duration_seconds", None)
         seconds = float(duration) if isinstance(duration, (int, float)) and duration > 0 else step_seconds
-        start, end = stamp, stamp + timedelta(seconds=seconds)
-        bucket = stamp.replace(minute=0, second=0, microsecond=0)
-        while bucket < end:
-            part = (min(bucket + timedelta(hours=1), end) - max(bucket, start)).total_seconds()
-            hour = covered.setdefault(bucket, {})
-            hour[stamp] = max(hour.get(stamp, 0.0), part)
-            bucket += timedelta(hours=1)
+        hour = covered.setdefault(stamp.replace(minute=0, second=0, microsecond=0), {})
+        hour[stamp] = max(hour.get(stamp, 0.0), seconds)
     return {hour: min(sum(values.values()), 3600.0) / step_seconds for hour, values in sorted(covered.items())}
 
 
@@ -366,8 +362,10 @@ def collected_hours(
     The span minus the uncollected time of each hour: an hour with no row of
     any target is a gap of its whole overlap with the span, a partly collected
     hour misses its overlap minus its collected time (steps x step), less one
-    step of tolerance (samples are not aligned on the hour). A CronJob's idle
-    hours are collected when other targets have rows in them.
+    step of tolerance (the span's ends are not aligned on the step grid). The
+    tolerance only applies to an hour in which steps started: an hour without
+    any step is a whole gap. A CronJob's idle hours are collected when other
+    targets have rows in them.
     """
     if end <= start:
         return 0.0
