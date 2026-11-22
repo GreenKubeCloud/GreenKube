@@ -255,6 +255,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - UI: the badges of the retired types, the Karpenter source badge and filter, and the capability filters of the removed analyzers.
 - The demo no longer seeds recommendations of the retired types.
 - Code that only served them: the Karpenter NodePool collector (`collectors/karpenter_collector.py`; the realization factor reads NodePools through the autoscaler collector), the per-node usage and hour-of-day CPU profile aggregations of the scan usage snapshot (two SQL queries fewer per scan), and the Impact Model workload deletion, replica schedule and node-pool consolidation projections. Stored `impact` objects of those kinds are kept as written.
+- The deprecation path of the settings of features removed in phase B (advisory analyzers, connectors, consensus policies): the start warning that named them, the chart's DEPRECATED VALUES lines for `config.recommendations.sourcePriority`, `consensusPolicy`, `karpenterEnabled`, the nine analyzer thresholds, `sources.priority`, `sources.krr`, `sources.polaris` and the `sources.settings` entries of removed sources, and their `removed` entries in `values.schema.json`. These settings and values no longer exist: remove them from your values and environment. Leftover ones are ignored and break neither an install nor a start; a `SOURCES_CONFIG` entry of a removed source is reported as `unknown_source`, like any other unknown id.
 
 ### Fixed
 
