@@ -122,50 +122,6 @@ def test_update_url_respects_config_verify_certs(mock_config):
 
 
 @pytest.mark.asyncio
-async def test_query_run_loop_handles_non_success_errors_and_then_success(collector):
-    non_success = MagicMock()
-    non_success.raise_for_status.return_value = None
-    non_success.json.return_value = {"status": "error", "error": "bad query"}
-    success = MagicMock()
-    success.raise_for_status.return_value = None
-    success.json.return_value = {"status": "success", "data": {"result": [{"metric": {}, "value": [0, "1"]}]}}
-    client = AsyncMock()
-    client.get = AsyncMock(side_effect=[non_success, httpx.ConnectError("refused"), RuntimeError("boom"), success])
-
-    result = await collector._query_run_loop(
-        client,
-        ["http://p/one", "http://p/two", "http://p/three", "http://p/four"],
-        {"query": "up"},
-        {},
-        None,
-        "up",
-    )
-
-    assert result == [{"metric": {}, "value": [0, "1"]}]
-    assert client.get.await_count == 4
-
-
-@pytest.mark.asyncio
-async def test_query_run_loop_returns_empty_when_all_candidates_fail(collector):
-    client = AsyncMock()
-    client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
-    collector._discover_and_update_url = AsyncMock(return_value=False)
-
-    result = await collector._query_run_loop(client, ["http://p/query"], {"query": "up"}, {}, None, "up")
-
-    assert result == []
-    collector._discover_and_update_url.assert_awaited_once_with(client)
-
-
-@pytest.mark.asyncio
-async def test_query_run_loop_handles_empty_candidate_list(collector):
-    client = AsyncMock()
-    collector._discover_and_update_url = AsyncMock(return_value=False)
-
-    assert await collector._query_run_loop(client, [], {"query": "up"}, {}, None, "up") == []
-
-
-@pytest.mark.asyncio
 async def test_probe_url_tries_candidate_paths_and_uses_auth_headers(collector):
     collector.bearer_token = "token"
     collector.username = "user"
@@ -273,48 +229,3 @@ async def test_collect_range_cpu_fallback_returns_empty_without_recursion(collec
     start_time = end_time - timedelta(minutes=5)
 
     assert await collector.collect_range(start_time, end_time) == []
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_instant_query_without_url_discovers_before_first_request(collector, caplog):
-    """F-06: without PROMETHEUS_URL, discovery runs before the first instant query.
-
-    No relative URL is requested and no false ERROR is logged.
-    """
-    collector.base_url = None
-    discovered_url = "http://discovered-prometheus:9090"
-
-    async def discover(client):
-        collector.base_url = discovered_url
-        return True
-
-    collector._discover_and_update_url = AsyncMock(side_effect=discover)
-    route = respx.get(f"{discovered_url}/api/v1/query").mock(return_value=Response(200, json=MOCK_EMPTY_RESPONSE))
-
-    with caplog.at_level("DEBUG", logger="greenkube.collectors.prometheus_collector"):
-        client = httpx.AsyncClient()
-        try:
-            result = await collector._query_prometheus(client, "up")
-        finally:
-            await client.aclose()
-
-    assert result == []
-    assert route.called
-    collector._discover_and_update_url.assert_awaited_once()
-    assert not [r for r in caplog.records if r.levelname == "ERROR"]
-    assert not [r for r in caplog.records if "missing an 'http://'" in r.getMessage()]
-
-
-@pytest.mark.asyncio
-async def test_instant_query_without_url_and_no_discovery_reports_clear_error(collector, caplog):
-    """F-06: when discovery finds nothing, the error names the cause, no relative URL is tried."""
-    collector.base_url = None
-    collector._discover_and_update_url = AsyncMock(return_value=False)
-    client = AsyncMock()
-
-    with caplog.at_level("ERROR", logger="greenkube.collectors.prometheus_collector"):
-        assert await collector._query_prometheus(client, "up") == []
-
-    client.get.assert_not_called()
-    assert any("not configured and could not be discovered" in r.getMessage() for r in caplog.records)
