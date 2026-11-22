@@ -51,7 +51,7 @@ SourceSignal(
 - `signal_id` is computed, never set: `sha256(source_id, target.key(), capability, kind, proposal identity)`. The proposal identity leaves out the observed state (`current`, and the `direction` derived from it) and free-text explanations (`reason`): they drift between scans without changing the advice. The same proposal keeps the same id across scans, and its stored row holds the latest state and reason; a changed proposed value gets a new id.
 - GreenKube's Impact Model computes the savings shown to users. `source_estimate` is only kept to compare your claim with the model.
 - Never invent values you do not have: optional fields stay `None` (an `HpaProposal` without bounds is valid).
-- Deletions (`DeletionProposal`) are review-only in this release: GreenKube never opens a deletion PR.
+- A pushed deletion (`DeletionProposal`) never opens a deletion pull request by itself: it only supports a deletion another source proposes on the same target. GreenKube's own orphaned PersistentVolume and LoadBalancer deletions can become a deletion pull request, never approved automatically ([Deleting orphaned resources](automation.md#deleting-orphaned-resources)).
 - `engine_family` names the recommendation engine behind the advice when several sources relay the same one: consensus counts one vote per engine (`signal.engine`, the family or else the source id). Goldilocks and user VPAs both carry `engine_family: vpa`.
 
 ## Writing a source
