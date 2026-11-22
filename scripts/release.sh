@@ -89,7 +89,7 @@ while IFS= read -r changed_file; do
 done <<EOF
 $(git diff --name-only)
 EOF
-git commit -S -m "chore: release ${TAG}" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+git commit -S -m "chore: release ${TAG}"
 
 # 5. Tag
 git tag -s "${TAG}" -m "Release ${TAG}"

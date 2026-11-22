@@ -1,11 +1,11 @@
 apiVersion: v2
 name: greenkube
 description: >-
-  GreenKube is an open-source Kubernetes optimization loop. It aggregates
-  recommendations (GreenKube analyzers, VPA, Goldilocks, Karpenter), ranks them
-  by impact and risk, delivers them as reviewable GitOps pull requests for
-  Argo CD and Flux, verifies the sync, and measures the cost and CO₂e savings
-  each change realizes.
+  GreenKube is an open-source Kubernetes optimization loop. It sizes container
+  requests from measured usage (corroborated by VPA and KRR when present),
+  ranks the changes by impact and risk, delivers them as reviewable GitOps pull
+  requests for Argo CD and Flux, verifies the sync, and measures the cost and
+  CO₂e savings each change realizes.
 type: application
 icon: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
 version: 0.3.1
@@ -20,7 +20,6 @@ keywords:
 - argocd
 - flux
 - vpa
-- karpenter
 - finops
 - cloud-cost
 - carbon
@@ -63,18 +62,18 @@ annotations:
         - linux/amd64
         - linux/arm64
   artifacthub.io/screenshots: |
-    - title: CO₂e & Energy Dashboard
+    - title: Overview: measured, pending and projected savings
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-dashboard.png
-    - title: Optimization Recommendations
+    - title: Recommendations, ranked, with the capacity they free
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-recommendations.png
-    - title: Automation & GitOps
+    - title: Changes: plan, pull request, sync, rollout, outcome
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-automation.png
-    - title: Node Inventory
+    - title: A measured change: cost interval and released capacity
+      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-change.png
+    - title: Footprint: node inventory
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-nodes.png
-    - title: Report Builder & Export
+    - title: Footprint: cost, energy and CO2e report export
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-report.png
-    - title: Settings & Service Health
-      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
   artifacthub.io/changes: |
     - kind: added
       description: "GitOps plan workflow: Persisted recommendation IDs now resolve to server-side GitOps bindings and render-validated raw-manifest, Kustomize, and a fail-closed subset of Helm plans."

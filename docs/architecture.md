@@ -1,6 +1,6 @@
 # GreenKube Architecture
 
-This document describes the current technical architecture of GreenKube. GreenKube is an optimization loop for Kubernetes: it aggregates recommendations from several sources, ranks them, delivers them as GitOps pull requests, verifies that Argo CD or Flux synced them, and measures the cost and CO₂e savings they realize.
+This document describes the current technical architecture of GreenKube. GreenKube is an optimization loop for Kubernetes: it sizes container requests from measured usage (VPA and KRR, when present, only adjust the confidence), ranks the changes, delivers them as GitOps pull requests, verifies that Argo CD or Flux synced them, and measures the cost and CO₂e savings they realize.
 
 The architecture has four parts:
 

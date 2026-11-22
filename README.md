@@ -6,16 +6,16 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube) [![Build in Public](https://img.shields.io/badge/Build%20in%20Public-blueviolet)](CHANGELOG.md)
 
-Your cluster already has plenty of optimization advice: VPA, Goldilocks, KRR and your cloud console all produce lists, and they often disagree. Nobody wants to resize pods by hand, GitOps reverts anything changed outside Git, and almost no tool tells you what a change really saved once it shipped.
+Most pods request far more CPU and memory than they use. Resizing them by hand is tedious, GitOps reverts anything changed outside Git, and almost no tool tells you what a change really saved once it shipped.
 
-GreenKube turns that advice into reviewed pull requests in your GitOps repository, then measures each merged change against its projection: in money, in CO₂e, and in CPU and memory released.
+GreenKube sizes container requests from your cluster's own measurements, delivers each change as a reviewed pull request in your GitOps repository, then measures the merged change against its projection: in money, in CO₂e, and in CPU and memory released.
 
 > **Live demo:** [demo.greenkube.cloud](https://demo.greenkube.cloud), the full dashboard with sample data, no install.
 
 ## How it works
 
-1. **Aggregate.** GreenKube's own measurements, corroborated by [VPA](docs/sources/vpa.md), [Goldilocks](docs/sources/goldilocks.md), [Robusta KRR](docs/sources/krr.md) and any tool through a [push API](docs/sources/push.md), in one model.
-2. **Decide.** GreenKube's measured value decides each size; the other sources raise or lower the confidence (one vote per engine, contested advice labeled), and each recommendation gets evidence, a projected impact, a risk level, a confidence score and a risk-adjusted ranking.
+1. **Measure.** GreenKube collects CPU and memory usage from Prometheus and prices it with OpenCost, a bundled cloud price catalog or your own rates, with its energy and CO₂e.
+2. **Recommend.** It sizes CPU and memory requests from that history, raises memory after an out-of-memory kill, and flags orphaned LoadBalancers and PersistentVolumes. Each recommendation gets evidence, a projected impact, a risk level, a confidence score and a ranking. When present, [VPA](docs/sources/vpa.md) (including [Goldilocks](docs/sources/goldilocks.md)) and [Robusta KRR](docs/sources/krr.md) reports sent through the [push API](docs/sources/push.md) only raise or lower the confidence: GreenKube's measured value always decides the size.
 3. **Deliver.** GreenKube finds the workload's source in Git through Argo CD or Flux (plain YAML, Kustomize, Helm), shows the exact diff, and opens a pull request on GitHub, GitLab or Gitea once you approve the plan.
 4. **Prove.** It follows the merge through the sync and the rollout, then measures the change against a counterfactual baseline, with confounders and health gates, and records the outcome in an append-only, hash-chained ledger.
 
@@ -66,7 +66,7 @@ The **Setup** page lists what is active and the fix for anything missing. Recomm
 - **Projected is never shown as realized.** Projected, measured and billed savings are labeled and never added together; released capacity is never turned into money.
 - **On-premises and in the cloud.** Bundled price catalogs for AWS, Azure, OVHcloud and Scaleway, OpenCost or your own rates anywhere, and released capacity where the bill does not move.
 - **Fail closed, explain why.** When a change cannot be automated or measured safely, GreenKube stops and tells you what is missing and how to fix it.
-- **Neutral.** GreenKube's own analyzers are one source among others; every source is a plugin of the [Source SDK](docs/sources.md).
+- **Light.** One Helm release (API, controller, renderer, PostgreSQL); an optimization tool should not cost much to run.
 
 ## Learn more
 
@@ -79,7 +79,7 @@ The **Setup** page lists what is active and the fix for anything missing. Recomm
 
 ## Contributing
 
-Contributions are welcome, especially new recommendation sources and support for more GitOps layouts. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are welcome, especially support for more GitOps layouts and Git providers. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```bash
 git clone https://github.com/GreenKubeCloud/GreenKube.git && cd GreenKube

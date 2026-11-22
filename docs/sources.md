@@ -1,6 +1,6 @@
 # Recommendation sources (Source SDK)
 
-GreenKube is a neutral aggregator: its own analyzers are one source of advice among others. Every source, native or third-party, implements the same contract and emits **signals** in one schema. This page explains the model, how sources run, and how to write and ship your own.
+GreenKube's own measurements decide every size; other sources (VPA, Goldilocks, KRR, pushed or plugin signals) only raise or lower the confidence. Every source, native or third-party, implements the same contract and emits **signals** in one schema. This page explains the model, how sources run, and how to write and ship your own.
 
 - Code: `src/greenkube/signals/` (model, SDK, adapters, runner, registry, contract checks).
 - Example package: [`examples/greenkube-source-example`](../examples/greenkube-source-example).

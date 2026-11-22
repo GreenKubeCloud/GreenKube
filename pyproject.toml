@@ -11,7 +11,7 @@ version = "0.3.1"
 authors = [
   { name = "Hugo Lelievre", email = "hugo.lelievre@greenkube.cloud" },
 ]
-description = "Open-source Kubernetes optimization loop: aggregate recommendations (GreenKube, VPA, Goldilocks, Karpenter), deliver them as GitOps pull requests, and measure the cost and CO2e savings each change realizes."
+description = "Open-source Kubernetes optimization loop: size container requests from measured usage, deliver the changes as GitOps pull requests, and measure the cost and CO2e savings each change realizes."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.13"

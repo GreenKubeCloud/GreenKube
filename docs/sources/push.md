@@ -1,6 +1,6 @@
 # Push API (`push`)
 
-Any tool, script or vendor can contribute advice to GreenKube by pushing signals over HTTP. This is GreenKube's neutral aggregator protocol (roadmap G6).
+Any tool, script or vendor can contribute advice to GreenKube by pushing signals over HTTP. Pushed signals corroborate GreenKube's own sizing: they raise or lower the confidence, never set a value on their own (roadmap G6).
 
 ## What it reads
 
