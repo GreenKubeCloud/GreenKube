@@ -47,7 +47,7 @@ Bearer key and answers with a signed cookie, never the key itself:
   `config.trustedProxyIps`, or when `auth.session.secureCookie` is `always`, which the chart renders with
   `ingress.tls` or an https HTTPRoute. If TLS ends at an ingress or load balancer the chart does not render, set
   `config.trustedProxyIps` to its addresses or `auth.session.secureCookie: always`.
-- **Rate limit:** failed attempts count against `auth.loginRateLimit` per client IP and attempted key, plus the
+- **Rate limit:** failed attempts count against `auth.login.rateLimit` per client IP and attempted key, plus the
   per-IP budget, so one client's typos do not lock out the others behind the same address.
 - **Sign out** clears the cookie in the browser but does not revoke it on the server: a copy of the cookie stays
   valid until its `exp`, unless the key is revoked or the bootstrap key rotated.
@@ -216,8 +216,9 @@ sign-in. Passwords need at least 12 characters (at most 256) and must differ fro
 | `operator` | Everything a viewer can, plus approve plans (which opens pull requests), cancel and delete plans, preview rollbacks, ignore and restore recommendations, mark them applied, request re-measurements, report out-of-band deliveries |
 | `admin` | Everything, plus users and roles, API keys and the repository allowlist |
 
-- Roles are enforced on the server, twice: the global authentication dependency maps every request to a scope, and
-  each mutating route also declares the scope it needs (`require_scope`), so a gap in one table never opens a route.
+- Roles are enforced on the server: the global authentication dependency maps every request to a scope. The plan,
+  plan-delivery, repository-allowlist and recommendation-decision routes also declare the scope they need
+  (`require_scope`), so a gap in the global table never opens them.
   A viewer gets `403` (`INSUFFICIENT_SCOPE`) on plan approval and every other mutation.
 - The bootstrap account is an `admin`. Administrators manage local accounts in **Account > Users and roles**
   (`/settings/account`) or with `GET/POST /api/v1/auth/users` and `PATCH /api/v1/auth/users/{id}` (`{"role": ...}`,
@@ -225,7 +226,7 @@ sign-in. Passwords need at least 12 characters (at most 256) and must differ fro
   signs out all of its sessions. The last active admin can be neither demoted nor disabled (`409 LAST_ADMIN`).
 - Single sign-on accounts get their role from their groups (below) at every sign-in; it cannot be edited in the UI.
 - Operator (`write`, `approve`, `plans:deliver`) covers the day-to-day loop: plans and their delivery,
-  recommendation decisions, GitOps binding resolution and GitOps discovery and provider
+  recommendation decisions, GitOps binding resolution and GitOps discovery
   routes (`/api/v1/gitops/*`). Admin is required for users and roles (`/api/v1/auth/users`), API keys
   (`/api/v1/auth/api-keys`) and the repository allowlist.
 
@@ -451,6 +452,7 @@ Migration:
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/api/v1/auth/login` | `{username, password, remember}`. Sets the session cookie; returns the principal and its CSRF token. |
+| `POST` | `/api/v1/auth/api-key-login` | `{key, remember}`, `api_key` mode only (`409` otherwise). Sets the signed API-key cookie; see [Browser sign-in with an API key](#browser-sign-in-with-an-api-key). |
 | `POST` | `/api/v1/auth/logout` | Revokes the current session and clears the cookie (`204`). |
 | `GET` | `/api/v1/auth/me` | The current principal (`kind`, `name`, `role`, `scopes`, `auth_source`, `must_change_password`, `csrf_token`, session). `401` when signed out. Behind a trusted proxy, starts the identity's session. |
 | `POST` | `/api/v1/auth/password` | `{current_password, new_password}`. Revokes every session, issues a new cookie. |
@@ -458,7 +460,7 @@ Migration:
 | `DELETE` | `/api/v1/auth/sessions/{id}` | Signs out one session. |
 | `GET`, `POST` | `/api/v1/auth/api-keys` | List or create keys (`admin`). |
 | `DELETE` | `/api/v1/auth/api-keys/{id}` | Revoke a key (`admin`). |
-| `GET` | `/api/v1/auth/providers` | Public: sign-in options (`mode`, `password`, `sso`) for the sign-in page. |
+| `GET` | `/api/v1/auth/providers` | Public: sign-in options (`mode`, `password`, `api_key`, `sso`) for the sign-in page. |
 | `GET` | `/api/v1/auth/oidc/login` | Starts an OpenID Connect sign-in (`?return_to=/path`); redirects to the provider. |
 | `GET` | `/api/v1/auth/oidc/callback` | Provider redirect: finishes the sign-in, sets the session cookie, redirects to the return path. |
 | `GET`, `POST` | `/api/v1/auth/users` | List accounts, or create a local account `{username, password, role}` (`admin`). |
@@ -510,6 +512,6 @@ kubectl -n greenkube exec -it greenkube-postgres-0 -- \
 | ID token | Signature verified against the JWKS (asymmetric algorithms only, never `none` or `HS*`); `iss`, `aud`, `azp`, `exp`, `iat`, `nbf`, `nonce`, `sub` checked; discovery must name the configured issuer over `https` |
 | Open redirects | The post-sign-in return path is reduced to a local path (`//host`, absolute URLs, backslashes and `/api/` are refused) |
 | Account takeover | SSO accounts are keyed by `proxy:<user>` / `oidc:<sub>`; an SSO identity never merges into an existing account (`ACCOUNT_CONFLICT`); SSO accounts have no password and fail password sign-in in constant time |
-| Roles | Enforced server-side by the scope table and by `require_scope` on every mutating route; a test asserts that a viewer gets `403` on every mutating route of the app; the last active admin cannot be demoted or disabled |
+| Roles | Enforced server-side by the scope table, and by `require_scope` on the plan, delivery, allowlist and recommendation-decision routes; a test asserts that a viewer gets `403` on every mutating route of the app; the last active admin cannot be demoted or disabled |
 | Group mapping | Malformed `AUTH_ROLE_GROUPS` or `AUTH_DEFAULT_ROLE` stop the API at startup; `defaultRole: none` refuses unmapped users |
 | Initial password | Erased from the Secret once used; NOTES no longer points to it and prints `greenkube auth reset-password` instead |

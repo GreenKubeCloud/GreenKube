@@ -92,8 +92,8 @@ make e2e
 can explore it; `make e2e-status` prints the result of every step and
 `make e2e-clean` removes everything the harness created.
 
-Every setting is an environment variable with a default in `hack/e2e/lib.sh`.
-The most useful ones:
+Every setting is an environment variable with a default in `hack/e2e/lib.sh`
+(or in `run.sh` and `loop.sh` for the run options). The most useful ones:
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -106,10 +106,12 @@ The most useful ones:
 | `GK_EXTRA_VALUES` | — | Extra Helm values file |
 | `E2E_KUBE_CONTEXT` | `minikube` | The only kubectl context the harness runs against |
 | `E2E_ADOPT` | `0` | `1` takes over objects with the harness's names that lack its ownership marker |
+| `E2E_ARGOCD` | `1` | `0` skips the Argo CD path |
 | `E2E_FLUX` | `1` | `0` skips the Flux path |
 | `E2E_FRESH` | `1` | `1` deletes the previous run's release, data, repository and namespaces first; `0` keeps them |
 | `E2E_RESUME_MAX_AGE` | `21600` | With `E2E_FRESH=0`, the age in seconds beyond which a merged pull request is not resumed |
 | `E2E_WAIT_VERDICT` | `1` | `0` stops once the measurement has started |
+| `E2E_TIMEOUT_VERDICT` | `1500` | Seconds to wait for the measurement verdict |
 | `E2E_ALLOW_REGRESSION` | `0` | `1` records a verdict other than `verified`/`passed` without failing the run |
 | `E2E_STATE_DIR` | `$TMPDIR/greenkube-e2e` | Port-forward logs and the evidence of each step |
 
@@ -137,22 +139,26 @@ helm upgrade --install greenkube ./helm-chart -n greenkube --create-namespace \
   --set config.prometheus.url=http://prometheus-k8s.monitoring.svc.cluster.local:9090
 ```
 
-The values turn on GitOps automation with one Gitea provider whose allowlist is
-the sample repository only, and accelerate evidence:
+The values declare one Gitea provider whose allowlist is the sample repository
+only, and accelerate evidence:
 
 | Setting | Quickstart | Default |
 |---|---|---|
 | `config.prometheus.queryRangeStep` (`PROMETHEUS_QUERY_RANGE_STEP`) | `30s` | `5m` |
 | `config.collection.maxBackfill` | `30m` | `24h` |
-| `config.recommendations.minSamples` (`RECOMMENDATION_MIN_SAMPLES`) | `6` | `36` |
+| `config.recommendations.lookbackDays` | `1` | `14` |
+| `config.recommendations.minSamples` (`RECOMMENDATION_MIN_SAMPLES`, every sample gate) | `6` | `36` |
+| `config.recommendations.minDecreaseCoverageDays` | `0.001` | `7` |
 | `config.recommendations.scanInterval` | `1m` | `1h` |
 | `config.recommendations.verification.windowHours` | `0.1` (6 minutes) | `72` |
 | `config.recommendations.verification.lifecycleInterval` | `30s` | `5m` |
-| `automation.policy.minSamples` / `minCoverage` | `6` / `0` | `36` / `0.5` |
+| `automation.policy.minCoverage` / `cooldownMinutes` / `missingEvidence` | `0` / `0` / `warn` | `0.5` / `60` / `fail` |
 | `automation.discoveryInterval` / `prPollIntervalSeconds` / `syncPollIntervalSeconds` | `30s` / `10` / `10` | `5m` / `120` / `30` |
+| `automation.syncTimeoutSeconds` | `900` | `1800` |
 
-`minCoverage: 0` is needed because coverage is measured against the whole
-lookback window (at least one day), which a fresh install cannot fill.
+`minCoverage: 0` keeps collection gaps of a fresh demo install from holding the
+plan back (the coverage gate is evaluated against the data collected since
+install).
 
 The quickstart decides merged changes with the 6-minute verifier, so change
 measurement (`config.recommendations.changeMeasurement.enabled`) is off and
@@ -249,7 +255,8 @@ error stops the run at once.
 - **Gitea:** `kubectl -n gitea port-forward svc/gitea-http 3000` and open
   `http://localhost:3000/greenkube/greenkube-e2e-quickstart/pulls?state=closed`.
 - **GreenKube UI:** `kubectl -n greenkube port-forward svc/greenkube-api 8000`,
-  open `http://localhost:8000` and paste the API key. The Recommendations page
+  open `http://localhost:8000` and sign in as `admin` with the initial password
+  (see [Authentication: first sign-in](../authentication.md#first-sign-in)). The Recommendations page
   shows the applied recommendations and their measurement.
 - **Argo CD:** `kubectl -n argocd get application greenkube-e2e-quickstart`.
 
