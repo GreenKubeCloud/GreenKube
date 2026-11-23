@@ -2,7 +2,7 @@
 # Builds the SvelteKit SPA into static files.
 # The output is pure HTML/CSS/JS — architecture-independent, so build it
 # on the native build platform instead of running npm through emulation.
-FROM --platform=$BUILDPLATFORM node:22.23.5-alpine3.23 AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:26.13.1-alpine3.23 AS frontend-builder
 
 WORKDIR /frontend
 
