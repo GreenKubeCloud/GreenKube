@@ -20,8 +20,8 @@ vulnerabilities as described in [SECURITY.md](../SECURITY.md).
 
 | Component | Holds | Reachable from |
 |---|---|---|
-| **API** (`<release>-api`) | Database credentials; the session/API-key store; read-only projections of Git credentials (readiness only) | Users and machines, through `kubectl port-forward`, an Ingress or an HTTPRoute |
-| **Controller** (`<release>-controller`) | Database credentials, Git provider credentials, the GitHub App key, webhook secrets, the scrape token; the Kubernetes service account (read-only cluster RBAC, a Lease, named Secrets) | Prometheus on its metrics port only (ClusterIP Service, no Ingress) |
+| **API** (`<release>-api`) | Database credentials; the session/API-key store; read-only projections of Git credentials (plan previews, patch downloads, delivery-report verification) and the webhook secrets | Users and machines, through `kubectl port-forward`, an Ingress or an HTTPRoute |
+| **Controller** (`<release>-controller`) | Database credentials, Git provider credentials, the GitHub App key, the scrape token; the Kubernetes service account (read-only cluster RBAC, a Lease, named Secrets) | Prometheus on its metrics port only (ClusterIP Service, no Ingress) |
 | **Worker** (optional) | Same as the controller for plan execution | Prometheus on its metrics port only |
 | **Renderer sandbox** | Nothing: no Secrets, no service-account token, no database | The controller only |
 | **PostgreSQL** (bundled) | All persistent state | The api, controller and worker of the release only (`postgres.networkPolicy`, on by default) |
@@ -42,15 +42,16 @@ and the session's `X-CSRF-Token`. HTTPS responses carry `Strict-Transport-Securi
 
 ## Roles and scopes per route group
 
-Scopes are checked twice: by a central table on every `/api/v1/*` and `/api/v2/*` request, and by a guard declared
-on each mutating route, so a change to one never silently opens a route.
+Scopes are checked by a central table on every `/api/v1/*` and `/api/v2/*` request. The plan, plan-delivery,
+repository-allowlist and recommendation-decision routes also declare their own guard, so a change to the table never
+silently opens them.
 
 | Route group | Scope | Roles |
 |---|---|---|
 | Health, liveness, OpenAPI document, provider webhook ingress (`POST /api/v1/webhooks/{provider}`, verified by HMAC or token) | none | public |
 | Every `GET` under `/api/v1` and `/api/v2` | `read` | viewer, operator, admin |
 | Scans, ignore/restore, mark applied, plan previews, GitOps binding resolution | `write` | operator, admin |
-| Plan approval (`POST /automation/plans/{id}/approve`), `POST /recommendations/{id}/apply-pr` | `approve` | operator, admin |
+| Plan approval (`POST /automation/plans/{id}/approve`), abandoning a stuck plan (`POST /automation/plans/{id}/abandon`, also needs `write`) | `approve` | operator, admin |
 | Delivery report of `patch`/`ci` plans | `plans:deliver` | operator, admin |
 | Push API (`POST /api/v1/signals`, as `push:<key name>` only) | `signals:write` | admin, or a key |
 | KRR report uploads | `signals:report` (`signals:write` accepted, deprecated) | admin, or a key |
@@ -62,7 +63,7 @@ on each mutating route, so a change to one never silently opens a route.
 
 | Credential | Where it lives | Who reads it | Grants |
 |---|---|---|---|
-| Git provider token | Secret `greenkube-git-credentials` (or `automation.providers[].secretName`) | Controller/worker (mounted read-only); API reads only which keys exist | Pull requests on allowlisted repositories, bound to one Git host (`host` key) |
+| Git provider token | Secret `greenkube-git-credentials` (or `automation.providers[].secretName`) | Controller/worker and API (mounted read-only; the API uses it for previews and delivery verification) | Pull requests on allowlisted repositories, bound to one Git host (`host` key) |
 | GitHub App private key | Same Secret, keys `appId` + `privateKey` | Controller/worker | Short-lived installation tokens, limited to the repositories the App is installed on |
 | Webhook secrets | `automation.providers[].webhookSecretKey` | API (verification only) | Nothing: they authenticate provider deliveries |
 | Database password / DSN | Secret `<release>` (`DB_CONNECTION_STRING`) | api, controller, worker | The whole database |

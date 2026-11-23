@@ -13,7 +13,7 @@ GreenKube is an optimization loop for Kubernetes clusters run with GitOps. It si
 ### Prerequisites
 
 - Python 3.13+
-- Node.js 20+ (for the frontend)
+- Node.js 22.17+ (for the frontend; CI uses Node.js 22)
 - A Kubernetes cluster with Prometheus and OpenCost (for integration testing)
 
 ### Development Setup
@@ -28,9 +28,8 @@ GreenKube is an optimization loop for Kubernetes clusters run with GitOps. It si
 2. **Create a virtual environment and install dependencies:**
 
    ```bash
-   python -m venv .venv
+   uv sync          # creates .venv with the dev and test dependency groups
    source .venv/bin/activate
-   uv sync
    ```
 
 3. **Install pre-commit hooks:**
@@ -105,11 +104,11 @@ git merge --no-ff dev -m "chore: merge dev into main for release ${RELEASE_VERSI
 ./scripts/release.sh "$RELEASE_VERSION"
 ```
 
-The script will:
-1. Bump the version in `pyproject.toml` and all synced files (`Chart.yaml`, `values.yaml`, `__init__.py`, …)
+The script refuses a dirty working tree and needs a Git signing key (`user.signingkey` or `commit.gpgsign=true`). It will:
+1. Bump the version in `pyproject.toml`, refresh `uv.lock` and propagate the version to all synced files (`scripts/sync_version.py`: `Chart.yaml`, `values.yaml`, `__init__.py`, …)
 2. Move the `[Unreleased]` section in `CHANGELOG.md` to a dated `[<version>]` header and regenerate the Helm chart's Artifact Hub changes list from it (`scripts/artifacthub_changes.py`)
-3. Commit everything as `chore: release v<version>`
-4. Create an annotated git tag `v<version>`
+3. Commit everything as a signed `chore: release v<version>` commit
+4. Create a signed git tag `v<version>`
 
 `pyproject.toml` is the single source of truth for the version. The API version (shown by the UI banner), the chart `version` and `appVersion`, the chart image tag and the frontend package are copied from it. `python scripts/sync_version.py --check` (also run by `tests/scripts/test_sync_version.py`) fails when one of them diverges.
 
@@ -120,10 +119,10 @@ git push origin main --tags
 ```
 
 Pushing the `vX.Y.Z` tag triggers the `release.yml` workflow which:
-- Runs the full test + lint suite, the 80% coverage gate, the Helm checks and the frontend tests and build (gates)
-- Builds and pushes `greenkube/greenkube:<version>` to Docker Hub, plus `:latest` when the tag is the highest release
-- Regenerates the chart's `artifacthub.io/changes` from the CHANGELOG, then packages and publishes the Helm chart to GitHub Pages
-- Creates a GitHub Release with the changelog notes extracted automatically
+- Runs the full test + lint + type-check suite, the 80% coverage gate, the Helm checks, the frontend tests and build, the end-to-end loop (`e2e-nightly.yml`) and the 0.3.1 upgrade test (`upgrade-test.yml`) as gates: nothing is built or published unless they all pass
+- Builds and pushes the multi-arch `greenkube/greenkube:<version>` to Docker Hub, plus `:latest` when the tag is the highest release, then signs it with cosign (keyless), attaches the SPDX SBOM as a signed attestation and publishes SLSA build provenance (see [SECURITY.md](SECURITY.md#verifying-releases))
+- Regenerates the chart's `artifacthub.io/changes` from the CHANGELOG, then packages, signs (Sigstore bundle) and publishes the Helm chart to GitHub Pages
+- Creates a GitHub Release with the changelog notes extracted automatically, the SBOM and the signed chart package
 
 ### Docker Tag Summary
 
@@ -141,7 +140,7 @@ We use [Ruff](https://docs.astral.sh/ruff/) for both linting and formatting. The
 Key rules:
 - Line length: 120 characters
 - Imports sorted automatically (isort-compatible)
-- All code must pass `ruff check` and `ruff format --check`
+- All code must pass `ruff check`, `ruff format --check` and `pyrefly check` (type checking; also a pre-commit hook)
 
 ### Testing
 
@@ -169,7 +168,7 @@ chore(deps): update httpx to 0.27
 1. Fork the repository and create your branch from `dev`
 2. Make your changes with appropriate tests
 3. Ensure the full test suite passes: `pytest`
-4. Ensure linting passes: `ruff check .`
+4. Ensure linting and type checking pass: `ruff check .`, `ruff format --check .` and `pyrefly check`
 5. Update documentation if you changed behaviour
 6. Open a pull request targeting `dev` with a clear description of what and why
 

@@ -27,7 +27,7 @@ The chart's ClusterRole already grants `get`/`list` on `verticalpodautoscalers` 
 
 ## Configuration
 
-`config.recommendations.vpaEnabled` (`RECOMMENDATION_VPA_ENABLED`) or `sources.settings.vpa.enabled` (`true`, `false`, `auto`). There is no separate switch for Goldilocks: it is the same connector.
+`sources.settings.vpa.enabled` (`true`, `false`, `auto`; default `auto`: the source runs when the VPA CRD exists). The deprecated Helm value `config.recommendations.vpaEnabled` (`RECOMMENDATION_VPA_ENABLED`) still applies when `sources.settings.vpa.enabled` is not set. There is no separate switch for Goldilocks: it is the same connector.
 
 ## Limitations
 

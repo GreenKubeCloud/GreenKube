@@ -64,7 +64,7 @@ A **recommendation** is one proposed change on one target. It contains:
 - **Risk** (`low`, `medium` or `high`), with the factors that explain it.
 - **Confidence** (0–1), with the factors that explain it.
 - **Effort** (`low`, `medium` or `high`).
-- **Ranking score**: a weighted combination of carbon impact, cost impact, confidence, risk, effort and actionability. Profiles change the weights: `balanced`, `cost_first`, `carbon_first`, `quick_wins`, `low_risk`.
+- **Ranking score**: the risk-adjusted expected value of the change, in currency per year: the projected cost and priced CO₂e savings weighted by the probability of success, minus the expected incident cost and the effort cost. Profiles are presets over the carbon price, the risk aversion and the effort weight: `balanced`, `cost_first`, `carbon_first`, `quick_wins`, `low_risk` ([Ranking](recommendation.md#sources-evidence-and-ranking)).
 - **Expiry**: a recommendation that is not acted upon expires after `RECOMMENDATION_TTL_DAYS` (14 by default).
 
 ### Recommendation statuses
@@ -123,7 +123,7 @@ Plan statuses:
 | Phase | Statuses |
 |---|---|
 | Normal flow | `draft` → `validated` → `approved` → `applying` → `pr_open` → `merged` → `synced` → `applied` |
-| Alternatives | `needs_mapping`, `ambiguous`, `rejected`, `stale`, `superseded`, `closed`, `sync_failed`, `failed` |
+| Alternatives | `needs_mapping`, `ambiguous`, `rejected`, `stale`, `superseded`, `cancelled`, `closed`, `sync_failed`, `failed` |
 
 ### Pull request
 
@@ -134,9 +134,7 @@ A durable, idempotent worker:
 
 Merge and close events arrive by signed webhook or by polling.
 
-What can become a pull request today: decreases of container CPU and memory requests on Deployments, StatefulSets and DaemonSets. Other recommendation types are advisory for now.
-
-*(Planned)* Increases, limits, deletions of orphaned resources, remote Helm charts; patch-file and CI-driven delivery; a GitHub App.
+What can become a pull request: container CPU and memory request changes (decreases, and reliability increases) with their limit changes, and deletions of orphaned LoadBalancer Services and PersistentVolumes ([Supported action kinds](automation.md#supported-action-kinds)). GreenKube can open the pull request itself, or hand the approved plan over as a patch or to CI ([Delivery modes](automation.md#delivery-modes)). Other recommendation types stay advisory.
 
 ## Proving the change
 
@@ -170,7 +168,7 @@ The outcome is `verified` (realized), `rollback_review` (a health check failed),
 
 Every decision is stored as an immutable measurement. A `not_realized` or `inconclusive` change is never re-tested automatically; `POST /api/v1/recommendations/{id}/remeasure` starts a new measurement that supersedes the previous one. An operator can dismiss a false-positive `rollback_review` with a reason, which returns the change to `applied` and measures it again. The CPU and memory records of one change stay one attribution group through both actions, so together they never claim the workload's saving twice.
 
-> Verification is in **beta**. Change measurement adds counterfactual baselines, confidence intervals and per-change provenance; the append-only, hash-chained ledger (C6) is not implemented yet.
+> Verification is in **beta**. Change measurement adds counterfactual baselines, confidence intervals and per-change provenance.
 
 ### Rollback
 
@@ -189,7 +187,7 @@ GreenKube distinguishes several kinds of savings figures. They are never added t
 
 The ledger accrues savings once per UTC hour slot and recommendation, with their method (`projected`, `measured` or `user_declared`). Accrual is idempotent and backfills downtime; ledger rows are never compressed or deleted. Changes that were not realized, are inconclusive, failed, are in rollback review or were reverted accrue nothing, and a recommendation that enters `rollback_review` (or is reverted) has its earlier rows superseded, on every ledger pass. Projections accrue on the allocated basis, like measurements; a measurement restates the projected period, a `not_realized` verdict reverses it (and books a measured loss), and every reported figure comes from the hash-chained ledger v2. The API reports `projected_annual`, `run_rate_annual` and `realized_to_date` as separate blocks.
 
-*(Planned)* An append-only ledger linking each entry to its pull request, merge commit, synced revision and measurement method, with CSV export and export aligned with the FinOps FOCUS format.
+The ledger v2 is append-only and hash-chained. Each entry records its method and, when known, its change, measurement and pull request. `GET /api/v2/ledger/export` exports it as CSV or as CSV aligned with the FinOps FOCUS format ([Savings ledger v2](methodology/savings-measurement.md#12-savings-ledger-v2-c6)).
 
 ## Where things run
 

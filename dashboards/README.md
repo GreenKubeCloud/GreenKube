@@ -65,9 +65,11 @@ scrapes several GreenKube installs, use **Namespace** to tell them apart.
 
 ## Rows
 
+A text panel at the top, **About GreenKube**, says what GreenKube does, with links to
+[docs.greenkube.cloud](https://docs.greenkube.cloud) and the source. The rows below follow it.
+
 | Row | What it shows |
 |---|---|
-| **About GreenKube** | What GreenKube does, with links to [docs.greenkube.cloud](https://docs.greenkube.cloud) and the source. |
 | **Collection** | Age of the newest stored metric row (stale above 15 minutes). Collection watermark lag and coverage per source, from the leader controller. Windows abandoned beyond `COLLECTION_MAX_BACKFILL` and windows stored without a working Kubernetes list. |
 | **Loops and scans** | Whether a controller holds the Lease. Consecutive failures per loop (the alert fires at 3) and time since each loop's last success. Time since the last successful recommendation scan, scans by status, and failures by recommendation source. |
 | **Measurement and ledger** | Time since the change measurement loop last succeeded. Status of the savings ledger hash chain and of the v1/v2 reconciliation. Ledger projection backlog, and ledger write and chain verification errors. |

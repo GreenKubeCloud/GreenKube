@@ -11,8 +11,9 @@ by the end-to-end harness (`make e2e`, `hack/e2e/`).
 | `flux-kustomization.yaml` | Flux GitRepository and Kustomization that deploy `flux/oversized-worker` into `greenkube-e2e-apps`. |
 
 The manifests point at `http://gitea-http.gitea.svc.cluster.local:3000/greenkube/greenkube-e2e-quickstart.git`,
-an in-cluster Gitea. `hack/e2e/setup-gitops.sh` rewrites that URL when you
-override `GITEA_IN_CLUSTER_URL`, `GITEA_OWNER` or `GITEA_REPO`, and adds the
-harness's ownership label `greenkube.io/e2e=true`. The namespace
-`greenkube-e2e-apps` is fixed: the sample manifests, the Argo CD destination
-and the Flux overlay all declare it.
+an in-cluster Gitea, branch `main`. `hack/e2e/setup-gitops.sh` rewrites the URL
+when you override `GITEA_IN_CLUSTER_URL`, `GITEA_OWNER` or `GITEA_REPO` (and the
+branch with `GITEA_BRANCH`), and adds the harness's ownership label
+`greenkube.io/e2e=true`. The namespace `greenkube-e2e-apps` is fixed: the Argo CD
+sample manifests and destination declare it, and the Flux Kustomization's
+`targetNamespace` sets it for the namespace-less Flux overlay.

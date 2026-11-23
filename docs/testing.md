@@ -69,8 +69,10 @@ The main GitHub Actions CI job starts a PostgreSQL service container and exports
 GREENKUBE_TEST_POSTGRES_DSN=postgresql://greenkube:greenkube_password@localhost:5432/greenkube_test
 ```
 
-The regular `pytest --cov=greenkube ...` command then runs both SQLite and PostgreSQL variants of the contract tests. The job runs pytest with
-`-rs` and `.github/scripts/check-postgres-ran.sh` fails it when any test was skipped for a missing
+The suite runs in parallel shards (`.github/scripts/test-shard.sh`, on Python 3.13 and 3.14), each running
+`pytest --cov=greenkube ...` on its test directories, so both SQLite and PostgreSQL variants of the contract tests run;
+a separate job combines the coverage of every shard. Each shard runs pytest with
+`-rfEs` and `.github/scripts/check-postgres-ran.sh` fails it when any test was skipped for a missing
 `GREENKUBE_TEST_POSTGRES_DSN`, so PostgreSQL coverage cannot silently disappear (O8).
 Because every PostgreSQL test uses its own schema, tests can be added without coupling their data setup to global CI
 database state.

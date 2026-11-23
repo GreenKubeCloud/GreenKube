@@ -147,7 +147,7 @@ sources:
     acme: { enabled: true, url: "http://acme.acme-system:8080" }
 ```
 
-`enabled` precedence: `sources.settings.<id>.enabled`, then `config.recommendations.vpaEnabled` for `vpa`, then the source's `default_enabled` (`auto`). Settings are validated by the source's `settings_model`; an invalid entry disables that source only and is reported. Disabling a native analyzer (`greenkube.orphaned_lb: {enabled: false}`) stops its advice: its active recommendations are no longer produced and are marked stale on the next complete scan, like advice whose condition went away. The ConfigMap holds these settings: never put credentials in them. Read secrets from environment variables or mounted files in your source.
+`enabled` precedence: `sources.settings.<id>.enabled`, then `RECOMMENDATION_VPA_ENABLED` for `vpa` (set by the deprecated Helm value `config.recommendations.vpaEnabled`; `false` disables, `true` means `auto`), then the source's `default_enabled` (`auto`). Settings are validated by the source's `settings_model`; an invalid entry disables that source only and is reported. Disabling a native analyzer (`greenkube.orphaned_lb: {enabled: false}`) stops its advice: its active recommendations are no longer produced and are marked stale on the next complete scan, like advice whose condition went away. The ConfigMap holds these settings: never put credentials in them. Read secrets from environment variables or mounted files in your source.
 
 ## Packaging a third-party source
 

@@ -172,6 +172,8 @@ the finite values described below.
 | `greenkube_automation_queue_age_seconds` | Histogram; no labels | Age of each plan operation when claimed |
 | `greenkube_automation_worker_up` | Gauge; no labels | Whether the automation worker loop is active in this process |
 | `greenkube_automation_worker_heartbeat_timestamp_seconds` | Gauge; no labels | Unix timestamp of the worker loop's most recent heartbeat; freshness is `time() - metric` |
+| `greenkube_automation_backlog` | Gauge; `queue`, `state` (`operations`: `queued`, `running`, `retrying`, `failed`, `stuck`; `plans`: `applying`, `merged`, `stuck`, `sync_failed`; `webhooks`: `pending`, `stuck`; `workers`: `total`, `stale`) | Database-backed automation backlog, refreshed by the API on each scrape; the `greenkube.automation` alerts read it |
+| `greenkube_automation_worker_heartbeat_age_seconds` | Gauge; no labels | Age of the most recent persisted worker heartbeat, refreshed with the backlog; `-1` when none exists |
 | `greenkube_automation_failures_total` | Counter; `reason` (`plan`, `worker`, `polling`, `webhook`, `discovery`, `sync`, `other`) | Failures by fixed lifecycle subsystem category |
 | `greenkube_pull_requests_total` | Counter; `state` (`open`, `merged`, `closed`, `unchanged`, `unknown`), `provider` (`github`, `gitlab`, `gitea`, `other`) | Lifecycle states observed through polling or webhooks |
 | `greenkube_pull_request_merge_detection_seconds` | Histogram; no labels | Delay from provider-reported merge time to lifecycle detection |

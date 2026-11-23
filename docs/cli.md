@@ -1,6 +1,6 @@
 # CLI Reference
 
-GreenKube ships with a CLI with two runtime modes: `start` runs the controller and `demo` launches a self-contained sample environment. `recompute` and `db copy` are maintenance commands. Reporting and recommendations are provided by the REST API and the dashboard, not by the CLI.
+GreenKube ships with a CLI with two runtime modes: `start` runs the controller and `demo` launches a self-contained sample environment. `recompute` and the `db` commands are maintenance commands, `plan` delivers approved plans yourself, and `auth reset-password` recovers a local account. Reporting and recommendations are provided by the REST API and the dashboard, not by the CLI.
 
 ## Getting started
 
@@ -27,7 +27,7 @@ greenkube start [OPTIONS]
 
 This is the runtime of the controller Deployment in the Helm chart (`command: ["greenkube"]`, `args: ["start"]`).
 
-The process also serves its control-loop metrics (recommendation scans, verification, collection) at `/prometheus/metrics` (and `/metrics`) on `CONTROLLER_METRICS_PORT` (default `9102`; the chart sets it from `controller.metricsPort`; `0` disables the listener). Scrapes need a bearer token only when `GREENKUBE_API_KEY` is set in the controller's environment. A port that cannot be bound is logged and the controller keeps running without the listener.
+The process also serves its control-loop metrics (recommendation scans, verification, collection) at `/prometheus/metrics` (and `/metrics`) on `CONTROLLER_METRICS_PORT` (default `9102`; the chart sets it from `controller.metricsPort`; `0` disables the listener). Scrapes need a bearer token only when a scrape credential is set in the controller's environment: the scrape token `GREENKUBE_METRICS_TOKEN` when set, otherwise `GREENKUBE_API_KEY` (unless `AUTH_LEGACY_API_KEY=disabled`). A port that cannot be bound is logged and the controller keeps running without the listener.
 
 ### `greenkube demo`
 
@@ -39,8 +39,8 @@ greenkube demo [OPTIONS]
 
 | Flag | Description |
 |------|-------------|
-| `--port INTEGER` | Port for the API server (default: `8000`) |
-| `--days INTEGER` | Number of recent days to generate hourly workload metrics for (default: `30`); older metric and carbon-intensity history extends to two years at daily resolution |
+| `--port`, `-p INTEGER` | Port for the API server (default: `8000`) |
+| `--days`, `-d INTEGER` | Number of recent days to generate hourly workload metrics for (default: `30`); older metric and carbon-intensity history extends to two years at daily resolution |
 | `--no-browser` | Do not open the browser automatically |
 
 **Example:**
@@ -87,6 +87,45 @@ greenkube db copy --from sqlite:///data/greenkube_data.db --to "$DB_CONNECTION_S
 
 Tables are copied parents first with `ON CONFLICT DO NOTHING` and their ids kept; identity sequences are moved past the copied ids. Because ids are kept, the command refuses (exit code 1, naming the tables) a target where a table the source fills already holds rows, for example after a controller ran against it: copied events, ledger entries or plans would otherwise attach to the wrong parent. A resumed copy (`--allow-nonempty`) only adds the missing rows.
 
+### `greenkube db ledger-accept-head` and `greenkube db ledger-rotate-key`
+
+Savings-ledger chain maintenance, run with the controller's `LEDGER_CHAIN_KEY` (and `LEDGER_CHAIN_PREVIOUS_KEYS`) in the environment. See [Savings measurement](methodology/savings-measurement.md) for when to use them.
+
+```
+greenkube db ledger-accept-head --cluster-uid TEXT --reason TEXT [--rebuild-boundaries] [--trust-entry-keys]
+greenkube db ledger-rotate-key --cluster-uid TEXT --reason TEXT [--trust-entry-keys]
+```
+
+- `ledger-accept-head` accepts the current head of the cluster's ledger chain after an investigated verification failure or a restore. `--rebuild-boundaries` moves the recorded key boundaries later to match the entries (never weaker); `--trust-entry-keys` recovers a lost status row by taking the boundaries from the entries' own keys. Both are audited.
+- `ledger-rotate-key` records a rotation of `LEDGER_CHAIN_KEY` (new key in `LEDGER_CHAIN_KEY`, old key in `LEDGER_CHAIN_PREVIOUS_KEYS`). `--trust-entry-keys` is needed only without a trusted status row.
+
+### `greenkube plan apply-patch` and `greenkube plan report-delivery`
+
+Deliver an approved plan yourself in the `patch` and `ci` delivery modes ([Automation](automation.md)).
+
+```
+greenkube plan apply-patch PLAN_ID [--api-url URL] [--repo PATH] [--remote NAME] [--fetch/--no-fetch] [--push]
+greenkube plan report-delivery PLAN_ID --pr-url URL [--head-sha SHA] [--api-url URL]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--api-url TEXT` | GreenKube URL (default: `GREENKUBE_API_URL`). |
+| `--repo PATH` | `apply-patch`: local clone of the GitOps repository (default: current directory). |
+| `--remote TEXT` | `apply-patch`: remote that holds the base branch (default `origin`). |
+| `--fetch/--no-fetch` | `apply-patch`: fetch the base branch first (default: fetch). |
+| `--push` | `apply-patch`: push the plan branch to the remote. |
+| `--pr-url TEXT` | `report-delivery`: web URL of the pull request you opened. Required. |
+| `--head-sha TEXT` | `report-delivery`: head commit of the pull request (CI). |
+
+### `greenkube auth reset-password`
+
+Give a local account (default `admin`) a new random password, printed once and to be changed at the next sign-in; the account is re-enabled and its sessions are signed out. Single sign-on accounts have no password and are refused. See [Authentication](authentication.md).
+
+```bash
+kubectl -n greenkube exec deploy/greenkube-api -- greenkube auth reset-password admin
+```
+
 ### `greenkube version`
 
 Print the GreenKube version.
@@ -99,7 +138,7 @@ With `worker.replicas` greater than 0, the chart starts dedicated plan workers a
 python -m greenkube.cli.automation_worker
 ```
 
-The worker is an optional extra plan executor: it claims queued plan operations through database leases and executes them, nothing else (the webhook outbox, PR polling, branch cleanup, plan expiry and retention run in the controller). Operation leases make several replicas safe. The chart still passes the deprecated, hidden `--queue plans` flag; `plans` is its only accepted value. The worker exposes its authenticated control-loop metrics on `GREENKUBE_WORKER_METRICS_PORT` (Helm: `worker.metricsPort`, default `8001`). Use the Helm chart so the mode and credentials are configured consistently.
+The worker is an optional extra plan executor: it claims queued plan operations through database leases and executes them, nothing else (the webhook outbox, PR polling, branch cleanup, plan expiry and retention run in the controller). Operation leases make several replicas safe. The chart still passes the deprecated, hidden `--queue plans` flag; `plans` is its only accepted value. `--once` processes at most one plan operation and `--poll-seconds` (default `5`) sets the delay when the queue is empty. The worker exposes its authenticated control-loop metrics on `GREENKUBE_WORKER_METRICS_PORT` (Helm: `worker.metricsPort`, default `8001`). Use the Helm chart so the mode and credentials are configured consistently.
 
 ## Global flags
 
