@@ -113,12 +113,12 @@ jobs:
           kubectl -n greenkube-e2e-apps get deploy -o yaml >sample-apps.yaml 2>&1 || true
           # What the verifier sees: cost provenance of every stored pod row of the sample
           # workloads, step by step (an untrusted cost_source leaves a verdict inconclusive).
-          kubectl -n greenkube exec greenkube-postgres-0 -- psql -U greenkube -d greenkube -P pager=off -c \
-            "SELECT timestamp, pod_name, duration_seconds, cost_source, total_cost, cost_cpu, cost_ram, usage_source, cpu_request, memory_request
-               FROM combined_metrics WHERE namespace = 'greenkube-e2e-apps' ORDER BY timestamp, pod_name" \
+          # The password stays inside the pod: psql reads it from the pod's own environment.
+          pg() { kubectl -n greenkube exec greenkube-postgres-0 -- sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d greenkube -P pager=off -c "$1"' sh "$1"; }
+          pg "SELECT timestamp, pod_name, duration_seconds, cost_source, total_cost, cost_cpu, cost_ram, usage_source, cpu_request, memory_request
+                FROM combined_metrics WHERE namespace = 'greenkube-e2e-apps' ORDER BY timestamp, pod_name" \
             >cost-provenance.txt 2>&1 || true
-          kubectl -n greenkube exec greenkube-postgres-0 -- psql -U greenkube -d greenkube -P pager=off -c \
-            "SELECT cost_source, count(*), min(timestamp), max(timestamp) FROM combined_metrics GROUP BY cost_source ORDER BY 1" \
+          pg "SELECT cost_source, count(*), min(timestamp), max(timestamp) FROM combined_metrics GROUP BY cost_source ORDER BY 1" \
             >cost-provenance-summary.txt 2>&1 || true
           kubectl -n greenkube exec deploy/greenkube-controller -- python -c \
             "import os,urllib.request as u;r=u.Request('http://127.0.0.1:9102/prometheus/metrics',headers={'Authorization':'Bearer '+os.environ.get('GREENKUBE_METRICS_TOKEN','')});print(u.urlopen(r).read().decode())" 2>/dev/null |
