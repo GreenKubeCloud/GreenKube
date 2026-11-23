@@ -60,7 +60,7 @@ A freshly generated in-memory `Recommendation` has no lifecycle state until it i
 
 | State | Meaning | How it is reached |
 |---|---|---|
-| `active` | The recommendation is currently valid and visible in active lists, top recommendations, Prometheus active gauges, Grafana cards, and the frontend Active tab. | Created by `RecommendationRecord.from_recommendation()` and inserted or refreshed by repository upsert. Ignored recommendations can also be restored to active. |
+| `active` | The recommendation is currently valid and visible in active lists, top recommendations and the frontend Active tab. | Created by `RecommendationRecord.from_recommendation()` and inserted or refreshed by repository upsert. Ignored recommendations can also be restored to active. |
 | `stale` | A previously active recommendation no longer appears in the latest generated set and every source that supported it completed the scan, or its proposal is already live without it being its application (`no_effective_change`). It is kept in history but no longer shown as active. | `reconcile_active_recommendations()` at the end of each scan (see [Per-source reconciliation](#per-source-reconciliation)); apply detection, with a `stale` event whose reason is `no_effective_change`, when the live request is a change already recorded on another recommendation of the same target or landed before the recommendation was created; the phantom-change repair (below the table). |
 | `expired` | The recommendation passed `expires_at` (`generated_at + RECOMMENDATION_TTL_DAYS`) without being applied. It is hidden from active lists but retained for history. | `RecommendationLifecycle.expire()` during every scan and every lifecycle job. |
 | `ignored` | A user intentionally hid the recommendation with an optional reason. Ignored records are preserved for review and can be restored. Later scans never insert the same advice again: the ignored row stays the one row of its fingerprint (a fingerprint has at most one `active`, `ignored` or `pr_open` row). When a scan's advice differs materially from the ignored proposal (beyond the revision hysteresis, or in the opposite direction), a `changed_while_ignored` event records it once and the ignored list shows it as `changed_since_ignored` ("Advice changed since you ignored it"). | `PATCH /api/v1/recommendations/{id}/ignore`, only from `active`, `stale` or `expired` (an open PR or an applied change returns `409`). Ignoring a stale or expired row whose advice is active again marks that active twin `stale` (reason `superseded_by_ignored`); ignoring it while the same advice is in an open pull request is refused. |
@@ -118,7 +118,7 @@ Each finished run records:
 
 1. Metrics are collected and written to storage by the normal GreenKube collection pipeline.
 2. `OptimizationEngine.run_scan()` builds an `OptimizationContext`: a recent metrics window plus, when available, node snapshots, HPA targets, orphaned PersistentVolumes and orphaned LoadBalancers.
-3. Enabled **sources** ([Source SDK](sources.md)) run over the context, each in isolation: the availability probe is bounded to 30 seconds and the collection to 5 minutes, a source failing three times in a row is skipped for 15 minutes, and each source's run and signals are recorded (`source_runs`, `source_signals`, `GET /api/v1/sources`). A source that raises or times out is recorded as `failed` and the scan continues with the others. Each native analyzer is its own source (`greenkube.rightsizing_cpu`...); together they form the v1 source `greenkube`, which is incomplete for the run when one of them fails, so none of its recommendations go stale. The native analyzers run (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The VPA source reads recommendation-mode VPAs, and the Karpenter source evaluates NodePool consolidation from live NodePool/NodeClaim state.
+3. Enabled **sources** ([Source SDK](sources.md)) run over the context, each in isolation: the availability probe is bounded to 30 seconds and the collection to 5 minutes, a source failing three times in a row is skipped for 15 minutes, and each source's run and signals are recorded (`source_runs`, `source_signals`, `GET /api/v1/sources`). A source that raises or times out is recorded as `failed` and the scan continues with the others. Each native analyzer is its own source (`greenkube.rightsizing_cpu`...); together they form the v1 source `greenkube`, which is incomplete for the run when one of them fails, so none of its recommendations go stale. The native analyzers run (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The VPA source reads recommendation-mode VPAs.
 4. Every source's **signals** are combined by **consensus** into one recommendation per target, capability and type (see [Consensus across sources](#consensus-across-sources)): no source's proposal is dropped unseen, every supporting source is recorded in `sources` and in the per-source spread, and third-party or pushed signals become recommendations only through this step.
 5. Each recommendation is **enriched** with a review-grade evidence block, a risk/confidence/effort assessment, a machine-readable `patch` plan and an expiry date, then scored with its risk-adjusted expected value (EV, see below). Before persisting, the scan folds each source's measured track record into the score.
 6. Recommended CPU and memory requests are floored to configured minimums.
@@ -348,7 +348,7 @@ When the limit cannot be raised, the recommendation says so and stays advisory (
 
 Projected savings come from the [Impact Model](methodology/impact-model.md): each projected recommendation carries an `impact` object (model version, cost and CO2e breakdown, capacity released, realization factor, unit prices and their source). `potential_savings_cost` and `potential_savings_co2e_grams` are its expected annual values.
 
-Not every recommendation type has projected savings today. The top recommendations API and Grafana actionable cards only rank active recommendations with a positive projected value for the selected metric.
+Not every recommendation type has projected savings today. The top recommendations API only ranks active recommendations with a positive projected value for the selected metric.
 
 ## Persistence And Reconciliation
 
@@ -360,7 +360,7 @@ The active identity used by the repositories is:
 scope + namespace + pod_name + target_node + type
 ```
 
-This identity allows pod, workload, namespace, and node recommendations to coexist without collapsing unrelated targets. Active records with the same identity are refreshed in place with the latest description, reason, priority, projected savings, current requests, recommended requests, schedule, and node target.
+This identity allows pod, workload and cluster-scoped recommendations to coexist without collapsing unrelated targets. Active records with the same identity are refreshed in place with the latest description, reason, priority, projected savings, current requests, recommended requests, schedule, and node target.
 
 Ignored records are left untouched by normal upsert so a user decision is not overwritten by the next scan. A `pr_open` record is frozen: a scan that regenerates it neither rewrites it nor inserts a duplicate, so the pull request, its baseline and its proposal stay consistent. If a generated recommendation matches a previously applied record, only the applied record's `updated_at` is refreshed (see [Realized savings](#realized-savings)). A rightsizing regenerated within six hours of a change that is `verifying`, `verified` or in `rollback_review` is dropped when it restates that change (same baseline, or a proposal equal to the recorded proposal or live value): it was built from the lagging hourly rollup, and inserting it would offer the change again. Outside that window, or with a different baseline and proposal (fresh data after the change), it is new advice and is stored as usual.
 
@@ -495,7 +495,6 @@ Applied recommendations can later be regenerated by a scan when the same identit
 
 - For CPU and memory rightsizing, a regeneration that only restates the applied change (same pre-change baseline, or a proposal equal to the landed value) within 6 hours of `applied_at` changes nothing but `updated_at`: the baseline, the actual value and the realized savings stay as recorded. A scan reads requests from the hourly usage rollup, whose latest bucket can still carry the replaced request for up to an hour after a rollout, so it is not a live observation; drift after a change is measured from the cluster (C8), not from a regenerated recommendation. Any other advice for the container (for example an OOM-driven increase computed from the landed request, or advice after the 6-hour window) is inserted as a new active recommendation, as for the `verifying`, `verified` and `rollback_review` statuses.
 - Orphaned volumes and load balancers keep their savings (the regenerated observation means the deletion is pending).
-- For other non-resource recommendation types, seeing the same issue again sets realized savings back to zero, because the implementation no longer appears effective.
 
 ### Savings ledger
 
@@ -524,6 +523,7 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `RIGHTSIZING_MAX_INCREASE_FACTOR` | `config.recommendations.rightsizingMaxIncreaseFactor` | `2.0` |
 | `RIGHTSIZING_WARMUP_MINUTES` | `config.recommendations.rightsizingWarmupMinutes` | `10` |
 | `RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS` | `config.recommendations.minDecreaseCoverageDays` | `7` |
+| `RECOMMENDATION_TARGET_MAX_STALENESS_HOURS` | `config.recommendations.targetMaxStalenessHours` | `2` |
 | `RECOMMENDATION_LIMITS_POLICY` | `config.recommendations.limitsPolicy` | `keep` |
 | `RECOMMEND_SYSTEM_NAMESPACES` | `config.recommendations.recommendSystemNamespaces` | `false` |
 | `RECOMMENDATION_MIN_CPU_MILLICORES` | `config.recommendations.minCpuMillicores` | `10` |
@@ -532,15 +532,17 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `STORAGE_COST_PER_GIB_MONTH` | `config.recommendations.storageCostPerGibMonth` | `0.1` |
 | `LOAD_BALANCER_COST_PER_MONTH` | `config.recommendations.loadBalancerCostPerMonth` | `18.0` |
 | `DELETION_MIN_UNUSED_DAYS` | `config.recommendations.deletionMinUnusedDays` | `7` |
-| `RECOMMENDATION_VPA_ENABLED` | `config.recommendations.vpaEnabled` | `true` (CRD auto-detected) |
+| `RECOMMENDATION_VPA_ENABLED` | `sources.settings.vpa.enabled` (`config.recommendations.vpaEnabled` is deprecated) | `true` (CRD auto-detected) |
 | `RECOMMENDATION_TTL_DAYS` | `config.recommendations.ttlDays` | `14` |
 | `RECOMMENDATION_RANKING_PROFILE` | `config.recommendations.rankingProfile` | `balanced` |
 | `RECOMMENDATION_RANKING_WEIGHTS` | `config.recommendations.rankingWeights` | `""` (deprecated, ignored) |
 | `RECOMMENDATION_INCIDENT_COST` | `config.recommendations.incidentCost` | `100` |
 | `RECOMMENDATION_ENGINEER_HOUR_COST` | `config.recommendations.engineerHourCost` | `0` |
+| `RECOMMENDATION_CAPACITY_VALUE_WEIGHT` | `config.recommendations.capacityValueWeight` | `1` |
+| `CARBON_PRICE_PER_TONNE` | `impact.carbonPricePerTonne` | `100` |
 | `RECOMMENDATION_MIN_SAMPLES` | `config.recommendations.minSamples` | `36` |
 | `VERIFICATION_WINDOW_HOURS` | `config.recommendations.verification.windowHours` | `72` |
-| `VERIFICATION_MIN_SAMPLES` | `config.recommendations.verification.minSamples` | `36` |
+| `VERIFICATION_MIN_SAMPLES` | `config.recommendations.minSamples` (`verification.minSamples` is deprecated) | `36` |
 | `VERIFICATION_MIN_SAVINGS_RATIO` | `config.recommendations.verification.minSavingsRatio` | `0.5` |
 | `VERIFICATION_USAGE_HEADROOM` | `config.recommendations.verification.usageHeadroom` | `1.1` |
 | `VERIFICATION_MAX_RESTART_DELTA` | `config.recommendations.verification.maxRestartDelta` | `0` |
@@ -554,6 +556,8 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `CHANGE_MEASUREMENT_MIN_COVERAGE` | `config.recommendations.changeMeasurement.minCoverage` | `0.8` |
 | `CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES` | `config.recommendations.changeMeasurement.bootstrapSamples` | `1000` |
 | `CHANGE_MEASUREMENT_EPSILON_RATIO` | `config.recommendations.changeMeasurement.epsilonRatio` | `0.02` |
+| `CHANGE_DRIFT_THRESHOLD` | `config.recommendations.changeMeasurement.driftThreshold` | `0.5` |
+| `CHANGE_DRIFT_SUSTAINED_DAYS` | `config.recommendations.changeMeasurement.driftSustainedDays` | `3` |
 | `RECOMMENDATION_SCAN_INTERVAL` | `config.recommendations.scanInterval` | `1h` (`1m` to `24h`, units `s`, `m`, `h`) |
 
 `RECOMMENDATION_APPLY_TOLERANCE` drives the automatic **apply detection**: Kubernetes workload snapshots preserve CPU and memory requests per container, and a typed GitOps action with a plan in flight is considered only after its persisted action status reaches `sync_pending`. It is marked applied only when the targeted live request matches the recommended value within tolerance **and** moved from the baseline toward it: a live request still equal to `current_*` is never an applied change, even when the proposal lies within the tolerance of it (a 20Mi → 23Mi proposal on an untouched 20Mi request). A rollout that completed before the recommendation was created is not its application either. A decrease by itself, including an unrelated large decrease, is not sufficient. A recommendation with a typed action but no plan in flight (action status `none`, `failed` or `closed`) whose proposal is already live is recorded as applied (`detected`). A live request that equals a change already recorded on another recommendation of the same workload, container and resource (`applied`, `verifying`, `verified` or `rollback_review`, by its `actual_*`, or its proposal when `actual_*` is unknown) is never recorded a second time: the regenerated recommendation is retired as `stale` (`no_effective_change`), as is one whose rollout completed before it was created. The pre-apply workload-generation and per-container baseline is captured before provider mutation.
