@@ -28,6 +28,13 @@ esac
 # to 1 to record any other verdict (regressed, not_realized, inconclusive...)
 # without failing.
 : "${E2E_ALLOW_REGRESSION:=0}"
+# Runs that wait for a verdict let GreenKube collect for this long before the first
+# change: the measurement compares the change with a baseline window before it
+# (2 x verification.windowHours, 12 minutes with the quickstart values), and rows
+# GreenKube backfilled from before its own install, while OpenCost had little
+# history, are not trusted cost samples. A change applied 3 minutes after install
+# is rightly inconclusive; a real change is never measured that early either.
+: "${E2E_MIN_COLLECTION_SECONDS:=900}"
 # v0.4 exit criterion (after the verdict): the measured allocated cost of each
 # recommendation agrees with its projection within this relative tolerance.
 : "${E2E_PROJECTION_TOLERANCE:=0.2}"
@@ -162,6 +169,22 @@ else
   evidence "${prefix}.recommendation" ok "after $((SECONDS - started))s: $(jq -c --argjson ids "$(printf '%s\n' "${rec_ids[@]}" | jq -sc 'map(tonumber)')" \
     '[.[] | select(.id as $id | $ids | index($id)) | {id, type, container_name, current_cpu_request_millicores, recommended_cpu_request_millicores, current_memory_request_bytes, recommended_memory_request_bytes, confidence, risk_level, samples: .evidence.sample_count}]' \
     "${E2E_EVIDENCE_DIR}/${prefix}-recommendations.json")"
+
+  # --- 3a. Baseline: GreenKube has collected long enough before the change -----------------
+  if [[ "${E2E_WAIT_VERDICT}" == "1" ]]; then
+    controller_start="$(kubectl -n "${GK_NAMESPACE}" get pods -l app.kubernetes.io/component=controller \
+      -o jsonpath='{.items[0].status.startTime}' 2>/dev/null || true)"
+    if [[ -n "${controller_start}" ]]; then
+      start_epoch="$(date -u -d "${controller_start}" +%s 2>/dev/null ||
+        date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "${controller_start}" +%s)"
+      remaining=$((start_epoch + E2E_MIN_COLLECTION_SECONDS - $(date +%s)))
+      if ((remaining > 0)); then
+        log "Waiting ${remaining}s so the baseline before the change is collected live (E2E_MIN_COLLECTION_SECONDS=${E2E_MIN_COLLECTION_SECONDS})"
+        sleep "${remaining}"
+      fi
+    fi
+    evidence "${prefix}.baseline_collected" ok "controller started ${controller_start:-unknown}; min ${E2E_MIN_COLLECTION_SECONDS}s"
+  fi
 
   # --- 3. Plan preview -------------------------------------------------------------------
   ids_json="$(printf '%s\n' "${rec_ids[@]}" | jq -sc 'map(tonumber)')"

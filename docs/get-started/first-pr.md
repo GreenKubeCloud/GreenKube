@@ -112,6 +112,7 @@ Every setting is an environment variable with a default in `hack/e2e/lib.sh`
 | `E2E_RESUME_MAX_AGE` | `21600` | With `E2E_FRESH=0`, the age in seconds beyond which a merged pull request is not resumed |
 | `E2E_WAIT_VERDICT` | `1` | `0` stops once the measurement has started |
 | `E2E_TIMEOUT_VERDICT` | `1500` | Seconds to wait for the measurement verdict |
+| `E2E_MIN_COLLECTION_SECONDS` | `900` | With a verdict, seconds GreenKube collects before the first change, so the baseline window before it is collected live |
 | `E2E_ALLOW_REGRESSION` | `0` | `1` records a verdict other than `verified`/`passed` without failing the run |
 | `E2E_STATE_DIR` | `$TMPDIR/greenkube-e2e` | Port-forward logs and the evidence of each step |
 
