@@ -7,9 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- `values.yaml` listed `clusterId` under `config.prometheus`, where the chart never reads it; it now sits under `config.opencost.clusterId`, the key that sets `OPENCOST_CLUSTER_ID`.
-
 ## [0.4.0] — 2026-11-22
 
 GreenKube is now an optimization loop: recommend from its own measurements, deliver the change as a GitOps pull request, then measure the saving and book it in a savings ledger. Read the upgrade notes below and `docs/upgrading.md` before upgrading from 0.3.1.
