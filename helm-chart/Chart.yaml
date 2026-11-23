@@ -129,6 +129,8 @@ annotations:
       description: "Operations monitoring: controller metrics and health on `controller.metricsPort` (9102: `/healthz`, `/readyz`, `/loops`) with a ServiceMonitor; PrometheusRule groups for the controller, loops…"
     - kind: added
       description: "UI and docs: a savings-first Overview, recommendation detail, Changes, Ledger, Sources, Setup and Footprint pages, and account, session, API key and user pages; recommendation cards show expected…"
+    - kind: added
+      description: "Demo: `greenkube demo` shows GreenKube in daily use: a configured Gitea provider with Argo CD and Flux sources, twelve automation plans at every stage (preview awaiting approval, pull request open…"
     - kind: changed
       description: "Process layout: collection, scans and plan execution run in the controller; the API is stateless and safe to scale (`api.replicas`, `controller.replicas`, optional `worker.replicas`)."
     - kind: changed

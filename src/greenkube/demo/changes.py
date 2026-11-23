@@ -15,9 +15,9 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
-from greenkube.models.metrics import RecommendationRecord
+from greenkube.models.metrics import RecommendationRecord, RecommendationStatus
 from greenkube.verify.capacity import measure_capacity
 from greenkube.verify.model import (
     Allocation,
@@ -63,6 +63,14 @@ class DemoChange:
     outcome: ChangeOutcome
     repository: str
     pr_number: int
+    #: How far the measurement went: ``applied`` (warm-up), ``measuring`` (window open) or ``decided``.
+    progress: str = "decided"
+    #: Replicas before and after the change (an HPA may scale out after a smaller request).
+    replicas_before: float = 1.0
+    replicas_after: float = 1.0
+    #: A realized saving the drift monitor later found regressed (C8): when, and why.
+    regressed_days_ago: Optional[float] = None
+    regressed_reason: Optional[str] = None
 
 
 DEMO_CHANGES: tuple[DemoChange, ...] = (
@@ -115,6 +123,83 @@ DEMO_CHANGES: tuple[DemoChange, ...] = (
         repository="greenoptic/manufacturing-apps",
         pr_number=57,
     ),
+    DemoChange(
+        pod_name="stock-reservation-0",
+        namespace="retail",
+        owner_name="stock-reservation",
+        cpu_before_m=350,
+        cpu_after_m=200,
+        memory_before_bytes=512 * MIB,
+        memory_after_bytes=512 * MIB,
+        measured_annual=0.0,
+        ci_low=0.0,
+        ci_high=0.0,
+        projected_annual=0.0,
+        outcome=ChangeOutcome.INCONCLUSIVE,
+        repository="greenoptic/platform-gitops",
+        pr_number=435,
+        progress="applied",
+        replicas_before=2.0,
+        replicas_after=2.0,
+    ),
+    DemoChange(
+        pod_name="notification-service-0",
+        namespace="platform",
+        owner_name="notification-service",
+        cpu_before_m=300,
+        cpu_after_m=150,
+        memory_before_bytes=384 * MIB,
+        memory_after_bytes=384 * MIB,
+        measured_annual=0.0,
+        ci_low=0.0,
+        ci_high=0.0,
+        projected_annual=0.0,
+        outcome=ChangeOutcome.INCONCLUSIVE,
+        repository="greenoptic/platform-gitops",
+        pr_number=429,
+        progress="measuring",
+        replicas_before=2.0,
+        replicas_after=2.0,
+    ),
+    DemoChange(
+        pod_name="pos-sync-0",
+        namespace="retail",
+        owner_name="pos-sync",
+        # 400m -> 250m per replica, but the HPA (60% of the request) went from 2 to 3 replicas.
+        cpu_before_m=400,
+        cpu_after_m=250,
+        memory_before_bytes=512 * MIB,
+        memory_after_bytes=512 * MIB,
+        measured_annual=-7.4,
+        ci_low=-14.0,
+        ci_high=-0.8,
+        projected_annual=29.0,
+        outcome=ChangeOutcome.NOT_REALIZED,
+        repository="greenoptic/platform-gitops",
+        pr_number=419,
+        replicas_before=2.0,
+        replicas_after=3.0,
+    ),
+    DemoChange(
+        pod_name="factory-scheduler-0",
+        namespace="manufacturing",
+        owner_name="factory-scheduler",
+        cpu_before_m=None,
+        cpu_after_m=None,
+        memory_before_bytes=512 * MIB,
+        memory_after_bytes=384 * MIB,
+        measured_annual=4.6,
+        ci_low=3.9,
+        ci_high=5.3,
+        projected_annual=4.6,
+        outcome=ChangeOutcome.REALIZED,
+        repository="greenoptic/manufacturing-apps",
+        pr_number=61,
+        regressed_days_ago=6,
+        regressed_reason=(
+            "working set above the new request since release 3.8 (P95 401Mi for a 384Mi request); 2 OOM kills in 24h"
+        ),
+    ),
 )
 
 _STATE_BY_OUTCOME = {
@@ -124,9 +209,39 @@ _STATE_BY_OUTCOME = {
     ChangeOutcome.CONTAMINATED: MeasurementState.CONTAMINATED,
 }
 
+_REASON_BY_OUTCOME = {
+    ChangeOutcome.REALIZED: "the 90% interval is above zero",
+    ChangeOutcome.NOT_REALIZED: "the 90% interval is at or below zero: the allocated cost did not fall",
+    ChangeOutcome.INCONCLUSIVE: "the 90% interval includes zero",
+    ChangeOutcome.CONTAMINATED: "a confounding change landed in the measurement window",
+}
+
+#: A demo rollout lasts 20 minutes; the GitOps controller synced the merge 2 minutes before it started.
+ROLLOUT_DURATION = timedelta(minutes=20)
+SYNC_LEAD = timedelta(minutes=2)
+#: The pull request was merged this long before its rollout completed.
+MERGE_LEAD = timedelta(minutes=45)
+#: Git host of the demo repositories (fictional).
+DEMO_GIT_HOST = "git.greenoptic.example"
+
 
 def _digest(*parts: object) -> str:
     return hashlib.sha256("|".join(str(part) for part in parts).encode()).hexdigest()
+
+
+def merge_sha(repository: str, pr_number: int) -> str:
+    """The merge commit of a demo pull request (stable for a repository and number)."""
+    return _digest("merge", repository, pr_number)[:40]
+
+
+def pull_request_url(repository: str, pr_number: int) -> str:
+    """Web URL of a demo pull request on the fictional Gitea host."""
+    return f"https://{DEMO_GIT_HOST}/{repository}/pulls/{pr_number}"
+
+
+def rollout_completed_at(applied_at: datetime) -> datetime:
+    """Rollout completion of a change applied at ``applied_at`` (whole hours, as the change records)."""
+    return applied_at.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
 
 def _resources(cpu_m: Optional[int], memory_bytes: Optional[int]) -> dict[str, Any]:
@@ -138,24 +253,28 @@ def _buckets(start: datetime, hours: int, replicas: float) -> list[HourBucket]:
 
 
 def build_demo_change(
-    spec: DemoChange, member: RecommendationRecord
-) -> tuple[ChangeEvent, ChangeMeasurement, MeasurementState]:
-    """The change record, its decided measurement (with the measured capacity) and its final state."""
+    spec: DemoChange, member: RecommendationRecord, *, plan_id: Optional[str] = None
+) -> tuple[ChangeEvent, Optional[ChangeMeasurement], MeasurementState]:
+    """The change record, its decided measurement (with the measured capacity) and its current state.
+
+    ``plan_id`` is the automation plan that delivered the change; a change still in
+    its warm-up or measurement window has no decided measurement yet (``None``).
+    """
     if member.id is None or member.applied_at is None:
         raise ValueError(f"demo change {spec.pod_name}: its recommendation has no id or applied_at")
-    completed = member.applied_at.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    started = completed - timedelta(minutes=20)
+    completed = rollout_completed_at(member.applied_at)
+    started = completed - ROLLOUT_DURATION
     digest_before = _digest(spec.owner_name, spec.cpu_before_m, spec.memory_before_bytes)
     digest_after = _digest(spec.owner_name, spec.cpu_after_m, spec.memory_after_bytes)
-    merge_sha = _digest("merge", spec.repository, spec.pr_number)[:40]
+    merge_commit = merge_sha(spec.repository, spec.pr_number)
     change = ChangeEvent(
         change_id=f"demo-{_digest('change', spec.namespace, spec.owner_name)[:24]}",
         recommendation_ids=[member.id],
-        plan_id=f"demo-plan-{spec.pr_number}",
-        pr_url=f"https://git.greenoptic.example/{spec.repository}/pulls/{spec.pr_number}",
-        merge_sha=merge_sha,
-        gitops_revision=merge_sha,
-        synced_at=started - timedelta(minutes=2),
+        plan_id=plan_id or f"demo-plan-{spec.pr_number}",
+        pr_url=pull_request_url(spec.repository, spec.pr_number),
+        merge_sha=merge_commit,
+        gitops_revision=merge_commit,
+        synced_at=started - SYNC_LEAD,
         target=WorkloadRef(namespace=spec.namespace, kind="Deployment", name=spec.owner_name),
         containers=[DEMO_CONTAINER],
         generation_before=41,
@@ -172,6 +291,10 @@ def build_demo_change(
         created_at=completed,
         created_by="demo",
     )
+    if spec.progress == "applied":
+        return change, None, MeasurementState.APPLIED
+    if spec.progress == "measuring":
+        return change, None, MeasurementState.MEASURING
     observations = [
         WorkloadSpecObservation(
             namespace=spec.namespace,
@@ -192,18 +315,18 @@ def build_demo_change(
             observed_at=completed,
         ),
     ]
-    pre = TimeWindow(start=started - _WINDOW, end=started)
-    post = TimeWindow(start=completed + _WARMUP, end=completed + _WARMUP + _WINDOW)
+    pre, post = measurement_windows(completed)
     hours = int(_WINDOW.total_seconds() // 3600)
     capacity = measure_capacity(
         change,
         observations,
-        _buckets(pre.start, hours, 1.0),
-        _buckets(post.start, hours, 1.0),
+        _buckets(pre.start, hours, spec.replicas_before),
+        _buckets(post.start, hours, spec.replicas_after),
         [member],
         post_end=post.end,
     )
     measurement_id = uuid.uuid5(uuid.NAMESPACE_URL, change.change_id).hex
+    reason = _REASON_BY_OUTCOME[spec.outcome]
     estimate = SavingsEstimate(
         quantity="allocated_cost",
         unit="USD",
@@ -218,11 +341,7 @@ def build_demo_change(
         aligned_hours=hours,
         method="ols_load_seasonal",
         outcome=spec.outcome,
-        reason=(
-            "the 90% interval is above zero"
-            if spec.outcome is ChangeOutcome.REALIZED
-            else "the 90% interval includes zero"
-        ),
+        reason=reason,
         projected_annual=spec.projected_annual,
         projection_accuracy=round(spec.measured_annual / spec.projected_annual, 3),
     )
@@ -246,45 +365,74 @@ def build_demo_change(
             )
         ],
         outcome=spec.outcome,
-        reasons=[estimate.reason],
+        reasons=[reason],
         decided_at=post.end,
         capacity=capacity,
     ).with_evidence_digest()
     return change, measurement, _STATE_BY_OUTCOME[spec.outcome]
 
 
-def _member(spec: DemoChange, applied: Sequence[RecommendationRecord]) -> Optional[RecommendationRecord]:
-    for record in applied:
-        if record.pod_name == spec.pod_name and record.namespace == spec.namespace:
+def measurement_windows(completed: datetime) -> tuple[TimeWindow, TimeWindow]:
+    """The pre- and post-change windows of a demo change whose rollout completed at ``completed``."""
+    started = completed - ROLLOUT_DURATION
+    return (
+        TimeWindow(start=started - _WINDOW, end=started),
+        TimeWindow(start=completed + _WARMUP, end=completed + _WARMUP + _WINDOW),
+    )
+
+
+def _member(spec: DemoChange, records: Sequence[RecommendationRecord]) -> Optional[RecommendationRecord]:
+    for record in records:
+        if record.pod_name == spec.pod_name and record.namespace == spec.namespace and record.applied_at:
             return record
     return None
 
 
-async def populate_demo_changes(reco_repo, change_repo) -> int:
-    """Record the demo changes with their decided measurements; returns how many were recorded."""
-    applied = await reco_repo.get_applied_recommendations()
+async def _landed_records(reco_repo) -> list[RecommendationRecord]:
+    """Applied recommendations, plus the regressed ones the applied list leaves out."""
+    records = list(await reco_repo.get_applied_recommendations())
+    records.extend(await reco_repo.get_recommendations_by_statuses([RecommendationStatus.REGRESSED.value]))
+    return records
+
+
+async def populate_demo_changes(
+    reco_repo, change_repo, *, plan_ids: Optional[Mapping[int, str]] = None, now: Optional[datetime] = None
+) -> int:
+    """Record the demo changes in their measurement state; returns how many were recorded.
+
+    ``plan_ids`` maps a recommendation id to the automation plan that delivered it
+    (see :mod:`greenkube.demo.automation`).
+    """
+    current = now or datetime.now(timezone.utc)
+    landed = await _landed_records(reco_repo)
     recorded = 0
     for spec in DEMO_CHANGES:
-        member = _member(spec, applied)
-        if member is None:
+        member = _member(spec, landed)
+        if member is None or member.id is None:
             logger.warning("Demo change %s/%s skipped: no applied recommendation.", spec.namespace, spec.owner_name)
             continue
-        change, measurement, final_state = build_demo_change(spec, member)
+        change, measurement, final_state = build_demo_change(spec, member, plan_id=(plan_ids or {}).get(member.id))
         stored, created = await change_repo.insert_change(change, actor="demo")
         if not created:
             continue
+        recorded += 1
+        if final_state is MeasurementState.APPLIED:
+            continue
         status = await change_repo.get_status(stored.change_id)
+        _, post = measurement_windows(rollout_completed_at(member.applied_at or current))
         status = await change_repo.transition(
             status,
             MeasurementState.MEASURING,
             event_type="measurement_started",
             actor="demo",
-            post_window_start=measurement.windows.post.start,
-            post_window_end=measurement.windows.post.end,
-            now=measurement.windows.post.start,
+            post_window_start=post.start,
+            post_window_end=post.end,
+            now=post.start,
         )
+        if measurement is None:
+            continue
         await change_repo.insert_measurement(measurement)
-        await change_repo.transition(
+        status = await change_repo.transition(
             status,
             final_state,
             event_type="measurement_decided",
@@ -293,5 +441,13 @@ async def populate_demo_changes(reco_repo, change_repo) -> int:
             latest_measurement_id=measurement.measurement_id,
             now=measurement.decided_at,
         )
-        recorded += 1
+        if spec.regressed_days_ago is not None:
+            await change_repo.transition(
+                status,
+                MeasurementState.REGRESSED,
+                event_type="regressed",
+                actor="savings-drift",
+                reason=spec.regressed_reason or "",
+                now=current - timedelta(days=spec.regressed_days_ago),
+            )
     return recorded

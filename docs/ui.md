@@ -18,7 +18,7 @@ Status is always written as a word (`Measured`, `Projected`, `Action needed`, `F
 | `/setup` | The setup checklist, capability states and repository suggestions | `GET /setup/status`, `GET /automation/repositories/suggestions`, `POST /automation/repositories/allowlist` |
 | `/footprint` | Footprint KPIs and charts of the selected period (CO₂e, cost, energy, pods), with **Nodes** (`/footprint/nodes`) and **Report** (`/footprint/report`) sections | dashboard and metrics endpoints, `GET /nodes`, report endpoints |
 | `/automation` | GitOps discovery (one card per controller family), workload binding coverage and manual resolution, plan automation readiness; pull requests are on the changes board | `GET /gitops/status`, `/gitops/coverage`, `/gitops/bindings`, `GET /automation/status` |
-| `/settings` | Configuration, account and API keys | unchanged |
+| `/settings` | Configuration and service health, with **Account** (`/settings/account`: sessions, users) and **API keys** (`/settings/api-keys`) | `GET /config`, `GET /version`, `GET /health`, `GET /health/services`, `GET /auth/sessions`, `GET /auth/users`, `GET /auth/api-keys` |
 
 API paths are under `/api/v1` unless they say `/api/v2`.
 
@@ -81,7 +81,7 @@ With `config.externalUrl` set (see [Automation](automation.md#pull-request-conte
 |---|---|
 | `/recommendations/{id}` | The recommendation detail page. An unknown or pruned id shows "Recommendation not found". |
 | `/changes/{plan_id}` | The plan, its pull request and the applied change. A plan removed by retention still shows its applied change; a plan not applied yet says so. |
-| `/ledger?change={change_id or plan_id}` | The change's measurement, its confidence interval, the original projection for comparison and the split between its recommendations. A plan id is matched against the 1,000 most recent changes. |
+| `/ledger?change={change_id or plan_id}` | The change's measurement, its confidence interval, the original projection for comparison and the split between its recommendations. A plan id is resolved through the server-side `plan_id` filter of `GET /api/v2/changes`. |
 
 ## Recommendation detail
 

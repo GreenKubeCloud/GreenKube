@@ -88,6 +88,42 @@ async def _backfill_demo_savings_ledger(
     return inserted
 
 
+#: UID of the demo cluster's kube-system namespace (fictional): the savings ledger v2 identity.
+DEMO_CLUSTER_UID = "6f1c2b9e-4d3a-4c55-9a0e-3b7d1e52c0a4"
+
+
+async def _demo_cluster_uid() -> str:
+    return DEMO_CLUSTER_UID
+
+
+def _automation_repositories():
+    """The GitOps, plan-operation and pull-request repositories of the demo database."""
+    from greenkube.core.db import get_db_manager
+    from greenkube.core.factory import get_pull_request_repository
+    from greenkube.storage.sqlite.gitops_repository import SQLiteGitOpsRepository
+    from greenkube.storage.sqlite.plan_operation_repository import SQLitePlanOperationRepository
+
+    manager = get_db_manager()
+    return SQLiteGitOpsRepository(manager), SQLitePlanOperationRepository(manager), get_pull_request_repository()
+
+
+async def _project_ledger_v2() -> int:
+    """Catch the hash-chained savings ledger v2 up with the v1 ledger, as the controller's ledger-chain loop does."""
+    from greenkube.verify.ledger.projector import build_projector
+
+    result = await build_projector(reader=_demo_cluster_uid).sync(full=True)
+    return int(result.written)
+
+
+def _write_placeholder_token(mount: str) -> None:
+    from greenkube.demo.automation import DEMO_CREDENTIALS_KEY, DEMO_CREDENTIALS_SECRET
+
+    directory = os.path.join(mount, DEMO_CREDENTIALS_SECRET)
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, DEMO_CREDENTIALS_KEY), "w", encoding="utf-8") as handle:
+        handle.write("demo-placeholder-token")
+
+
 def _configure_demo_environment(db_path: str, port: int, no_browser: bool = False) -> None:
     """Override environment variables to run in demo mode.
 
@@ -166,6 +202,13 @@ async def _populate_database(days: int) -> dict[str, int]:
     recommendations = generate_recommendations()
     counts["recommendations"] = await reco_repo.save_recommendations(recommendations)
 
+    logger.info("🔀 Recording GitOps automation (provider, bindings, plans, pull requests)...")
+    from greenkube.demo.automation import populate_demo_automation
+
+    gitops_repo, operations, pr_repo = _automation_repositories()
+    automation = await populate_demo_automation(reco_repo, gitops_repo, operations, pr_repo, get_db_manager())
+    counts.update(automation.counts)
+
     logger.info("💸 Backfilling historical savings ledger...")
     counts["savings_ledger"] = await _backfill_demo_savings_ledger(
         reco_repo,
@@ -177,7 +220,12 @@ async def _populate_database(days: int) -> dict[str, int]:
     from greenkube.demo.changes import populate_demo_changes
     from greenkube.storage.change_repository import get_change_repository
 
-    counts["measured_changes"] = await populate_demo_changes(reco_repo, get_change_repository())
+    counts["measured_changes"] = await populate_demo_changes(
+        reco_repo, get_change_repository(), plan_ids=automation.plan_ids
+    )
+
+    logger.info("🔗 Projecting the savings ledger v2 (hash chain)...")
+    counts["ledger_v2_entries"] = await _project_ledger_v2()
 
     # 5. Compress older raw metrics into hourly buckets so aggregate_timeseries
     #    can query both the raw and hourly tables consistently across all windows.
@@ -223,6 +271,11 @@ async def run_demo(port: int = 8000, days: int = 30, no_browser: bool = False) -
 
     # Configure environment for demo
     _configure_demo_environment(db_path, port, no_browser=no_browser)
+    # The demo Git provider's token Secret, mounted as in a real install. A placeholder:
+    # the demo plan service is read-only, so nothing is ever sent to the (fictional) Git host.
+    secret_mount = os.path.join(tmp_dir, "secrets")
+    _write_placeholder_token(secret_mount)
+    os.environ["GITOPS_SECRET_MOUNT"] = secret_mount
 
     # Clear factory caches so new config is picked up
     from greenkube.core.factory import clear_caches
@@ -240,6 +293,15 @@ async def run_demo(port: int = 8000, days: int = 30, no_browser: bool = False) -
     from greenkube.api.app import create_app
 
     app = create_app(use_lifespan=False)
+    # Plans are readable in the demo; previews, approvals and rollbacks are refused.
+    from greenkube.core.db import get_db_manager
+    from greenkube.demo.automation import DemoLiveState, DemoPlanService
+
+    gitops_repo, operations, _ = _automation_repositories()
+    app.state.automation_plan_service = DemoPlanService(gitops_repo, operations)
+    live_state = DemoLiveState(get_db_manager(), gitops_repo, operations)
+    await live_state.refresh()
+    live_task = asyncio.create_task(live_state.run())
 
     # Resolve listen address: 0.0.0.0 for K8s (--no-browser), localhost otherwise
     host = "0.0.0.0" if no_browser else "127.0.0.1"
@@ -291,6 +353,7 @@ async def run_demo(port: int = 8000, days: int = 30, no_browser: bool = False) -
     try:
         await server.serve()
     finally:
+        live_task.cancel()
         # Clean up
         from greenkube.core.db import get_db_manager
 

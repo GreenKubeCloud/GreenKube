@@ -15,8 +15,9 @@
 	data-key={row.key}
 	aria-labelledby="row-{row.key}"
 >
-	<div class="flex items-start justify-between gap-2">
-		<h3 id="row-{row.key}" class="min-w-0 text-sm font-medium text-dark-100 break-words">
+	<!-- Wraps: a long status pill moves under the title instead of squeezing it to one letter per line. -->
+	<div class="flex flex-wrap items-start justify-between gap-x-2 gap-y-1">
+		<h3 id="row-{row.key}" class="min-w-[8rem] flex-1 text-sm font-medium text-dark-100 break-words">
 			{#if row.href}
 				<a href={row.href} class="hover:text-green-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-green-500/60 rounded">{title}</a>
 			{:else}

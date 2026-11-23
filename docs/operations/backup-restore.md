@@ -15,12 +15,12 @@ before an upgrade.
 | What | Where | How |
 |---|---|---|
 | The GreenKube schema | bundled StatefulSet `<release>-postgres` or your external database | `pg_dump` (below) |
-| Generated credentials | Secret `<release>` (`POSTGRES_PASSWORD`, `DB_CONNECTION_STRING`, `GREENKUBE_API_KEY`, session secrets) and `<release>-initial-admin` | `kubectl get secret -o yaml`, stored encrypted (or manage them with `secrets.existingSecret`) |
+| Generated credentials | Secret `<release>` (`POSTGRES_PASSWORD`, `DB_CONNECTION_STRING`, `LEDGER_CHAIN_KEY`, `GREENKUBE_METRICS_TOKEN`, and `GREENKUBE_API_KEY` in `api_key` mode) and `<release>-initial-admin` | `kubectl get secret -o yaml`, stored encrypted (or manage them with `secrets.existingSecret`) |
 | Your values | your values file or GitOps repository | version control |
 | Git credentials | `greenkube-git-credentials` | your secret manager |
 
 The dump alone is not enough with the bundled PostgreSQL: the data volume and the dump are only usable with the
-password of the Secret `<release>`. Keep both.
+password of the Secret `<release>`, and the hash-chained ledger only verifies with its `LEDGER_CHAIN_KEY`. Keep both.
 
 ## Scheduled backups (CronJob)
 
@@ -212,7 +212,7 @@ chain. The controller's `ledger-chain` loop verifies it at startup and every `LE
 
 ```bash
 kubectl -n $NS port-forward svc/$RELEASE-api 8000:8000 &
-curl -s -H "Authorization: Bearer $GREENKUBE_API_KEY" http://localhost:8000/api/v2/ledger/summary | jq .chain
+curl -s -H "Authorization: Bearer $API_KEY" http://localhost:8000/api/v2/ledger/summary | jq .chain   # a key with the read scope
 ```
 
 `chain.ok` must be `true`, with `verified_head_seq` equal to `head_seq` and a `verified_at` after the restart.

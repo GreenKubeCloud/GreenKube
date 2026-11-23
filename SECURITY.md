@@ -7,7 +7,7 @@ cluster-wide inventory. We treat security reports as the highest priority.
 
 | Version | Supported |
 | --- | --- |
-| Latest minor release (currently 0.3.x) | Security fixes |
+| Latest minor release (currently 0.4.x) | Security fixes |
 | `dev` branch and `dev-*` images | Fixed on `dev`, released with the next version |
 | Older minor releases | No; upgrade to the latest release |
 
@@ -69,7 +69,7 @@ hardening checklist are in [Security model](docs/security-model.md).
   set `config.trustedProxyIps` to your Ingress controller addresses, and use scoped
   API keys and accounts ([Authentication](docs/authentication.md)). Upgraded installs:
   retire the deprecated bootstrap key (`auth.legacyApiKey`).
-- CI runs CodeQL, Trivy and `npm audit` on every change.
+- CI runs CodeQL, Trivy and `npm audit` on every push and pull request to `main` and `dev`, and weekly.
 
 ## Verifying releases
 

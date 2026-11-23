@@ -1556,6 +1556,218 @@ def _active_recommendation(**kwargs: Any) -> RecommendationRecord:
     return RecommendationRecord(status=RecommendationStatus.ACTIVE, **kwargs)
 
 
+def _rightsizing(
+    *,
+    now: datetime,
+    namespace: str,
+    owner_name: str,
+    replicas: float,
+    cpu: tuple[int, int] | None = None,
+    memory: tuple[int, int] | None = None,
+    usage: UtilizationStats | None = None,
+    memory_usage: UtilizationStats | None = None,
+    created_days_ago: float,
+    risk: RiskLevel = RiskLevel.LOW,
+    confidence: float = 0.88,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Fields shared by the demo rightsizings delivered through a pull request (one ``app`` container)."""
+    created_at = now - timedelta(days=created_days_ago)
+    fields: dict[str, Any] = {
+        "pod_name": f"{owner_name}-0",
+        "container_name": "app",
+        "namespace": namespace,
+        "owner_kind": "Deployment",
+        "owner_name": owner_name,
+        "type": RecommendationType.RIGHTSIZING_CPU if cpu else RecommendationType.RIGHTSIZING_MEMORY,
+        "scope": "workload",
+        "risk_level": risk,
+        "confidence": confidence,
+        "created_at": created_at,
+        "evidence": _demo_evidence(
+            now=created_at,
+            days=30,
+            cpu=cpu,
+            memory=memory,
+            usage=usage,
+            memory_usage=memory_usage,
+            risk=risk.value,
+            confidence=confidence,
+        ),
+    }
+    if cpu:
+        fields["current_cpu_request_millicores"], fields["recommended_cpu_request_millicores"] = cpu
+        fields.update(_projected(cpu_cores=(cpu[0] - cpu[1]) / 1000, replicas=replicas))
+    if memory:
+        fields["current_memory_request_bytes"], fields["recommended_memory_request_bytes"] = memory
+        fields.update(_projected(mem_gib=(memory[0] - memory[1]) / GIB, replicas=replicas))
+    fields.update(kwargs)
+    return fields
+
+
+def _landed(
+    fields: dict[str, Any],
+    *,
+    status: RecommendationStatus,
+    verification_status: str,
+    applied_at: datetime,
+    verified_at: datetime | None = None,
+    measured_cost: float | None = None,
+    measured_co2e: float | None = None,
+) -> RecommendationRecord:
+    """A demo rightsizing merged and rolled out: the request it now runs and its projected saving."""
+    actual = {
+        "actual_cpu_request_millicores": fields.get("recommended_cpu_request_millicores"),
+        "actual_memory_request_bytes": fields.get("recommended_memory_request_bytes"),
+    }
+    return RecommendationRecord(
+        status=status,
+        application_method="pr_merge",
+        applied_at=applied_at,
+        updated_at=verified_at or applied_at,
+        verification_status=verification_status,
+        verified_at=verified_at,
+        cost_saved=fields["potential_savings_cost"],
+        carbon_saved_co2e_grams=fields["potential_savings_co2e_grams"],
+        measured_cost_saved=measured_cost,
+        measured_co2e_saved_grams=measured_co2e,
+        savings_realized=True if measured_cost is not None else None,
+        **{key: value for key, value in actual.items() if value is not None},
+        **fields,
+    )
+
+
+def _delivery_recommendations(now: datetime) -> list[RecommendationRecord]:
+    """Recommendations at each stage of a GitOps pull request (see :mod:`greenkube.demo.automation`)."""
+    storefront = _rightsizing(
+        now=now,
+        namespace="website",
+        owner_name="storefront-web-eu",
+        replicas=3.0,
+        cpu=(700, 450),
+        usage=UtilizationStats(avg=190, p50=180, p90=290, p95=330, p99=380, max=410),
+        created_days_ago=4,
+        description="The EU storefront reserves 700m CPU per replica; its P95 stays near 330m outside sales.",
+        reason="P95 CPU was 330m and the maximum 410m over 30 days across 3 replicas, including a flash sale.",
+        priority="high",
+    )
+    checkout_us = _rightsizing(
+        now=now,
+        namespace="commerce",
+        owner_name="checkout-api-us",
+        replicas=4.0,
+        memory=(768 * MIB, 512 * MIB),
+        memory_usage=UtilizationStats(
+            avg=360 * MIB, p50=355 * MIB, p90=392 * MIB, p95=401 * MIB, p99=420 * MIB, max=431 * MIB
+        ),
+        created_days_ago=5,
+        description="The US checkout API keeps 768Mi per replica for a working set that peaks at 431Mi.",
+        reason="P95 memory stayed at 401Mi over 30 days with no OOM kill or restart.",
+        priority="medium",
+    )
+    stock = _rightsizing(
+        now=now,
+        namespace="retail",
+        owner_name="stock-reservation",
+        replicas=2.0,
+        cpu=(350, 200),
+        usage=UtilizationStats(avg=74, p50=70, p90=118, p95=131, p99=150, max=162),
+        created_days_ago=9,
+        description="Stock reservation was rightsized from 350m to 200m CPU per replica.",
+        reason="P95 CPU was 131m over 30 days; store opening peaks stay under 165m.",
+        priority="medium",
+    )
+    notification = _rightsizing(
+        now=now,
+        namespace="platform",
+        owner_name="notification-service",
+        replicas=2.0,
+        cpu=(300, 150),
+        usage=UtilizationStats(avg=36, p50=30, p90=74, p95=88, p99=112, max=121),
+        created_days_ago=14,
+        description="The notification service CPU request went from 300m to 150m per replica.",
+        reason="P95 CPU was 88m over 30 days; campaign bursts stay under 125m.",
+        priority="medium",
+    )
+    pos_sync = _rightsizing(
+        now=now,
+        namespace="retail",
+        owner_name="pos-sync",
+        replicas=2.0,
+        cpu=(400, 250),
+        usage=UtilizationStats(avg=82, p50=76, p90=150, p95=171, p99=196, max=210),
+        created_days_ago=35,
+        description="POS sync was rightsized from 400m to 250m CPU; its HPA then added a replica.",
+        reason="P95 CPU was 171m over 30 days. The HPA targets 60% of the request, so a smaller request "
+        "scales out sooner.",
+        priority="medium",
+    )
+    scheduler = _rightsizing(
+        now=now,
+        namespace="manufacturing",
+        owner_name="factory-scheduler",
+        replicas=1.0,
+        memory=(512 * MIB, 384 * MIB),
+        memory_usage=UtilizationStats(
+            avg=280 * MIB, p50=276 * MIB, p90=301 * MIB, p95=309 * MIB, p99=322 * MIB, max=331 * MIB
+        ),
+        created_days_ago=75,
+        description="The factory scheduler memory request went from 512Mi to 384Mi; release 3.8 grew its cache.",
+        reason="P95 memory was 309Mi over 30 days before the change.",
+        priority="low",
+    )
+    superset = _rightsizing(
+        now=now,
+        namespace="superset",
+        owner_name="superset-worker",
+        replicas=2.0,
+        cpu=(600, 350),
+        usage=UtilizationStats(avg=42, p50=35, p90=190, p95=240, p99=330, max=420),
+        created_days_ago=20,
+        risk=RiskLevel.MEDIUM,
+        confidence=0.74,
+        description="Superset workers reserve 600m CPU; their P95 stays near 240m.",
+        reason="P95 CPU was 240m over 30 days; the month-end close was not in the observation window.",
+        priority="low",
+    )
+    scheduler_applied = now - timedelta(days=60)
+    scheduler_verified = scheduler_applied + timedelta(days=DEMO_VERIFICATION_DAYS)
+    return [
+        # Their pull requests are open or merged: the automation step moves them to ``pr_open``.
+        _active_recommendation(**storefront),
+        _active_recommendation(**checkout_us),
+        _landed(
+            stock,
+            status=RecommendationStatus.APPLIED,
+            verification_status="pending",
+            applied_at=now - timedelta(hours=8),
+        ),
+        _landed(
+            notification,
+            status=RecommendationStatus.VERIFYING,
+            verification_status="in_progress",
+            applied_at=now - timedelta(days=4),
+        ),
+        _landed(
+            pos_sync,
+            status=RecommendationStatus.APPLIED,
+            verification_status="failed",
+            applied_at=now - timedelta(days=24),
+        ),
+        _landed(
+            scheduler,
+            status=RecommendationStatus.REGRESSED,
+            verification_status="passed",
+            applied_at=scheduler_applied,
+            verified_at=scheduler_verified,
+            measured_cost=scheduler["potential_savings_cost"],
+            measured_co2e=scheduler["potential_savings_co2e_grams"],
+        ),
+        # Its pull request was closed unmerged and the team ignored it (see the automation step).
+        _active_recommendation(**superset),
+    ]
+
+
 def generate_recommendations() -> list[RecommendationRecord]:
     """Generate a historical recommendation ledger for the GreenOptic story."""
     now = datetime.now(timezone.utc)
@@ -1581,12 +1793,15 @@ def generate_recommendations() -> list[RecommendationRecord]:
         ),
         _applied_recommendation(
             pod_name="lens-configurator-0",
+            container_name="app",
             namespace="manufacturing",
+            owner_kind="Deployment",
+            owner_name="lens-configurator",
             type=RecommendationType.RIGHTSIZING_MEMORY,
             description="The lens configurator now runs with 768Mi instead of 1Gi without swap pressure.",
             reason="P95 memory stabilized at 512Mi after the rendering cache was externalized to MinIO.",
             priority="medium",
-            scope="pod",
+            scope="workload",
             potential_savings_cost=460.0,
             potential_savings_co2e_grams=43000.0,
             current_memory_request_bytes=1024 * MIB,
@@ -1800,6 +2015,7 @@ def generate_recommendations() -> list[RecommendationRecord]:
             created_at=now - timedelta(days=2),
         ),
     ]
+    recommendations.extend(_delivery_recommendations(now))
 
     logger.info("Generated %d demo recommendations.", len(recommendations))
     return recommendations

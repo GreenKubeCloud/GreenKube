@@ -66,8 +66,8 @@ warm-up** check shows both estimates.
 | `greenkube-worker` Deployment | 0 replicas | Optional extra plan executors (`worker.replicas`). |
 
 Requests total about 325m CPU and 600 MiB, small enough for kind or minikube. The chart also creates read-only
-cluster RBAC (nodes, pods, workloads, Services, volumes, Argo CD and Flux objects; never Secrets), a namespaced
-Role for the Lease, and the credentials bootstrap hook described in [Credentials](#credentials-and-gitops-argo-cd-flux).
+cluster RBAC (nodes, pods, workloads, Services, volumes, Argo CD and Flux objects; never Secrets), namespaced
+Roles for the Lease and for reading the Git credentials and initial-admin Secrets by name, and the credentials bootstrap hook described in [Credentials](#credentials-and-gitops-argo-cd-flux).
 
 What activates when:
 
@@ -213,7 +213,7 @@ See [Exposure](configuration.md#exposure-ingress-httproute) for every key.
 ## Pod Security Admission
 
 Every pod the chart renders by default (api, controller, renderer, bundled PostgreSQL, credentials bootstrap Job, Helm
-test pod, and the optional worker and KRR CronJob) meets the Kubernetes Pod Security Standard `restricted`: non-root,
+test pod, and the optional worker and PostgreSQL backup CronJob) meets the Kubernetes Pod Security Standard `restricted`: non-root,
 no privilege escalation, all capabilities dropped and `RuntimeDefault` seccomp. The bundled PostgreSQL needs no root
 init container. You can install into a namespace labelled `pod-security.kubernetes.io/enforce=restricted`; CI checks
 it with a server-side dry run on kind (roadmap N5).
@@ -365,18 +365,22 @@ output is stable under Argo CD and Flux. Credentials come from three places:
 |---|---|---|
 | `secrets.existingSecret` | your Secret | you (recommended for GitOps: External Secrets, Sealed Secrets, SOPS, `kubectl`) |
 | Values you set (`secrets.*`, `postgres.auth.password`, service URLs) | `<release>-values` | Helm / Argo CD / Flux |
-| Generated when not supplied: the scrape token `GREENKUBE_METRICS_TOKEN`, `GREENKUBE_API_KEY` (`api_key` mode only), the bundled PostgreSQL password | `<release>` | the `<release>-credentials-bootstrap` hook |
+| Generated when not supplied: the scrape token `GREENKUBE_METRICS_TOKEN`, the ledger chain key `LEDGER_CHAIN_KEY`, `GREENKUBE_API_KEY` (`api_key` mode only), the bundled PostgreSQL password | `<release>` | the `<release>-credentials-bootstrap` hook |
 
 The bootstrap hook (an Argo CD PreSync hook) creates `<release>` only when it is absent and afterwards only adds
 missing keys, so it never rotates a value; it also creates `<release>-initial-admin` once. Both survive
 `helm uninstall`, like the PostgreSQL volume. It is the only hook of the chart besides the `helm test` pod: the
 database migrations run in the controller. For a fully declarative setup, set `secrets.existingSecret` and
-`auth.admin.existingSecret`; the chart then renders no Secret and runs no hook.
+`auth.admin.existingSecret`; the chart then renders no Secret and runs no hook (unless the ServiceMonitors live in
+another namespace and the hook must copy the scrape token there). Put every credential in your Secret,
+including `LEDGER_CHAIN_KEY` and, optionally, `GREENKUBE_METRICS_TOKEN` (with
+`secrets.existingSecretHasMetricsToken: true`).
 
 ```bash
 kubectl -n greenkube create secret generic greenkube-secrets \
   --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 24)" \
-  --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:<same password>@greenkube-postgres:5432/greenkube"
+  --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:<same password>@greenkube-postgres:5432/greenkube" \
+  --from-literal=LEDGER_CHAIN_KEY="$(openssl rand -hex 32)"
 helm upgrade --install greenkube greenkube/greenkube -n greenkube --set secrets.existingSecret=greenkube-secrets
 ```
 

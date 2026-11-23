@@ -119,13 +119,13 @@ Every periodic job of the controller is a registered loop (`src/greenkube/core/l
 | `greenkube_loop_consecutive_failures{loop}` | Failed or timed-out ticks since the last success. |
 | `greenkube_controller_leader` | `1` on the replica that runs leader-only loops (the Lease holder, or any controller without leader election). |
 
-`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `savings-drift`, `ledger-chain`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`, `session-purge` and `controller-heartbeat`.
+`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `savings-drift`, `ledger-chain`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-readiness`, `automation-controller`, `plan-executor`, `session-purge` and `controller-heartbeat`. Loops whose feature is off are not registered.
 
 The `ledger-chain` loop also exports the integrity of the savings ledger v2 ([methodology](methodology/savings-measurement.md#12-savings-ledger-v2-c6)):
 
 | Metric | Meaning |
 | --- | --- |
-| `greenkube_ledger_chain_verification_failures_total{reason}` | Verifications that found a modified, missing or reordered entry (`hash_mismatch`, `broken_link`, `missing_entry`, `identity_mismatch`, `truncated`, `head_rewritten`). |
+| `greenkube_ledger_chain_verification_failures_total{reason}` | Verifications that found a modified, missing or reordered entry (`hash_mismatch`, `broken_link`, `missing_entry`, `identity_mismatch`, `truncated`, `head_rewritten`, `totals_mismatch`, `double_reversal`, `reversal_mismatch`; with `LEDGER_CHAIN_KEY`, also `chain_key_missing`, `chain_key_mismatch`, `chain_key_order`, `unkeyed_after_key`, `status_missing`, `status_forged`, `status_unsigned`). |
 | `greenkube_ledger_chain_ok{cluster_uid}` | 1 when the last verification of the cluster's chain passed, 0 when it failed (failures are sticky until the anchor is reset). Alerted by `GreenKubeLedgerChainVerificationFailed` (critical, `== 0`) with the controller alerts. |
 | `greenkube_ledger_chain_head_seq{cluster_uid}`, `greenkube_ledger_chain_head_info{cluster_uid,head_seq,head_hash}` | The last verified head of each savings ledger chain. Prometheus retention keeps its history outside the database: a later head below an earlier one means entries were removed. |
 | `greenkube_ledger_chain_head_keyed{cluster_uid}` | 1 when the last verified head is chained with `LEDGER_CHAIN_KEY` (HMAC), 0 otherwise. A drop from 1 to 0 in Prometheus means the chain was re-written without the key (LED-05). |
@@ -134,19 +134,19 @@ The `ledger-chain` loop also exports the integrity of the savings ledger v2 ([me
 | `greenkube_ledger_unprojected_rows{source_table}` | v1 ledger rows with a non-zero saving that have no ledger v2 entry after the last full sweep. Alerted by `GreenKubeLedgerProjectionBacklog` (warning, `> 0` for 3 hours): the v2 totals do not reconcile with the savings report. |
 | `greenkube_ledger_late_rows_projected_total{source_table}` | v1 rows found by a full sweep below the incremental window (committed out of id order) and projected late. |
 | `greenkube_ledger_chain_verified_entries` | Entries verified by the last pass, all clusters. |
-| `greenkube_ledger_write_errors_total{reason}` | Ledger passes that could not write (`projection_failed`, `supersession_failed`, `restatement_failed`, `dual_write_failed`, `invalid_v1_row`); the next pass catches up. |
+| `greenkube_ledger_write_errors_total{reason}` | Ledger passes that could not write (`<step>_failed` for the pass steps `projection`, `state_supersession`, `supersession`, `restatement`, `refutation`, `reinstatement` and `measured_quantities`, plus `dual_write_failed`, `invalid_v1_row` and `chain_key`, an append refused because of the chain key); the next pass catches up. |
 
 The same listener serves three more endpoints:
 
 - `/healthz`: liveness.
-- `/readyz`: `503` when a loop task died or a loop heartbeat is older than its staleness bound (interval × maximum backoff + timeout + 60 s).
-- `/loops`: a JSON snapshot with each loop's state (`idle`, `running`, `standby`, `failing` (the last tick failed), `crashed`), last success, last duration, consecutive failures and last error code. It requires the API key when the controller has one.
+- `/readyz`: `503` when a loop task died or a loop heartbeat is older than its staleness bound (interval × maximum backoff × (1 + jitter) + timeout + 60 s, unless the loop sets its own bound).
+- `/loops`: a JSON snapshot with each loop's state (`registered`, `idle`, `running`, `standby`, `failing` (the last tick failed), `crashed`, `stopped`), last success, last duration, consecutive failures and last error code. Like the metrics, it requires the scrape token when the controller has one.
 
 Standby replicas report their leader-only loops as `standby`, which counts as healthy.
 
 **Persisted heartbeats.** Every controller replica (leader or standby) runs the `controller-heartbeat` loop: every 30 s it writes its `/loops` snapshot, whether it holds the Lease and whether all its loops are ready to the `controller_heartbeats` table (one row per replica, keyed by the pod name; rows of replicas silent for a day are pruned). `GET /api/v1/automation/status` reads them and returns `controller`: `healthy` (a leader with a heartbeat younger than `stale_after_seconds` (120 s) whose loops are all ready), `leader` (its instance id), `available` (`false` when the table could not be read) and `instances` (per replica: `leader`, `ready`, `stale`, `heartbeat_at`, `heartbeat_age_seconds`, `started_at` and the per-loop `loops` snapshot).
 
-**Chart alerts.** With `monitoring.prometheusRule.enabled`, the chart's PrometheusRule also installs `GreenKubeControllerLoopFailing`, `GreenKubeAutomationLoopStale` and `GreenKubeNoActiveController` as above (group `greenkube.controller`; `monitoring.prometheusRule.controllerAlerts: false` leaves them out). They read the controller metrics endpoint, so the chart renders them only together with the controller ServiceMonitor (`monitoring.serviceMonitor.enabled` and `collector.metricsPort` > 0).
+**Chart alerts.** With `monitoring.prometheusRule.enabled`, the chart's PrometheusRule also installs `GreenKubeControllerLoopFailing`, `GreenKubeAutomationLoopStale` and `GreenKubeNoActiveController` as above (group `greenkube.controller`; `monitoring.prometheusRule.controllerAlerts: false` leaves them out). They read the controller metrics endpoint, so the chart renders them only together with the controller ServiceMonitor (`monitoring.serviceMonitor.enabled` and `controller.metricsPort` > 0).
 
 ### Chart alerts
 
@@ -160,11 +160,20 @@ With the controller loop alerts, the PrometheusRule installs the loop health gro
 | `GreenKubeRecommendationScanStale` (warning, 15 min) | `time() - greenkube_last_successful_optimization_run_timestamp_seconds` > `recommendationScanStaleSeconds` (10800) | No successful scan for 3 hours; silent before the first success. |
 | `GreenKubeMeasurementStalled` (warning, 10 min) | `time() - greenkube_loop_last_success_timestamp_seconds{loop="recommendation-lifecycle"}` > `measurementStaleSeconds` (1800) | Apply detection, verification and change measurement are not advancing, so the measurement backlog grows. |
 | `GreenKubeGitProviderRateLimited` (warning, 30 min) | `sum by (provider) (increase(greenkube_git_provider_rate_limited_total[30m]))` > 0 | A Git provider keeps rate-limiting GreenKube; plan operations wait for its reset time, so pull requests are delayed. |
+| `GreenKubeCollectionDegraded` (warning, 10 min) | `increase(greenkube_collection_degraded_windows_total[1h])` by `list` > 0 | A window was stored without a working pod or node list. |
+| `GreenKubeClusterIdentityMismatch` (critical, 5 min) | `max(greenkube_collection_identity_mismatch) > 0` | The database belongs to another cluster; collection stops. |
 | `GreenKubeLedgerChainVerificationFailed` (critical, group `greenkube.ledger`) | `min by (cluster_uid) (greenkube_ledger_chain_ok) == 0` | A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted, export it and compare it with your last export before anything else writes to it. |
+| `GreenKubeLedgerProjectionBacklog` (warning, 3 h, group `greenkube.ledger`) | `max by (source_table) (greenkube_ledger_unprojected_rows) > 0` | v1 ledger rows have no ledger v2 entry. |
+| `GreenKubeLedgerReconciliationFailed` (warning, 3 h, group `greenkube.ledger`) | `min by (cluster_uid) (greenkube_ledger_reconciliation_ok) == 0` | The ledger v2 accrued book does not match the v1 rows. |
+| `GreenKubeAttributionClockSkew` (warning, group `greenkube.ledger`) | `increase(greenkube_attribution_errors_total{reason="clock_skew"}[1h])` > 0 | Savings attribution refused to run because the process clock disagrees with the database clock. |
+| `GreenKubeAccrualWatermarkAhead` (warning, 15 min, group `greenkube.ledger`) | `max by (cluster_name) (greenkube_accrual_watermark_ahead_seconds) > 0` | A wrong clock wrote the accrual watermark ahead of the current hour. |
+| `GreenKubeLedgerChainKeyDropped` (critical, group `greenkube.ledger`) | `greenkube_ledger_chain_head_keyed` was 1 in the last 30 days and is now 0 | The chain was re-written without `LEDGER_CHAIN_KEY`. |
 
 The code exports no gauge of pending measurements yet, so the measurement backlog is alerted through the loop that drains it.
 
-The ledger alert sits in its own group, `greenkube.ledger`, rendered whenever `monitoring.serviceMonitor.enabled` is set, even with `controllerAlerts: false` or `controller.metricsPort: 0`, because the hash-chain verification may run in the API as well as in the controller.
+The ledger alerts sit in their own group, `greenkube.ledger`, rendered whenever `monitoring.serviceMonitor.enabled` is set, even with `controllerAlerts: false` or `controller.metricsPort: 0`, because the hash-chain verification may run in the API as well as in the controller.
+
+The group `greenkube.automation` is always rendered with `monitoring.prometheusRule.enabled`. It reads `greenkube_automation_backlog{queue,state}`: `GreenKubeAutomationOperationsStuck`, `GreenKubeAutomationOperationFailed`, `GreenKubeAutomationPlansStuck`, `GreenKubeAutomationSyncFailed`, `GreenKubeWebhookDeliveriesStuck` and `GreenKubeAutomationWorkerStale` (all warning, 5 min).
 
 ## Operations alerts
 
@@ -205,10 +214,14 @@ The metric collection job publishes, on the control-loop registry:
 | `greenkube_collection_gap_windows_total{source}` | Windows abandoned because they were older than `COLLECTION_MAX_BACKFILL`. |
 | `greenkube_collection_recollect_skipped_total{source,reason}` | Re-collected windows left as stored because the new pass was worse: `missing_pods` (a step of the new pass misses a stored pod) or `cost_unavailable` (no OpenCost cost where the stored rows had one). |
 | `greenkube_collection_rows_rejected_total{source,reason}` | Collected rows left out of their window because they cannot be stored (`no_timestamp`); the window's steps are recorded with reason `rows_rejected`. |
-| `greenkube_collection_dropped_samples_total{reason}` | Prometheus samples dropped (`non_finite`, `malformed`, `out_of_window`) or clamped (`negative_clamped`). |
+| `greenkube_collection_dropped_samples_total{reason}` | Prometheus samples dropped (`non_finite`, `malformed`, `out_of_window`, `implausible`) or clamped (`negative_clamped`). |
+| `greenkube_collection_cost_pending_steps{source}` | Steps inside the backfill horizon whose cost waits for OpenCost (outage, lag or rejected request); their rows carry a modeled cost labelled `opencost_pending`. |
+| `greenkube_collection_cost_pending_expired_steps_total{source}` | Steps that left `COLLECTION_MAX_BACKFILL` while their cost still waited for OpenCost; their rows keep the untrusted `opencost_pending` cost. |
 | `greenkube_unknown_power_profile_nodes` | Nodes that fell back to `DEFAULT_INSTANCE_PROFILE` in the latest collection. |
+| `greenkube_gpu_nodes_unmeasured` | GPU nodes without DCGM samples whose GPU model has no TDP profile: their GPU power is not counted. |
+| `greenkube_shared_host_groups` | Groups of Kubernetes nodes found to run on one physical host in the latest collection. |
 
-These metrics are produced in the controller process; they are scraped once the controller serves its own metrics endpoint (roadmap A12).
+These metrics are produced in the controller process and served by the controller metrics endpoint.
 
 ## Auditability
 

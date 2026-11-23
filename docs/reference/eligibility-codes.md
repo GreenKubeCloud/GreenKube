@@ -72,7 +72,7 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 
 | Code | Meaning | Fix |
 |---|---|---|
-| `warming_up` | Fewer samples than `automation.policy.minSamples` or coverage below `minCoverage`. `eligible_at` estimates when both are met, counting one sample per query step from the end of the observation window (multi-replica workloads usually get there sooner). | Wait; no action is needed. |
+| `warming_up` | Fewer samples than `config.recommendations.minSamples` (`automation.policy.minSamples` is deprecated) or coverage below `automation.policy.minCoverage`. `eligible_at` estimates when both are met, counting one sample per query step from the end of the observation window (multi-replica workloads usually get there sooner). | Wait; no action is needed. |
 | `policy_evidence_missing` | Evidence the policy needs is missing: usage evidence, a risk level or confidence, or live discovery evidence under `missingEvidence: fail`. | Rescan and refresh GitOps discovery. |
 | `policy_evaluation_unavailable` | The automation policy evaluator failed for this workload (for example its plan-history read failed), so its live gates were not checked (fail closed). | Check the database connection, then retry. |
 | `policy_invalid` | `GITOPS_POLICY_JSON` (`automation.policy`) does not parse. | Fix the Helm values. |

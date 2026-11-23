@@ -130,7 +130,9 @@ An upgrade that reuses a 0.3.x values file keeps working: the chart maps the old
 | `automation.workerMetricsPort` | `worker.metricsPort` |
 | `rendererSandbox.*` | `renderer.*`; `rendererSandbox.enabled` is ignored |
 | `automation.policy.minSamples`, `config.recommendations.verification.minSamples` | still honoured for their gate; prefer `config.recommendations.minSamples` |
+| `config.recommendations.vpaEnabled` | still honoured; prefer `sources.settings.vpa.enabled` |
 | `config.db.type: postgres`, `config.db.path` | ignored |
+| `config.persistence.*` | the former SQLite claim `<release>` is still rendered, with `helm.sh/resource-policy: keep`, until you remove the value |
 | `config.db.type: sqlite` | the upgrade fails with the migration commands, see below |
 
 The values of removed features are not in this list: see [Removed connectors](#removed-connectors-and-consensus-policies) and [Removed advisory analyzers](#removed-advisory-analyzers).
@@ -204,7 +206,7 @@ kubectl -n greenkube rollout status deployment/greenkube-api
 
 Helm replaces the standalone Deployment `<release>` (or the production `<release>-automation`) with the new
 components (checked on kind by `make upgrade-test`: a seeded 0.3.1 standalone release reached Ready, schema 37
-to 99, every row and the API key preserved); the StatefulSet `<release>-postgres`, its claim
+to the latest migration, every row and the API key preserved); the StatefulSet `<release>-postgres`, its claim
 `data-<release>-postgres-0` and the Secret `<release>` keep their names. The PostgreSQL pod restarts once (its
 image is now pinned by digest) and the controller is recreated rather than rolled (`controller.strategy:
 Recreate`), so the old and the new code never write side by side while the schema migrates. The old hook ConfigMap `<release>` is no longer used; delete it once the upgrade succeeded:

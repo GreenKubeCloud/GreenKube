@@ -72,7 +72,7 @@ The run is recorded under `vpa` (`GET /api/v1/sources/vpa/runs`); Goldilocks sig
 
 ## Configuration
 
-`config.recommendations.vpaEnabled` (`RECOMMENDATION_VPA_ENABLED`) or `sources.settings.vpa.enabled` (`true`, `false`, `auto`). The same switch covers Goldilocks.
+`sources.settings.vpa.enabled` (`true`, `false`, `auto`; default `auto`: the source runs when the VPA CRD exists). The deprecated Helm value `config.recommendations.vpaEnabled` (`RECOMMENDATION_VPA_ENABLED`) still applies when `sources.settings.vpa.enabled` is not set. The same switch covers Goldilocks.
 
 | Setting | Default | Meaning |
 |---|---|---|

@@ -12,7 +12,12 @@ from greenkube.verify.model import ChangeOutcome, MeasurementState
 
 
 def _applied_with_ids():
-    landed = {RecommendationStatus.APPLIED, RecommendationStatus.VERIFIED}
+    landed = {
+        RecommendationStatus.APPLIED,
+        RecommendationStatus.VERIFYING,
+        RecommendationStatus.VERIFIED,
+        RecommendationStatus.REGRESSED,
+    }
     applied = [rec for rec in generate_recommendations() if rec.status in landed]
     return [rec.model_copy(update={"id": index + 1}) for index, rec in enumerate(applied)]
 
@@ -32,7 +37,11 @@ def test_capacity_verdicts_come_from_the_specs():
     verdicts = {}
     for spec in DEMO_CHANGES:
         change, measurement, state = build_demo_change(spec, _member(spec, applied))
-        assert measurement.capacity is not None
+        if spec.progress != "decided":
+            assert measurement is None
+            assert state is (MeasurementState.APPLIED if spec.progress == "applied" else MeasurementState.MEASURING)
+            continue
+        assert measurement is not None and measurement.capacity is not None
         assert measurement.capacity["method"] == "measured"
         assert measurement.evidence_sha256
         assert change.recommendation_ids == [_member(spec, applied).id]
@@ -47,6 +56,7 @@ def test_released_cores_are_measured_per_replica():
     applied = _applied_with_ids()
     spec = next(spec for spec in DEMO_CHANGES if spec.owner_name == "pricing-service")
     _change, measurement, _state = build_demo_change(spec, _member(spec, applied))
+    assert measurement is not None
     capacity = measurement.capacity
     assert capacity is not None
     assert capacity["per_replica"]["cpu_cores"] == pytest.approx(0.35)
@@ -69,9 +79,15 @@ async def test_populate_records_decided_changes_in_sqlite():
         states = {change.target.name: status.state for change, status in rows}
         assert states["api-gateway"] == MeasurementState.INCONCLUSIVE
         assert states["pricing-service"] == MeasurementState.REALIZED
+        assert states["stock-reservation"] == MeasurementState.APPLIED
+        assert states["notification-service"] == MeasurementState.MEASURING
+        assert states["pos-sync"] == MeasurementState.NOT_REALIZED
+        assert states["factory-scheduler"] == MeasurementState.REGRESSED
+        decided = {spec.owner_name for spec in DEMO_CHANGES if spec.progress == "decided"}
         for change, _status in rows:
             measurements = await changes.list_measurements(change.change_id)
-            assert len(measurements) == 1
-            assert measurements[0].capacity is not None
+            assert len(measurements) == (1 if change.target.name in decided else 0)
+            if measurements:
+                assert measurements[0].capacity is not None
     finally:
         await db_manager.close()

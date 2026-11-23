@@ -185,7 +185,7 @@ requests, per-installation rate limits, and tokens that expire after an hour. Gr
    5 minutes (`GET /app/installations`, then `GET /installation/repositories` with a short-lived installation
    token) and allows exactly those repositories. With the default `["@discovered"]`, every selected repository is
    allowed; explicit `automation.repositoryAllowlist` patterns narrow the selection, and repositories an
-   administrator allowed from the UI (`POST /api/v1/automation/repositories`) stay allowed when they are in the
+   administrator allowed from the UI (`POST /api/v1/automation/repositories/allowlist`) stay allowed when they are in the
    selection. A discovered repository the App is not installed on stays dormant with `github_app_not_installed`. If the selection cannot be read, the last
    known one is kept (before the first read, the discovered repositories apply; installation tokens still fail
    closed for repositories the App cannot reach).
@@ -339,11 +339,11 @@ After configuring a Git provider, repository allowlist, and secure renderer boun
 2. In **Automation & GitOps**, confirm the target workload has a current, resolved binding to a repository allowed by the selected provider.
 3. In **Recommendations**, choose a CPU or memory rightsizing recommendation that offers **Open PR**. Cards that cannot become a pull request list their blockers and how to fix them (the recommendation's `eligibility`); cards still collecting evidence show "Collecting evidence — eligible in ~31h". Review its **Evidence** before opening the PR.
 4. Select **Open PR**. The dialog previews every policy check, source and rendered diff, validation result, and digest inline; one more click (**Approve and open PR**, or **Approve and get the patch** / **Approve for CI delivery** in the other [delivery modes](#delivery-modes)) submits that exact digest. With [auto-approval](#auto-approval), eligible previews are approved without that click.
-5. Follow the queued operation in the plan dialog, then use the **Pull requests** tab and **View PR** to review the provider PR. A PR does not change the cluster until a reviewer merges it and the GitOps controller syncs the merged revision.
+5. Follow the queued operation in the plan dialog, then open the provider PR from the **Changes** board (the **Pull requests** link of the Recommendations page) or the **Pull requests** section of the recommendation's detail page. A PR does not change the cluster until a reviewer merges it and the GitOps controller syncs the merged revision.
 
 ### Pull-request eligibility and observability coverage
 
-Automation does not create a PR for every visible recommendation. By default, each recommendation in a plan must have at least **36 samples**, **50% evidence coverage** (`automation.policy.minCoverage: 0.5`), **60% confidence** (`automation.policy.minConfidence: 0.6`), and risk at or below `automation.policy.maxRiskLevel: medium`. A plan that groups multiple recommendations must satisfy the configured gates for the affected recommendations. Other checks include a resolved GitOps binding, a supported CPU/memory rightsizing action, no conflicting workload evidence, and the per-workload open-PR and cooldown limits.
+Automation does not create a PR for every visible recommendation. By default, each recommendation in a plan must have at least **36 samples** (`config.recommendations.minSamples`, which sets every sample gate), **50% evidence coverage** (`automation.policy.minCoverage: 0.5`), **60% confidence** (`automation.policy.minConfidence: 0.6`), and risk at or below `automation.policy.maxRiskLevel: medium`. A plan that groups multiple recommendations must satisfy the configured gates for the affected recommendations. Other checks include a resolved GitOps binding, a supported CPU/memory rightsizing action, no conflicting workload evidence, and the per-workload open-PR and cooldown limits.
 
 Evidence coverage is the share of expected CPU or memory observation points present in the recommendation's observation window, sampled at the configured Prometheus query step. It is not the GitOps binding coverage displayed on the **Automation & GitOps** page; that separate ratio reports resolved workloads among discovered workloads.
 
@@ -360,7 +360,7 @@ Evidence gates are relative to the history that exists (F7): `minCoverage` is ev
 available since install (the first collected sample), capped at the lookback, so a one-day-old install that
 collected every step is not held back by a 7-day window; the observed value is reported as
 `coverage_since_install` in the `sample_count_coverage` check. While evidence is still being collected, the
-`warming_up` blocker gives an estimate in `eligible_at` (`first sample + minSamples query steps`) (on `/api/v1` and `/api/v2` recommendations, shown as "Collecting evidence — eligible in ~31h"). **Open PR** runs every gate and returns the plan or a typed rejection; it does not open a PR. The former `GET /recommendations/{id}/apply-pr/eligibility` endpoint was removed: read the recommendation's `eligibility` field. If a gate rejects a plan at preview time, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
+`warming_up` blocker gives an estimate in `eligible_at` (`first sample + minSamples query steps`) (on `/api/v1` and `/api/v2` recommendations, shown as "Collecting evidence — eligible in ~31h"). **Open PR** runs every gate and returns the plan or a typed rejection; it does not open a PR. The former `GET /recommendations/{id}/apply-pr/eligibility` endpoint was removed: read the recommendation's `eligibility` field. If a gate rejects a plan at preview time, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `config.recommendations.minSamples`, `automation.policy.minCoverage`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
 
 ## Signed webhooks (optional)
 
@@ -655,7 +655,6 @@ automation:
   policy:
     maxRiskLevel: medium
     minConfidence: 0.6
-    minSamples: 36
     minCoverage: 0.5
     maxOpenPullRequestsPerWorkload: 1
     cooldownMinutes: 60
@@ -665,7 +664,7 @@ automation:
 
 Discovery also supplies live workload labels, rollout state, controller suspend/health, and HPA, VPA and PDB evidence. A configured freeze label blocks only matching workloads.
 
-- **HPA.** An HPA blocks only the resource it scales on. A CPU-utilization target blocks CPU changes; a memory change on the same workload passes with a warning. A `ContainerResource` metric blocks only its own container. A plan that adds an HPA conflicts with an existing one.
+- **HPA.** An HPA blocks only the resource it scales on. A CPU-utilization target blocks CPU changes; a memory change on the same workload passes with a warning. A `ContainerResource` metric blocks only its own container.
 - **VPA.** A VPA that targets the workload in `Auto`, `Recreate`, `InPlaceOrRecreate` or `InPlace` mode rewrites requests itself, so it blocks the plan. `Initial` mode passes with a warning; `Off` passes.
 - **PDB.** A PDB that blocks the rolling restart rejects the plan.
 - **Controller health.** A suspended or unhealthy owning controller (`controller_unhealthy`) rejects the plan, with one exception: a workload that is OOM-killed or CPU-starved makes its own Argo CD Application `Degraded` or `Progressing`, and blocking the fix would keep it broken. An increase-only reliability plan (every linked recommendation raises a CPU or memory request, and its limit changes only raise a limit or remove a CPU limit) passes the gate when GreenKube reads the Application's live status and finds that the only unhealthy resource is the plan's target workload, with no `*Error` condition (sync, comparison or spec errors) and no failed sync operation. The check's `message` explains the decision. A suspended controller, a Flux controller, another unhealthy resource, a sync error, or an unreadable Application still blocks.
@@ -717,14 +716,14 @@ automation:
 
 The deep links open the [recommendation detail, change and ledger pages](ui.md#pull-request-deep-links) of the UI.
 
-**Title.** `greenkube: rightsize payments/api (cpu 500m→200m, mem 1Gi→512Mi) · −$412/yr · −18 kgCO₂e/yr`. The verb follows the action (`rightsize`, `raise resources of`, `autoscale`, `delete`, or `revert …` for rollbacks). Titles are at most 72 characters: the resource details, then the CO₂e figure, are dropped before the title is cut, and the full summary is always in the body. `titlePrefix` sets the conventional-commit prefix; an empty prefix drops it.
+**Title.** `greenkube: rightsize payments/api (cpu 500m→200m, mem 1Gi→512Mi) · −$412/yr · −18 kgCO₂e/yr`. The verb follows the action (`rightsize`, `raise resources of`, `delete`, or `revert …` for rollbacks). Titles are at most 72 characters: the resource details, then the CO₂e figure, are dropped before the title is cut, and the full summary is always in the body. `titlePrefix` sets the conventional-commit prefix; an empty prefix drops it.
 
 **Body.** The built-in template renders these sections:
 
 1. **Summary**: one sentence and a totals table per month and per year, for cost and CO₂e. The values are *projected* by the Impact Model, with the realization factor; they are never mixed with measured savings.
 2. **Changes**: per container, only the resources that change, as current → proposed with the delta.
 3. **Why**: per recommendation, the finding, the consensus line (sources and proposed value), the evidence (window, samples, coverage, p95, p99, max, restarts and OOM events) and a link to the recommendation.
-4. **Risk & what to watch**: the risk level and factors, headroom over p95 and max, and the signals to watch for 24 hours. An *Autoscalers and disruption budgets* list explains the HPA, VPA and PDB interactions: the plan's policy checks (`hpa_interaction`, `vpa_interaction`, `pdb_interaction`, with the autoscalers they found, or "not checked" when the evidence was missing), the policy warnings about them, the risk factors `hpa_scales_on_resource`, `hpa_present`, `vpa_conflicting_writer` and `pdb_blocks_disruption`, and, for a plan that adds an HPA, how the new autoscaler interacts with requests, other autoscalers and PDBs. When the policy result has no HPA, VPA or PDB evidence, the list says so.
+4. **Risk & what to watch**: the risk level and factors, headroom over p95 and max, and the signals to watch for 24 hours. An *Autoscalers and disruption budgets* list explains the HPA, VPA and PDB interactions: the plan's policy checks (`hpa_interaction`, `vpa_interaction`, `pdb_interaction`, with the autoscalers they found, or "not checked" when the evidence was missing), the policy warnings about them, the risk factors `hpa_scales_on_resource`, `hpa_present`, `vpa_conflicting_writer` and `pdb_blocks_disruption`. When the policy result has no HPA, VPA or PDB evidence, the list says so.
 5. **Assumptions**: unit prices and their source, observed cost sources, carbon intensity and its source, the CO₂e basis (what the projection counts), PUE, realization factor, carbon price and Impact Model version. The intensity is the projection window's average; its source lists the intensity sources the Impact Model recorded and, when it records none (Impact Model 1.1), states how the value was derived: the stored grid intensity of the observed samples, or the node profile's intensity where a sample has none.
 6. **Rollback**: revert the PR, or the GreenKube rollback pull request from the change page. Layouts without automated rollback say so.
 7. **Verification plan**: when measurement starts and ends, the strategy, and where results are posted.
@@ -836,7 +835,7 @@ When a repository leaves the provider allowlist (or the provider credentials sto
 - **Rate limit**: unchanged (see [Provider rate limits](#provider-rate-limits)). The record waits until the provider's reset time, and the backoff step does not grow.
 - Other transient failures (`5xx`, timeouts) are still retried on the next cycle.
 
-To resume, add the repository (or a matching pattern) back to the provider allowlist, through `gitops.providers[].repositories` or the discovered-repository allowlist. Adding a pattern makes the detached records of that provider due at once. The next poll reattaches them, logs `... are reattached` and emits `pull_request_records_reattached`. After fixing credentials, the records resume at their next backoff step (within an hour). If a repository was removed on purpose, close its open plan PRs on the provider: the detached records then stay idle.
+To resume, add the repository (or a matching pattern) back to the provider allowlist, through `automation.providers[].repositoryAllowlist`, `automation.repositoryAllowlist` or the discovered-repository allowlist (`POST /api/v1/automation/repositories/allowlist`). Adding a pattern makes the detached records of that provider due at once. The next poll reattaches them, logs `... are reattached` and emits `pull_request_records_reattached`. After fixing credentials, the records resume at their next backoff step (within an hour). If a repository was removed on purpose, close its open plan PRs on the provider: the detached records then stay idle.
 
 ### A plan stuck in `applying`
 
@@ -846,7 +845,7 @@ The worker writes a `pending` pull-request record before it pushes the branch. W
 - otherwise the pending records move to `error` with the reason, the plan moves to `failed` (`operation_retry_exhausted`) and its recommendations can be planned again;
 - a transient provider error, or a failure to read the provider configuration, leaves everything unchanged until the next sweep; a provider that is gone (removed, disabled or misconfigured) fails the plan (`delivery_recovery_provider_unavailable`) and the record names the branch to check for an untracked PR.
 
-An operator or admin can also abandon a stuck plan: `POST /api/v1/automation/plans/{plan_id}/abandon` with an optional `{"reason": "..."}` (`approve` scope). It cancels the plan's operation, closes its pending records and fails the plan with the audit reason `abandoned_by_operator`, recorded with the caller (the reason is written to the closed records and the controller log). It is refused (`409`) unless the plan is `applying`, while a worker holds a live lease on the operation, when a pull request was already recorded for the plan, and when the deterministic plan branch holds an open pull request that was never recorded (the refusal names the branch and the PR): close that PR on the provider instead, or let the reconciler adopt it. It is also refused while the provider cannot be asked (transient error); a provider that is gone does not block it.
+An operator or admin can also abandon a stuck plan: `POST /api/v1/automation/plans/{plan_id}/abandon` with an optional `{"reason": "..."}` (`approve` and `write` scopes: operator or admin). It cancels the plan's operation, closes its pending records and fails the plan with the audit reason `abandoned_by_operator`, recorded with the caller (the reason is written to the closed records and the controller log). It is refused (`409`) unless the plan is `applying`, while a worker holds a live lease on the operation, when a pull request was already recorded for the plan, and when the deterministic plan branch holds an open pull request that was never recorded (the refusal names the branch and the PR): close that PR on the provider instead, or let the reconciler adopt it. It is also refused while the provider cannot be asked (transient error); a provider that is gone does not block it.
 
 ### One plan per workload
 
@@ -862,7 +861,7 @@ A synced plan whose recommendations remain in `rollback_review` can produce a va
 - RAW and Kustomize rollback are built in. Kustomize rollback renders the overlay in the same renderer sandbox as forward planning and rejects any change outside the exact target. The supported Argo CD `HELM_VALUES` subset and Flux `HELM_RELEASE` subset restore the same Git-managed inputs as their forward plans.
 - Unsupported layouts fail closed rather than producing a partial rollback.
 
-The **Recommendations** page exposes rollback preview from the Pull requests tab when the original plan qualifies.
+The plan dialog of the **Recommendations** page offers **Preview rollback** when the original plan qualifies.
 
 ## Security model
 
@@ -887,11 +886,12 @@ The controller runs two leader-gated loops:
 - `plan-executor` claims and executes queued plan operations (at most 10 per 5-second tick).
 - `automation-controller` runs one tick every 5 seconds under a single database lease. The tick drains the webhook outbox, polls open pull requests every `automation.prPollIntervalSeconds`, then cleans up branches, reconciles exhausted operations, expires plans (every 60 s), re-checks open deletion pull requests (every 5 minutes, [Deleting orphaned resources](#deleting-orphaned-resources)) and runs retention (daily).
 
-| Mode | When | Behaviour |
-|---|---|---|
-| `inline` | Default for `standalone` when automation is enabled. | Only the controller executes plan operations. |
-| `worker` | Default for `production` when automation is enabled. | The controller executes operations, and dedicated worker pods execute them too (`production.components.automation.replicas`, or the standalone `automation-worker`). Workers do nothing else. Operation leases make any number of executors safe. The workers' authenticated metrics listener uses `automation.workerMetricsPort` (default 8001). |
-| `disabled` | Automation off. | No plan execution, webhook outbox or PR polling. Plan expiry and retention still run while Git providers are configured. |
+The controller always executes plan operations. `worker.replicas` (default `0`) adds dedicated worker pods
+(`<release>-worker`) that execute them too and do nothing else; operation leases make any number of executors safe.
+The workers' authenticated metrics listener uses `worker.metricsPort` (default `8001`). No executor claims an
+operation while delivery is paused or dormant. The 0.3.x values `automation.enabled`, `automation.mode`,
+`automation.workerMetricsPort` and `production.components.automation.replicas` are still mapped onto these settings,
+with a deprecation warning (`automation.enabled: false` and `automation.mode: disabled` set `pauseDelivery`).
 
 Loops are supervised by the controller's loop registry:
 
@@ -921,7 +921,7 @@ A daily retention job removes rendered file contents and terminal operation/webh
 
 - `GET /api/v1/automation/status` reports executor heartbeat age (`worker.inline_loop` is always `null` since the API runs no loop), the controller loop state that each controller replica persists every 30 s (`controller`: `healthy`, `leader`, and per replica its `loops` snapshot with last success, consecutive failures and last error code; see [Observability](observability-slos.md#controller-loops)), queue depth, plan backlog, discovery freshness, renderer configuration, and provider preflight/capability state. `token_configured` is `true` only when an enabled provider's credential Secret key resolves to a non-empty value; each provider also reports its own `token_configured`. A provider's `status` is `unverified` until a real call: any successful authenticated call through the provider registry sets `verified` (with `last_checked_at`): a repository archive fetch for a plan preview, pull-request polling, branch cleanup, or the plan executor opening or adopting a pull request. A call the provider refuses sets `error` with `last_error_code` `auth_failed` (HTTP 401) or `permission_denied` (403); transient errors (rate limits, including GitHub's `403` with an exhausted quota or a secondary rate limit, and 5xx) and other errors leave the state unchanged. An unchanged state is rewritten at most every 5 minutes per provider. Changing a provider's endpoint or credential reference resets it to `unverified`; other configuration changes keep it.
 - `GET /api/v1/automation/pull-requests` lists safe pending/open PR metadata.
-- `GET /prometheus/metrics` on the controller metrics port exposes the automation loop, PR polling and plan-execution metrics. In production worker mode, a separate Service/ServiceMonitor scrapes the dedicated executors' process-local registry.
+- `GET /prometheus/metrics` on the controller metrics port exposes the automation loop, PR polling and plan-execution metrics. With `worker.replicas` above 0, a separate Service/ServiceMonitor scrapes the dedicated executors' process-local registry.
 - Optional `monitoring.prometheusRule.enabled` installs alerts for stuck operations/plans, sync failures, webhook lag, stale worker heartbeats, and controller loops (`GreenKubeControllerLoopFailing`, `GreenKubeAutomationLoopStale`, `GreenKubeNoActiveController`; `monitoring.prometheusRule.controllerAlerts`).
 
 SLOs and example alert rules are documented in [Observability and SLOs](observability-slos.md). The full metric inventory is in [Prometheus and Grafana](prometheus-grafana.md).

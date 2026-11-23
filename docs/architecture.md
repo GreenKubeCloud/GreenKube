@@ -124,7 +124,7 @@ flowchart TB
 
 ## Overview
 
-GreenKube runs scheduled collection and recommendation lifecycles in a controller process alongside a stateless API and dashboard for querying stored data (see [Process topology](#process-topology)). An optional GitOps automation path discovers workload sources, renders and validates plans, executes approved pull requests, and observes controller sync and apply state. The CLI starts the collector or a local demo; it does not provide ad-hoc report or recommendation commands.
+GreenKube runs scheduled collection and recommendation lifecycles in a controller process alongside a stateless API and dashboard for querying stored data (see [Process topology](#process-topology)). An optional GitOps automation path discovers workload sources, renders and validates plans, executes approved pull requests, and observes controller sync and apply state. The CLI starts the controller or a local demo and runs maintenance commands (`recompute`, `db`, `plan`, `auth`); it does not provide ad-hoc report or recommendation commands.
 
 The system is designed around the principles of **Clean Architecture** and **Hexagonal Architecture**:
 - **Core Business Logic** (domain layer) is independent of infrastructure
@@ -154,7 +154,7 @@ flowchart LR
         Registry --> L1["collection · carbon-intensity · node-analysis"]
         Registry --> L2["recommendation-scan · recommendation-lifecycle<br/>(apply detection, measurement)"]
         Registry --> L3["savings-attribution · savings-drift · ledger-chain · metrics-compression · dashboard-summary"]
-        Registry --> L4["gitops-discovery · gitops-sync"]
+        Registry --> L4["gitops-discovery · automation-readiness · gitops-sync"]
         Registry --> L5["automation-controller<br/>(one DB lease: webhook outbox,<br/>PR polling, branch cleanup,<br/>plan expiry, retention)"]
         Registry --> L6["plan-executor · session-purge"]
     end
@@ -198,19 +198,20 @@ flowchart LR
 | `recommendation-scan` | 15 s poll (scans every `RECOMMENDATION_SCAN_INTERVAL`) | yes | — (run leases) |
 | `metrics-compression`, `dashboard-summary` | 1 h | yes | 60 / 30 min |
 | `gitops-discovery` | `GITOPS_DISCOVERY_INTERVAL` | yes | 10 min |
-| `gitops-sync` | `GITOPS_SYNC_POLL_INTERVAL` | yes | 10 min |
+| `automation-readiness` | 60 s (capability activation, F12) | yes | 10 min |
+| `gitops-sync` | `GITOPS_SYNC_POLL_INTERVAL` (default 30 s) | yes | 10 min |
 | `automation-controller` | 5 s tick; steps keep their own cadence | yes | 10 min |
 | `plan-executor` | 5 s, at most 10 operations per tick | yes | — (operation leases) |
 | `session-purge` | daily | yes | 10 min |
 | `controller-heartbeat` | 30 s | no (every replica) | 20 s |
 
-`gitops-sync` and `automation-controller` are registered when the GitOps plan runtime is configured (`GITOPS_PROVIDERS_JSON`). The delivery part, meaning `plan-executor` plus the webhook outbox, PR polling, branch cleanup and pending-PR recovery steps, runs when `AUTOMATION_ENABLED` is true and `AUTOMATION_MODE` is not `disabled`. Plan expiry and retention run whenever the plan runtime exists, as the former API sweep did.
+Automation is always on (F12): the GitOps plan runtime is composed even without explicit providers (`GITOPS_PROVIDERS_JSON`), so `gitops-sync`, `automation-controller` and `plan-executor` are registered unless the runtime fails to build. The `automation-readiness` loop (`src/greenkube/automation/readiness.py`) decides every minute, without a restart, whether delivery and pull-request tracking are active (provider inferred or configured, credentials, allowlist, renderer). `plan-executor` only executes while delivery is active; the webhook outbox, PR polling, pending-PR recovery, external-delivery linking and deletion re-check steps of `automation-controller` run while tracking is active. Delivery is paused by `automation.policy.pauseDelivery` (`AUTOMATION_PAUSE_DELIVERY`), or by the deprecated `AUTOMATION_ENABLED=false` / `AUTOMATION_MODE=disabled`. Plan expiry and retention always run.
 
 The registry guarantees:
 
 - **Leader gating.** A leader-only tick runs only while the process holds the Lease. It runs inside a `LeaderFence` scope, so a job can re-check the Lease generation before it commits (A14). Loops that must react quickly to a takeover (`gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`) re-check the Lease every 2 s while on standby; the others keep their former cadence.
 - **Isolation.** Each loop has its own task. An exception or a timeout fails only that tick. A loop task that dies unexpectedly is restarted after 5 s. After ticks that raised or timed out, a loop backs off exponentially, up to 8× its interval. Aligned loops do not back off; they retry at the next boundary. Jobs that log and swallow their own errors call `report_loop_failure()`: the tick counts as failed in the metrics and the loop status, but it does not back off, so the job keeps its cadence (a single failing Electricity Maps zone, for example, does not slow down the hourly refresh of the healthy zones). A `CancelledError` raised from inside a job while the registry is not stopping fails that tick; it does not end the loop.
-- **Health.** On `CONTROLLER_METRICS_PORT` the controller serves `/healthz` (process alive), `/readyz` (every loop alive with a fresh heartbeat, otherwise `503`) and `/loops` (a per-loop JSON snapshot with state, last success, duration, consecutive failures and last error code; it requires the API key when the controller has one). Metrics are listed in [Observability and SLOs](observability-slos.md#controller-loops).
+- **Health.** On `CONTROLLER_METRICS_PORT` the controller serves `/healthz` (process alive), `/readyz` (every loop alive with a fresh heartbeat, otherwise `503`) and `/loops` (a per-loop JSON snapshot with state, last success, duration, consecutive failures and last error code; like `/prometheus/metrics`, it requires the scrape token `GREENKUBE_METRICS_TOKEN`, or the bootstrap `GREENKUBE_API_KEY` without one, when the controller has one). Metrics are listed in [Observability and SLOs](observability-slos.md#controller-loops).
 - **Persisted heartbeats.** The `controller-heartbeat` loop writes each replica's loop snapshot to `controller_heartbeats`, so `GET /api/v1/automation/status` (served by the API, which runs no loop) reports the controller loop state (`controller`).
 
 **The automation controller loop** (`src/greenkube/automation/controller.py`) holds the database lease (the singleton `gitops_pr_polling_lease` row) for its whole tick. At most one process does automation housekeeping, even without Kubernetes leader election (standalone replicas, or old and new pods during a rollout). The tick runs these steps in order, renewing the lease and re-checking the Lease fence between steps:
@@ -220,7 +221,11 @@ The registry guarantees:
 3. `webhooks`: reconcile the durable webhook outbox (every tick, up to 5 batches of 10).
 4. `pr_polling`: poll one page of open pull requests, then branch cleanup (every `GITOPS_PR_POLL_INTERVAL`).
 5. `recovery`: quarantine stale pending pull-request attempts (once per process).
-6. `retention`: prune automation history older than 90 days and worker heartbeats older than 7 days (daily; a failed pass is retried on the next tick).
+6. `external_delivery`: link pull requests opened from the plan branch of approved `patch`/`ci` plans (every `GITOPS_PR_POLL_INTERVAL`).
+7. `deletion_recheck`: re-check open deletion pull requests and invalidate those whose resource is in use again (every 5 min).
+8. `retention`: prune automation history older than 90 days and worker heartbeats older than 7 days (daily; a failed pass is retried on the next tick).
+
+Steps 3 to 7 run only while pull-request tracking is active.
 
 A failed step is logged with an error code and does not stop the following steps. A tick in which no step is due (delivery off, between two expiry passes) returns without touching the lease row. A standby controller resets `greenkube_automation_worker_up` to 0 (`plan-executor` standby hook), so only the leader reports itself as an executor.
 
@@ -325,6 +330,14 @@ All collectors are fully asynchronous and implement a common pattern.
 - **Fallback:** When the API does not recognise a provider or instance type, or fails, the failure is cached for 24 hours and the node gets `DEFAULT_EMBODIED_KG_PER_VCPU` × cores (`embodied_source=fallback_per_vcpu`, rows flagged estimated); a `greenkube.io/embodied-kg` node annotation takes precedence (`configured`)
 - **Emits:** Lifetime embedded GWP of the instance (`impacts.gwp.embedded.value` of the v1 API)
 
+#### **Other collectors** (`src/greenkube/collectors/`)
+- `dcgm_collector.py` — GPU power and utilization from the NVIDIA DCGM exporter (through Prometheus)
+- `metrics_server_collector.py` — per-container usage from the Kubernetes Metrics API (COL-05)
+- `vpa_collector.py`, `hpa_collector.py` — recommendation-mode VPAs and HPA targets
+- `lb_collector.py`, `pv_collector.py` (with `k8s_object_reader.py`, `deletion_candidates.py`) — evidence that a LoadBalancer Service or PersistentVolume is unused
+- `autoscaler_collector.py` — Cluster Autoscaler status and Karpenter NodePools, read as inputs of the realization factor
+- `workload_health_collector.py`, `kubernetes_health_collector.py` — workload health signals for post-apply verification
+
 ### Estimator (Business Logic)
 
 #### **BasicEstimator**
@@ -386,7 +399,7 @@ The composition root of the collection pipeline: it builds the collectors and co
 
 #### **OptimizationEngine**
 
-Analyzes `CombinedMetric` data to identify optimization opportunities (`src/greenkube/core/optimization/`). It runs only in the controller: the leader-gated `recommendation_scan` job (`scan_service.py`) queues a scheduled run every `RECOMMENDATION_SCAN_INTERVAL` and executes queued runs, including API requests from `POST /api/v1/optimization/runs`. The job stays idle until the controller's initial collection is done, which ends with one forced cluster-wide scan on the fresh data. API replicas never scan; their recommendation GET endpoints are read-only. Each run is persisted in `optimization_runs` with per-source health and the new/changed/resolved diff. The CLI does not expose a recommendation command.
+Analyzes `CombinedMetric` data to identify optimization opportunities (`src/greenkube/core/optimization/`). It runs only in the controller: the leader-gated `recommendation-scan` loop (`scan_service.py`) queues a scheduled run every `RECOMMENDATION_SCAN_INTERVAL` and executes queued runs, including API requests from `POST /api/v1/optimization/runs`. The job stays idle until the controller's initial collection is done, which ends with one forced cluster-wide scan on the fresh data. API replicas never scan; their recommendation GET endpoints are read-only. Each run is persisted in `optimization_runs` with per-source health and the new/changed/resolved diff. The CLI does not expose a recommendation command.
 
 **Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB inputs) → run enabled **sources** → combine their signals by **consensus** (one recommendation per target, capability and kind) and deduplicate → attach an **evidence** block and a **risk/confidence/effort** assessment → compute the multi-criteria **ranking score** → persist and reconcile per source (a failed or incomplete source never blocks the others and never marks its recommendations stale).
 
@@ -398,9 +411,13 @@ Analyzes `CombinedMetric` data to identify optimization opportunities (`src/gree
      request, from per-step usage percentiles and configured headroom.
    - **Orphaned PV / LoadBalancer cleanup** (`greenkube.orphaned_pv`, `greenkube.orphaned_lb`).
 
-2. **VPA (`vpa`, optional)** — reads recommendation-mode VerticalPodAutoscalers (`updateMode: Off`) and replaces native CPU/memory rightsizing for the same workload, avoiding duplicate advice. Wrapped by the v1 connector adapter.
+2. **VPA (`vpa`, optional; `providers/vpa.py`)** — reads recommendation-mode VerticalPodAutoscalers (`updateMode: Off`). VPAs created by Goldilocks are reported under the source id `goldilocks`; both count as one engine (one vote). Immature VPAs (`VPA_MIN_SAMPLE_HOURS`, `LowConfidence`) do not vote.
 
-3. **Plugins** — third-party sources installed in the image ([example](../examples/greenkube-source-example)). Their signals are recorded and become recommendations only through the consensus engine, under the plugin's own source id.
+3. **Pushed signals (`signals/connectors/`)** — the push API (`push:<client>`) and KRR report uploads (`krr`), both stored in and read from the signal inbox (`inbox.py`). Pushed ballots count as one independent vote per group.
+
+4. **Plugins** — third-party sources installed in the image ([example](../examples/greenkube-source-example)). Their signals are recorded and become recommendations only through the consensus engine, under the plugin's own source id.
+
+**Consensus (`signals/consensus.py`):** one policy, `native`: GreenKube's measured value decides the size. External sources (VPA, Goldilocks, KRR, push, plugins) never move the value; agreement raises the confidence and disagreement makes the consensus contested and lowers it. A container-resources group without a native ballot never becomes a recommendation.
 
 **Isolation:** the `SourceRunner` runs each source with its own probe and collection timeouts, a rate limit (`min_interval_seconds`) and a circuit breaker (`failure_threshold` consecutive failures skip the source for `circuit_cooldown_seconds`). It drops signals that break the contract (another source id, an undeclared capability), trims raw payloads, evidence and source estimates to bounded sizes, ignores v1 recommendations from third-party sources (third-party advice reaches recommendations only as signals, through consensus) and records an API-safe error code, never an exception message. A source that fails, times out, is skipped or returns a partial batch is not authoritative: its previous recommendations are kept, never marked stale. Native analyzers count as one v1 source (`greenkube`) in `optimization_runs.source_outcomes`, so one failing analyzer makes `greenkube` incomplete for that run.
 
@@ -422,21 +439,21 @@ Implementations:
 - **PostgresCarbonIntensityRepository** (Default/Production):
   - Driver: `asyncpg` (native async PostgreSQL)
   - Features: Connection pooling, prepared statements, transactional DDL
-  - Schema: `carbon_intensity` table with zone, timestamp, intensity
-  - Migrations: Automatic schema creation and updates
+  - Schema: `carbon_intensity_history` table with zone, timestamp, intensity
+  - Migrations: numbered SQL scripts (`core/migrations/scripts/postgres/`), applied by the controller under an advisory lock
 
 - **SQLiteCarbonIntensityRepository** (Development/Testing):
   - Driver: `aiosqlite` (async SQLite wrapper)
   - Features: File-based, zero-config, perfect for CI/CD
   - Schema: Same as PostgreSQL for compatibility
-  - Migrations: ALTER TABLE with existence checks
+  - Migrations: numbered SQL scripts (`core/migrations/scripts/sqlite/`)
 
 #### **NodeRepository**
 Abstract base class for node state snapshots.
 
 Implementations:
 - **PostgresNodeRepository:**
-  - Schema: `node_snapshots` table with timestamp, name, instance_type, zone, capacity
+  - Schema: `node_snapshots_scd` (SCD Type 2: one row per node state with its validity interval; the legacy `node_snapshots` table is still written) with name, instance_type, zone, capacity
   - Features: Historical timeline reconstruction, TTL-based cleanup
   - Queries: Latest snapshots before timestamp, snapshot ranges
 
@@ -444,7 +461,7 @@ Implementations:
   - Same schema and features as PostgreSQL
   - Lightweight for single-node deployments
 
-#### **CombinedMetricRepository**
+#### **CombinedMetricsRepository**
 Stores final aggregated metrics (energy + carbon + cost + resources).
 
 Main columns:
@@ -459,8 +476,9 @@ Main columns:
   - Restarts: restart_count
 - Metadata: node, node_instance_type, node_zone, emaps_zone, owner_kind, owner_name
 - Provenance (one column per dimension, see `greenkube.models.provenance`):
-  `cost_source` (opencost, opencost_derived, kubecost, pricing_catalog, custom_rate, none;
-  `opencost_derived` is an OpenCost cost below its 5-decimal precision, rebuilt at OpenCost's node unit prices; rows priced with the flat
+  `cost_source` (opencost, opencost_derived, kubecost, pricing_catalog, custom_rate, opencost_pending, none;
+  `opencost_derived` is an OpenCost cost below its 5-decimal precision, rebuilt at OpenCost's node unit prices; `opencost_pending` is the
+  untrusted modeled cost of a window OpenCost could not price yet, re-priced once it answers; rows priced with the flat
   `DEFAULT_COST` placeholder carry `none`),
   `usage_source` (prometheus, metrics_server, none),
   `power_source` (instance_profile, node_capacity_derived, default_profile, kepler),
@@ -495,17 +513,17 @@ more than two hours, and a failed step marks the `metrics-compression` loop tick
 - **GHG Scope 3 Cat. 1:** `embodied_co2e_grams` — upstream hardware manufacturing emissions (Boavizta, allocated by CPU share)
 - **Total (Scope 2 + 3):** `total_co2e_grams` — computed field, full pod carbon footprint
 
-Migrations: All backends support automatic schema evolution (ADD COLUMN IF NOT EXISTS)
+Migrations: numbered SQL scripts per backend (`src/greenkube/core/migrations/scripts/postgres/` and `sqlite/`), tracked in the database and run at startup by the controller (`DB_RUN_MIGRATIONS`).
 
 #### **EmbodiedRepository**
 Caches Boavizta API responses for hardware embodied emissions.
 
-Schema: provider, instance_type, gwp_manufacture, lifespan_hours, last_updated
+Schema (`instance_carbon_profiles`): provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated, error
 
 #### **SummaryRepository**
 Stores pre-computed KPI scalar totals per window.
 
-Schema: window_slug, namespace, total_co2e_grams, total_embodied_co2e_grams, total_cost, total_energy_joules, pod_count, namespace_count, updated_at
+Schema: window_slug, namespace, total_co2e_grams, total_embodied_co2e_grams, total_cost, total_energy_joules, pod_count, namespace_count, updated_at, idle_co2e_grams, idle_embodied_co2e_grams, idle_cost, idle_energy_joules, idle_data_since
 
 #### **TimeseriesCacheRepository**
 Stores pre-computed time-series buckets per window and granularity.
@@ -516,12 +534,12 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 
 #### **FastAPI Server**
 - **Location:** `src/greenkube/api/`
-- **Port:** 8000 (configurable)
+- **Port:** `API_PORT` (default 8000)
 - **Features:**
   - OpenAPI/Swagger documentation at `/api/v1/docs`
   - CORS support for frontend
   - Health checks and readiness probes
-  - Structured logging with request IDs
+  - Structured logging (`LOG_FORMAT`)
   - Error handling with appropriate HTTP status codes
 
 **Endpoints:**
@@ -571,7 +589,7 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - **Deployment:** Static build served by FastAPI at `/`
 
 **Pages** (see [Web UI](ui.md)):
-- `/` — Overview: realized savings, pending verification and projected opportunity side by side (never summed), changes in flight, top recommendations
+- `/` — Overview: measured allocated savings, pending verification and projected opportunity side by side (never summed), changes in flight, top recommendations
 - `/recommendations` — Optimization recommendations, evidence, plan preview, pull requests
 - `/recommendations/{id}` — Recommendation detail (target of pull-request links): eligibility, projected impact, consensus, evidence, pull requests, measurement, timeline
 - `/changes` — Changes board: Plan → PR open → Merged → Synced → Applied → Measuring → Outcome, with filters
@@ -579,7 +597,7 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - `/sources` and `/setup` — Recommendation sources with their runs; setup checklist, capability states and repository suggestions
 - `/automation` — GitOps discovery, workload binding coverage, manual resolution, automation readiness
 - `/footprint` — Footprint KPIs and charts, `/footprint/nodes` (node inventory) and `/footprint/report` (report builder: time range, namespace, aggregation, CSV/JSON download); `/report` and `/nodes` redirect there
-- `/settings` — Configuration, service health overview with color-coded status indicators, and runtime service configuration
+- `/settings` — Configuration (read-only) and service health overview, `/settings/account` (sessions, users) and `/settings/api-keys`
 
 **Features:**
 - Client-side routing for smooth navigation
@@ -597,9 +615,15 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - **Location:** `src/greenkube/cli/`
 - **Framework:** Typer
 - **Commands:**
-  - `greenkube start` — Run the collector and scheduler as a background service
+  - `greenkube start` — Run the controller (collection and every periodic loop)
   - `greenkube demo` — Launch demo mode with sample data
+  - `greenkube recompute` — Re-allocate stored raw rows with the current Impact Model
+  - `greenkube db copy`, `db ledger-accept-head`, `db ledger-rotate-key` — Database maintenance
+  - `greenkube plan apply-patch`, `plan report-delivery` — Deliver an approved plan yourself (`patch` and `ci` modes)
+  - `greenkube auth reset-password` — Reset a local account's password
   - `greenkube version` — Show version info
+
+  See [CLI Reference](cli.md). The optional plan worker runs as `python -m greenkube.cli.automation_worker`.
 
 The REST API is started by the separate `greenkube-api` entry point (`greenkube.api.app:main`).
 
@@ -612,7 +636,7 @@ The REST API is started by the separate `greenkube-api` entry point (`greenkube.
 ## Data Flow
 
 ### Collection (run_range())
-The controller's `collect_metrics` job is the only production writer of usage, energy, cost and carbon rows.
+The controller's `collection` loop is the only production writer of usage, energy, cost and carbon rows.
 
 1. **Catch-up planning** (`core/collection.py`, `MetricsCollectionJob`):
    ```
@@ -689,7 +713,7 @@ The controller's `collect_metrics` job is the only production writer of usage, e
 2. **Analysis:**
    ```
    OptimizationEngine.generate()
-   ├─ Run enabled sources through the SourceRunner (native analyzers, VPA, plugins)
+   ├─ Run enabled sources through the SourceRunner (native analyzers, VPA, pushed signals, plugins)
    ├─ Record each source's run and signals (source_runs, source_signals)
    ├─ Combine every source's signals by consensus (policy, agreement, per-source spread)
    ├─ Deduplicate and clamp values to configured minimums
@@ -741,7 +765,7 @@ The controller's `collect_metrics` job is the only production writer of usage, e
    └─ Normal post-apply health and savings verification
    ```
 
-Only CPU and memory rightsizing recommendations have action planners. Unsupported sources and renderers fail closed with typed reasons. See [GitOps automation](automation.md) for the supported matrix and security model.
+Only CPU and memory rightsizing (`container_resources`) and orphaned LoadBalancer/PersistentVolume deletion (`delete_resource`) have action planners. Unsupported sources and renderers fail closed with typed reasons. See [GitOps automation](automation.md) for the supported matrix and security model.
 
 ## Action framework
 
@@ -813,8 +837,8 @@ All configuration flows through `src/greenkube/core/config.py`:
 - `VERIFICATION_*` — post-apply verification gates
 
 **Automation:**
-- `AUTOMATION_ENABLED` — Default: `false`
-- `AUTOMATION_MODE` — `disabled`, `inline` (the controller executes plan operations) or `worker` (dedicated workers execute them as well); the API never runs a worker
+- `AUTOMATION_PAUSE_DELIVERY` — Default: `false`; pauses delivery while discovery, previews, tracking and measurement keep running (Helm: `automation.policy.pauseDelivery`)
+- `AUTOMATION_ENABLED` / `AUTOMATION_MODE` — Deprecated (removed in 0.5): automation is always on; `AUTOMATION_ENABLED=false` or `AUTOMATION_MODE=disabled` pauses delivery. Dedicated workers run with `worker.replicas`; the API never runs a worker
 - `GITOPS_DISCOVERY_INTERVAL` / `GITOPS_BINDING_TTL`
 - `GITOPS_PROVIDERS_JSON` — Secret-reference provider registry
 - `GITOPS_RENDERER_URL` — isolated renderer service
@@ -829,20 +853,35 @@ helm-chart/
 ├── values.schema.json         # Types and ranges of the values (N2)
 └── templates/
     ├── _values.tpl            # Effective settings; maps the 0.3.x keys (F17)
+    ├── _helpers.tpl, _security_helpers.tpl, _git_provider_helpers.tpl,
+    │   _webhook_helpers.tpl, _exposure_helpers.tpl, _scheduling.tpl  # Template helpers
     ├── components.yaml        # api, controller and optional worker Deployments
+    ├── renderer.yaml          # Isolated Helm/Kustomize renderer (always deployed)
     ├── api-service.yaml       # API/UI ClusterIP Service
-    ├── controller-metrics-service.yaml # Controller metrics ClusterIP Service
-    ├── controller-servicemonitor.yaml  # Controller metrics ServiceMonitor
-    ├── controller-role.yaml   # Namespaced Role for the controller Lease
+    ├── controller-metrics-service.yaml # Controller metrics Service (controller.metricsPort > 0)
+    ├── worker-service.yaml    # Worker metrics Service (worker.replicas > 0)
     ├── configmap.yaml         # Non-secret config (<release>-config)
     ├── secret.yaml            # Credentials supplied in values
     ├── credentials-bootstrap.yaml # Generated credentials, created once (N1)
     ├── leader-lease.yaml      # Controller Lease (always rendered)
-    ├── renderer.yaml          # Isolated Helm/Kustomize renderer (always deployed)
     ├── legacy-sqlite-pvc.yaml # Former SQLite claim kept during the 0.3.x upgrade
-    ├── postgres-*.yaml        # PostgreSQL StatefulSet (optional)
-    ├── serviceaccount.yaml    # K8s RBAC
-    └── clusterrole.yaml       # Read permissions for nodes/pods/GitOps
+    ├── postgres-statefulset.yaml, postgres-service.yaml  # Bundled PostgreSQL (postgres.enabled)
+    ├── postgres-networkpolicy.yaml # Ingress to the bundled PostgreSQL (postgres.networkPolicy)
+    ├── postgres-backup.yaml   # Scheduled pg_dump CronJob (postgres.backup.enabled)
+    ├── serviceaccount.yaml    # ServiceAccounts
+    ├── clusterrole.yaml, clusterrolebinding.yaml # Read permissions for nodes/pods/GitOps
+    ├── controller-role.yaml   # Namespaced Role for the controller Lease
+    ├── git-credentials-role.yaml # get/watch on the default Git credentials Secret
+    ├── role.yaml, rolebinding.yaml # Initial admin Secret bootstrap (F14)
+    ├── servicemonitor.yaml, controller-servicemonitor.yaml, worker-servicemonitor.yaml # ServiceMonitors
+    ├── servicemonitor-scrape-token.yaml # Scrape token copy for ServiceMonitors in another namespace
+    ├── prometheus-rbac.yaml   # Prometheus read access to the release namespace
+    ├── prometheusrule.yaml    # Alerts (monitoring.prometheusRule.enabled)
+    ├── networkpolicy.yaml     # Component NetworkPolicies (monitoring.networkPolicy.enabled)
+    ├── pdb.yaml               # PodDisruptionBudgets (replicas > 1)
+    ├── ingress.yaml, httproute.yaml # Optional Ingress or Gateway API HTTPRoute
+    ├── NOTES.txt
+    └── tests/test-connection.yaml
 ```
 
 ### Container Structure (Multi-Stage Build)
@@ -942,7 +981,7 @@ retention, and database sizing.
 ### Test Patterns
 - **TDD:** Write tests before implementation
 - **AAA:** Arrange, Act, Assert structure
-- **Async:** All async code tested with pytest.mark.asyncio
+- **Async:** pytest-asyncio in `auto` mode (async tests need no marker)
 - **Isolation:** No shared state between tests
 
 ## Design Principles & Guidelines
@@ -953,7 +992,7 @@ retention, and database sizing.
 - **NEVER** import storage-specific code in `src/greenkube/core`
 - **ALWAYS** use repository abstracts (defined in `storage/base_repository.py`)
 - **ALWAYS** instantiate repositories via factory pattern
-- Cloud-specific logic belongs in `utils/` or `energy/` mapping files
+- Cloud-specific logic belongs in the `data/` mapping files (region mapping, instance profiles, PUE profiles)
 
 #### Error Handling
 - **NEVER** let collection errors crash the pipeline
@@ -1020,7 +1059,6 @@ The API liveness endpoint does not probe optional providers. Readiness is marked
 - Real-time recommendation updates
 
 **Extended Metrics:**
-- GPU power consumption (NVIDIA DCGM)
 - Custom metrics via PromQL
 
 **Enhanced Reporting:**
