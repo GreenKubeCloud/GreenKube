@@ -10,12 +10,23 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from greenkube.demo.automation import DemoAutomationResult
 from greenkube.demo.runner import _configure_demo_environment, _populate_database
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 
 
 class TestConfigureDemoEnvironment:
     """Tests for _configure_demo_environment."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_demo_mode(self, monkeypatch):
+        """The runner sets GREENKUBE_DEMO_MODE; restore it so later tests do not run in demo mode."""
+        from greenkube.core.config import get_config
+
+        monkeypatch.setenv("GREENKUBE_DEMO_MODE", "false")
+        yield
+        os.environ["GREENKUBE_DEMO_MODE"] = "false"
+        get_config().reload()
 
     def test_sets_sqlite_db_type(self, monkeypatch):
         """Demo mode must use SQLite."""
@@ -75,6 +86,9 @@ def test_demo_environment_sets_demo_mode(monkeypatch):
     finally:
         os.environ["GREENKUBE_DEMO_MODE"] = "false"
         get_config().reload()
+
+
+_AUTOMATION = DemoAutomationResult(plan_ids={1: "pln-demo"}, counts={"automation_plans": 1})
 
 
 class TestPopulateDatabase:
@@ -140,6 +154,9 @@ class TestPopulateDatabase:
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
             patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
+            patch("greenkube.demo.automation.populate_demo_automation", AsyncMock(return_value=_AUTOMATION)),
+            patch("greenkube.demo.runner._automation_repositories", return_value=(None, None, None)),
+            patch("greenkube.demo.runner._project_ledger_v2", AsyncMock(return_value=12)),
         ):
             counts = await _populate_database(days=2)
 
@@ -211,6 +228,9 @@ class TestPopulateDatabase:
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
             patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
+            patch("greenkube.demo.automation.populate_demo_automation", AsyncMock(return_value=_AUTOMATION)),
+            patch("greenkube.demo.runner._automation_repositories", return_value=(None, None, None)),
+            patch("greenkube.demo.runner._project_ledger_v2", AsyncMock(return_value=12)),
         ):
             counts = await _populate_database(days=2)
 
@@ -277,6 +297,9 @@ class TestPopulateDatabase:
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
             patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
+            patch("greenkube.demo.automation.populate_demo_automation", AsyncMock(return_value=_AUTOMATION)),
+            patch("greenkube.demo.runner._automation_repositories", return_value=(None, None, None)),
+            patch("greenkube.demo.runner._project_ledger_v2", AsyncMock(return_value=12)),
         ):
             counts = await _populate_database(days=2)
 
@@ -346,6 +369,9 @@ class TestPopulateDatabase:
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
             patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
+            patch("greenkube.demo.automation.populate_demo_automation", AsyncMock(return_value=_AUTOMATION)),
+            patch("greenkube.demo.runner._automation_repositories", return_value=(None, None, None)),
+            patch("greenkube.demo.runner._project_ledger_v2", AsyncMock(return_value=12)),
         ):
             counts = await _populate_database(days=2)
 

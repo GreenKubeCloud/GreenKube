@@ -1,0 +1,2 @@
+### Added
+- `greenkube demo` now shows GreenKube in daily use: a configured Gitea provider with Argo CD and Flux sources, twelve automation plans at every stage (preview awaiting approval, pull request open, merged and waiting for sync, synced and rolling out, applied and measuring, realized, inconclusive, not realized, regressed, closed and ignored) whose plans, pull requests, recommendations, changes and ledger entries agree, and a savings ledger v2 with its cluster identity instead of the v1 fallback note; plans are read-only in the demo.
