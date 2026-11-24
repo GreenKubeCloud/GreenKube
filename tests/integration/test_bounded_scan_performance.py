@@ -54,13 +54,27 @@ SCAN_SCRIPT = textwrap.dedent(
     from greenkube.core.optimization.providers.native import NativeSource
     from greenkube.storage.base_workload_usage_repository import create_workload_usage_repository
 
+    def peak_rss_bytes():
+        # Linux keeps ru_maxrss across fork and exec: a child of a 1 GB pytest process
+        # reports 1 GB before doing anything. VmHWM is the peak of this process's own
+        # address space, reset at exec. macOS has no /proc and does not inherit it.
+        try:
+            with open("/proc/self/status") as status:
+                for line in status:
+                    if line.startswith("VmHWM:"):
+                        return int(line.split()[1]) * 1024
+        except OSError:
+            pass
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return peak if sys.platform == "darwin" else peak * 1024
+
     SIDE = {"node_infos": [], "hpa_targets": set(), "persistent_volumes": [], "load_balancers": []}
 
     async def main():
         cfg = Config()
         manager = DatabaseManager(cfg)
         await manager.connect()
-        base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        base_bytes = peak_rss_bytes()
         started = time.perf_counter()
         with (
             patch("greenkube.core.optimization.context_builder.get_active_k8s_namespaces",
@@ -74,9 +88,7 @@ SCAN_SCRIPT = textwrap.dedent(
             recs = enrich_recommendations(finalize_recommendations(recs, cfg), context, cfg)
         elapsed = time.perf_counter() - started
         await manager.close()
-        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        unit = 1 if sys.platform == "darwin" else 1024
-        peak_bytes, base_bytes = peak * unit, base * unit
+        peak_bytes = peak_rss_bytes()
         summaries = sum(len(c) for c in context.usage_snapshot().summaries.values())
         print(json.dumps({
             "seconds": elapsed,
