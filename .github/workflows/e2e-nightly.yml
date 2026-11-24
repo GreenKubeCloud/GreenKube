@@ -113,7 +113,9 @@ jobs:
           kubectl -n greenkube-e2e-apps get deploy -o yaml >sample-apps.yaml 2>&1 || true
           # What the verifier sees: cost provenance of every stored pod row of the sample
           # workloads, step by step (an untrusted cost_source leaves a verdict inconclusive).
-          # The password stays inside the pod: psql reads it from the pod's own environment.
+          # The password stays inside the pod: psql reads it from the pod's own environment
+          # (single quotes on purpose, so $POSTGRES_PASSWORD expands in the pod, not here).
+          # shellcheck disable=SC2016
           pg() { kubectl -n greenkube exec greenkube-postgres-0 -- sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d greenkube -P pager=off -c "$1"' sh "$1"; }
           pg "SELECT timestamp, pod_name, duration_seconds, cost_source, total_cost, cost_cpu, cost_ram, usage_source, cpu_request, memory_request
                 FROM combined_metrics WHERE namespace = 'greenkube-e2e-apps' ORDER BY timestamp, pod_name" \
