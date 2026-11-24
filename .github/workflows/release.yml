@@ -83,7 +83,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          uv run pytest --cov=greenkube --cov-report=term-missing --cov-report=xml -rs | tee pytest.log
+          uv run pytest --cov=greenkube --cov-report=term-missing --cov-report=xml -rfEs | tee pytest.log
 
       - name: Check that the PostgreSQL tests ran
         run: .github/scripts/check-postgres-ran.sh pytest.log
