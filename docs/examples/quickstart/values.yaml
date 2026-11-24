@@ -1,0 +1,89 @@
+# GreenKube quickstart values: demo-accelerated evidence so that a rightsizing
+# pull request can be opened minutes after install instead of days.
+#
+#   helm upgrade --install greenkube ./helm-chart -n greenkube --create-namespace \
+#     -f docs/examples/quickstart/values.yaml
+#
+# DO NOT use these values in production. They collect a sample every 30 seconds,
+# accept 6 samples as enough evidence, ignore observation coverage and measure a
+# merged change over 6 minutes. Every number GreenKube shows is then based on a
+# few minutes of data.
+
+image:
+  repository: greenkube/greenkube
+  # hack/e2e builds the image from your checkout with this tag. Use a release
+  # tag (for example 0.3.1) to try a published image instead.
+  tag: e2e-dev
+  pullPolicy: IfNotPresent
+
+config:
+  # Prometheus and OpenCost are discovered in-cluster when left empty.
+  prometheus:
+    url: ''
+    # One sample every 30 seconds (default 5m).
+    queryRangeStep: 30s
+    scrapeInterval: 30s
+  collection:
+    safetyLag: 30s
+    # A fresh install backfills only the last 30 minutes (default 24h).
+    maxBackfill: 30m
+  nodeAnalysisInterval: 1m
+  recommendations:
+    lookbackDays: 1
+    # Every sample gate (recommendations, plan policy, verification):
+    # 6 samples x 30s = 3 minutes of evidence.
+    minSamples: 6
+    # The sample workloads are oversized, so their rightsizings are decreases,
+    # which wait for 7 days of observed coverage by default (weekly cycles).
+    # About 90 seconds here.
+    minDecreaseCoverageDays: 0.001
+    # Scheduled scans every minute (default 1h); POST /api/v1/optimization/runs
+    # still queues one on demand.
+    scanInterval: 1m
+    verification:
+      # Health gates of a merged change after 6 minutes (default 72 hours).
+      windowHours: 0.1
+      lifecycleInterval: 30s
+    # Change measurement (counterfactual, roadmap C3) needs a 7-day baseline and
+    # a 7-day post-window; the quickstart decides with the verifier above, in
+    # minutes. To record merged changes on /changes and measure them on
+    # accelerated demo windows instead (decided about 80 minutes after the merge
+    # on demo thresholds, labelled representative=false), add
+    #   -f docs/examples/quickstart/values-change-measurement.yaml
+    changeMeasurement:
+      enabled: false
+  # Savings ledger v2: catch up and verify the hash chain every 5 minutes (default 1h).
+  ledger:
+    chainVerifyInterval: 5m
+
+# Automation is always on; delivery activates once the Gitea token Secret exists.
+automation:
+  discoveryInterval: 30s
+  prPollIntervalSeconds: 10
+  syncPollIntervalSeconds: 10
+  syncTimeoutSeconds: 900
+  policy:
+    maxRiskLevel: medium
+    minConfidence: 0.6
+    # Coverage is measured against the whole lookback window (1 day), which a
+    # fresh install cannot reach in minutes.
+    minCoverage: 0
+    cooldownMinutes: 0
+    missingEvidence: warn
+  providers:
+    # The in-cluster Gitea of the quickstart. Create the token Secret first:
+    #   kubectl -n greenkube create secret generic greenkube-git --from-literal=token=<gitea token>
+    - id: gitea-quickstart
+      type: gitea
+      apiBaseUrl: http://gitea-http.gitea.svc.cluster.local:3000/api/v1
+      # Pull-request links open in the browser through
+      #   kubectl -n gitea port-forward svc/gitea-http 3000
+      webBaseUrl: http://localhost:3000
+      secretName: greenkube-git
+      secretKey: token
+      repositoryAllowlist:
+        - greenkube/greenkube-e2e-quickstart
+
+postgres:
+  persistence:
+    size: 2Gi

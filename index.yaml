@@ -2,6 +2,208 @@ apiVersion: v1
 entries:
   greenkube:
   - annotations:
+      artifacthub.io/category: integration-delivery
+      artifacthub.io/changes: |
+        - kind: added
+          description: "Gap-aware collection: collection runs on wall-clock steps behind a per-installation watermark and catches up missing windows oldest first."
+        - kind: added
+          description: "Collection coverage and health: every step is recorded as `collected`, `empty`, `failed` or `gap`; `GET /api/v1/collection/coverage` returns the coverage ratio and holes, and `GET /api/v1/health`…"
+        - kind: added
+          description: "Provenance and metadata history: pod and container rows record the source of each dimension (`cost_source`, `usage_source`, `power_source`, `intensity_source`, ...), OpenCost cost components…"
+        - kind: added
+          description: "Impact Model: reservation-aware allocation of energy, operational and embodied CO2e and cost, with an explicit `__idle__` row per node so pod and idle rows add up to node totals; memory power…"
+        - kind: added
+          description: "Embodied emissions: values come from Boavizta, the node annotation `greenkube.io/embodied-kg` or `config.boavizta.embodiedKgByInstanceType`, with a per-vCPU fallback…"
+        - kind: added
+          description: "Node idle share in reports: `/metrics/summary`, `/metrics/timeseries` and `/report/summary` return the idle share and `cluster_total_*` (allocated + idle); `/report/export?include_idle=true` adds…"
+        - kind: added
+          description: "Impact projections and cost fallback: every recommendation carries an `impact` projection (cost and CO2e, capacity released, unit prices and their source)."
+        - kind: added
+          description: "Released capacity: projected (core-, GiB-, replica- and node-hours per year) on every recommendation and measured with a capacity verdict on each decided change, never converted to money."
+        - kind: added
+          description: "Change records and measurement: every applied workload revision is stored as an immutable change with a frozen 7-day baseline (`GET /api/v2/changes[/{id}[/measurements]]`)."
+        - kind: added
+          description: "Drift and reliability fixes: a realized change moves to `regressed` when it loses `CHANGE_DRIFT_THRESHOLD` of its saving for `CHANGE_DRIFT_SUSTAINED_DAYS`."
+        - kind: added
+          description: "Savings ledger v2: append-only signed entries per method (`projected`, `measured_allocated`, `realized_billed`, `user_declared`) and accounting basis, with reversals and restatements once a…"
+        - kind: added
+          description: "Ledger operations: `greenkube db ledger-rotate-key` records a chain key rotation; `greenkube db ledger-accept-head` accepts the ledger head after a restore or failover lost entries."
+        - kind: added
+          description: "Scheduled scans and optimization runs: leader-gated scans every `RECOMMENDATION_SCAN_INTERVAL` (`config.recommendations.scanInterval`); `POST /api/v1/optimization/runs`, `GET…"
+        - kind: added
+          description: "Expected-value ranking and risk model: each recommendation carries a `value` block (annual value, success probability, incident and effort cost) tuned by `RECOMMENDATION_INCIDENT_COST`…"
+        - kind: added
+          description: "Two-way rightsizing: reliability increases (`RIGHTSIZING_INCREASE_THRESHOLD`, capped by `RIGHTSIZING_MAX_INCREASE_FACTOR`), limit advice (`RECOMMENDATION_LIMITS_POLICY`), a coverage requirement for…"
+        - kind: added
+          description: "Eligibility and recommendation v2 API: every recommendation carries server-side `eligibility` (`can_open_pr`, delivery modes, blockers and warnings with their fix…"
+        - kind: added
+          description: "Recommendation sources: a source SDK and registry (built-in sources, third-party plugins from `greenkube.sources` entry points) with isolation, timeouts and persisted runs; `GET /api/v1/sources`…"
+        - kind: added
+          description: "Deletion recommendations: orphaned LoadBalancers and PersistentVolumes must look unused for `DELETION_MIN_UNUSED_DAYS` and list their evidence; they become reviewed pull requests (never…"
+        - kind: added
+          description: "Manual mode: `GET /api/v1/recommendations/{id}/manual` returns `kubectl` steps, a patch and a diff; `POST …/manual/applied` records a hand-applied change so it is measured; an Apply manually panel…"
+        - kind: added
+          description: "Always-on GitOps automation: Git providers are inferred from Argo CD and Flux sources and delivery activates when the Secret `greenkube-git-credentials` exists (a token, or a GitHub App with signed…"
+        - kind: added
+          description: "Pull requests and plans: PR template v2 with configurable title, labels, drafts for high-risk plans, CODEOWNERS reviewers, a `greenkube/validation` commit status and one lifecycle comment…"
+        - kind: added
+          description: "Git provider observability and setup: per-operation call budget, `greenkube_git_provider_*` metrics and the `GreenKubeGitProviderRateLimited` alert; a guided setup checklist (`GET…"
+        - kind: added
+          description: "Accounts and sessions: `API_AUTH_MODE=session` with server-side sessions, `HttpOnly` cookies, CSRF protection and login rate limiting (`/api/v1/auth/*`, `auth.session.*`); `greenkube auth…"
+        - kind: added
+          description: "API keys and single sign-on: scoped API keys (`read`, `write`, `approve`, `signals:write`, `signals:report`, `plans:deliver`, `metrics:read`, `admin`) and a generated scrape token…"
+        - kind: added
+          description: "Helm chart: a credentials bootstrap hook that generates credentials once and keeps them on uninstall; `values.schema.json`; Ingress and Gateway API HTTPRoute templates; per-component scheduling…"
+        - kind: added
+          description: "Operations monitoring: controller metrics and health on `controller.metricsPort` (9102: `/healthz`, `/readyz`, `/loops`) with a ServiceMonitor; PrometheusRule groups for the controller, loops…"
+        - kind: added
+          description: "UI and docs: a savings-first Overview, recommendation detail, Changes, Ledger, Sources, Setup and Footprint pages, and account, session, API key and user pages; recommendation cards show expected…"
+        - kind: added
+          description: "Demo: `greenkube demo` shows GreenKube in daily use: a configured Gitea provider with Argo CD and Flux sources, twelve automation plans at every stage (preview awaiting approval, pull request open…"
+        - kind: changed
+          description: "Process layout: collection, scans and plan execution run in the controller; the API is stateless and safe to scale (`api.replicas`, `controller.replicas`, optional `worker.replicas`)."
+        - kind: changed
+          description: "GreenKube's measured value decides the size: VPA, Goldilocks, KRR and pushed signals no longer replace the native rightsizing value; agreeing sources raise its confidence and contested ones lower…"
+        - kind: changed
+          description: "Recommendations: a new `pr_open` status while a pull request is open; percentiles use per-step values and projections annualize over observed coverage; decreases no longer flap; OOM kills and…"
+        - kind: changed
+          description: "Verification: the previous (interim) verifier remains only with `CHANGE_MEASUREMENT_ENABLED=false` and its savings are reported apart; otherwise change measurement decides, with windows starting at…"
+        - kind: changed
+          description: "Savings API and metrics: `GET /api/v1/recommendations/savings` returns separate, never-summed blocks (`projected_annual`, `run_rate_annual`, `realized_to_date`, `projected_to_date`…"
+        - kind: changed
+          description: "Fail-closed behaviour: collection under a different cluster UID, decreases with unknown OOM/restart history, missing evidence, unmanaged or ambiguous resource bindings and remote GitOps destinations…"
+        - kind: changed
+          description: "GitOps delivery: previewing a workload again supersedes its unapproved plans; plan branches are created at the validated commit; HPA gates apply only to what an HPA scales; roles are enforced per…"
+        - kind: changed
+          description: "UI: navigation is Overview, Recommendations, Changes, Ledger, Footprint, Automation, Sources, Setup, Settings (`/report` and `/nodes` redirect under `/footprint`); savings read \"saves $X/yr\" and…"
+        - kind: changed
+          description: "Build and CI: the frontend moved to SvelteKit 3 and the image builds it with Node 22; CI pins every action by SHA, gates coverage at 80% and runs an end-to-end loop on Minikube…"
+        - kind: deprecated
+          description: "`refresh=true` on recommendation reads (it only queues a run)."
+        - kind: deprecated
+          description: "The bootstrap key `GREENKUBE_API_KEY` (still an admin key unless `auth.legacyApiKey` says otherwise); use accounts and scoped keys."
+        - kind: deprecated
+          description: "The flat `total_*`, `measured_*` and `prorated_*` fields of `GET /recommendations/savings`, `is_estimated`, `RECOMMENDATION_RANKING_WEIGHTS` and the worker's `--queue` option."
+        - kind: deprecated
+          description: "The Helm values listed in the upgrade notes (mapped for one minor release)."
+        - kind: removed
+          description: "Advisory analyzers: zombie pods, idle namespaces, off-peak scaling, autoscaling candidates, carbon-aware scheduling and over/under-provisioned nodes."
+        - kind: removed
+          description: "Karpenter NodePool connector and source priority: `RECOMMENDATION_KARPENTER_ENABLED` (`config.recommendations.karpenterEnabled`) and `RECOMMENDATION_SOURCE_PRIORITY`…"
+        - kind: removed
+          description: "Large Grafana dashboard: `dashboards/greenkube-grafana.json` (Grafana.com dashboard 25377); import `dashboards/greenkube-operations.json` instead."
+        - kind: removed
+          description: "Footprint and recommendation series on `/prometheus/metrics`: every `greenkube_pod_*`, `greenkube_namespace_*` and `greenkube_node_*` family, cluster footprint totals, grid intensity, PUE…"
+        - kind: removed
+          description: "Network, disk and storage dimensions: network receive/transmit, disk read/write, ephemeral storage and PVC request/usage are no longer collected or returned by the metrics API; their columns keep…"
+        - kind: removed
+          description: "Routes: `POST /api/v1/recommendations/{id}/apply-pr`, `GET …/apply-pr/eligibility`, `GET /api/v1/automation/operations/{operation_id}` (use the plans API and `eligibility`) and `POST…"
+        - kind: removed
+          description: "Settings and runtime configuration: `LOW_NODE_CPU_THRESHOLD`, `PROMETHEUS_QUERY_RANGE_MAX_SAMPLES` and `SERVICE_URL_ALLOWLIST` (and their Helm values), runtime configuration overrides stored in the…"
+        - kind: removed
+          description: "Helm: `values-production.yaml`, the standalone two-container pod, the production deployments, the migration Job, the credential-check and ServiceMonitor CRD hooks, and the…"
+        - kind: fixed
+          description: "CPU and memory measurement: no more doubled CPU and memory from pod-cgroup or duplicate series; consecutive windows no longer share, skip or shift samples; NaN/Inf samples are dropped; CPU of…"
+        - kind: fixed
+          description: "Stored rows: windows with no data, re-collections and missing pods no longer erase or degrade stored rows; failed Kubernetes or carbon-intensity reads fail the window instead of dropping rows…"
+        - kind: fixed
+          description: "Workload identity: pod owners follow the controller chain (a ReplicaSet resolves to its Deployment or Argo Rollout, a Job to its CronJob); static control-plane pods no longer receive…"
+        - kind: fixed
+          description: "OpenCost costs: every request sends `OPENCOST_BEARER_TOKEN` or `OPENCOST_USERNAME`/`OPENCOST_PASSWORD` (an authenticated OpenCost yielded no cost); same-named pods in different namespaces or…"
+        - kind: fixed
+          description: "Carbon data: Boavizta values are used (every lookup failed and fell back to a flat 100 kg per node); stale or default intensities are no longer used as measured; the default zone gets live…"
+        - kind: fixed
+          description: "Recommendations: rightsizing prices CPU and memory separately and never claims more than the container costs; young workloads are no longer projected 168 times too low; OOM-killed containers get a…"
+        - kind: fixed
+          description: "Verification and ledger: ledger compression no longer loses half of the savings; accrual no longer double counts on restart or failover; failed, inconclusive or reverted outcomes no longer accrue…"
+        - kind: fixed
+          description: "GitOps delivery: GitLab merge requests can be opened again (approved plans went `stale`); sync is confirmed when a later commit contains the merge; GitHub PRs closed unmerged and GitLab fast-forward…"
+        - kind: fixed
+          description: "Operations and UI: the bundled PostgreSQL runs without a root init container (Pod Security `restricted`); the API key is no longer asked after every reload; page loads no longer trigger full scans…"
+        - kind: security
+          description: "CORS and rate limiting: wildcard CORS is never combined with credentials and CORS is same-origin by default; rate limiting keys per route and on the rightmost untrusted `X-Forwarded-For` hop…"
+        - kind: security
+          description: "Git credentials: the default Git token is never sent to a host it was not issued for; remote chart fetches never follow cross-host redirects with tokens or reach loopback, link-local or metadata…"
+        - kind: security
+          description: "Secrets and keys: the credentials Secret is read through a Role limited to its name and the API can no longer patch it; no full-admin key is generated in browser modes; HSTS on HTTPS; PostgreSQL…"
+        - kind: security
+          description: "Code scanning: the frontend no longer depends on vulnerable `@sveltejs/kit` 2.x (`npm audit` is clean); log lines quoting request data escape line breaks; oversized durations and steps are rejected…"
+      artifacthub.io/images: |
+        - name: greenkube
+          image: greenkube/greenkube:0.4.0
+          platforms:
+            - linux/amd64
+            - linux/arm64
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Documentation
+          url: https://docs.greenkube.cloud/
+        - name: GitHub
+          url: https://github.com/GreenKubeCloud/GreenKube
+        - name: Docker Hub
+          url: https://hub.docker.com/r/greenkube/greenkube
+        - name: support
+          url: https://github.com/GreenKubeCloud/GreenKube/issues
+      artifacthub.io/maintainers: |
+        - name: Hugo Lelievre
+          email: hugo.lelievre@greenkube.cloud
+      artifacthub.io/prerelease: "false"
+      artifacthub.io/recommendations: |
+        - url: https://artifacthub.io/packages/helm/prometheus-community/kube-prometheus-stack
+        - url: https://artifacthub.io/packages/helm/opencost/opencost
+      artifacthub.io/screenshots: |
+        - title: Overview: measured, pending and projected savings
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-dashboard.png
+        - title: Recommendations, ranked, with the capacity they free
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-recommendations.png
+        - title: Changes: plan, pull request, sync, rollout, outcome
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-automation.png
+        - title: A measured change: cost interval and released capacity
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-change.png
+        - title: Footprint: node inventory
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-nodes.png
+        - title: Footprint: cost, energy and CO2e report export
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-report.png
+    apiVersion: v2
+    appVersion: 0.4.0
+    created: "2026-11-24T23:37:56.155353511Z"
+    description: GreenKube is an open-source Kubernetes optimization loop. It sizes
+      container requests from measured usage (corroborated by VPA and KRR when present),
+      ranks the changes by impact and risk, delivers them as reviewable GitOps pull
+      requests for Argo CD and Flux, verifies the sync, and measures the cost and
+      CO₂e savings each change realizes.
+    digest: fac0c0bd5e970cc4178e60b6aa0a2d911e1c618b551e9ddeded73563f8b96e9b
+    home: https://greenkube.cloud
+    icon: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
+    keywords:
+    - greenkube
+    - kubernetes
+    - optimization
+    - rightsizing
+    - gitops
+    - pull-request
+    - argocd
+    - flux
+    - vpa
+    - finops
+    - cloud-cost
+    - carbon
+    - co2
+    - sustainability
+    - opencost
+    - prometheus
+    maintainers:
+    - email: hugo.lelievre@greenkube.cloud
+      name: Hugo Lelievre
+      url: https://github.com/GreenKubeCloud
+    name: greenkube
+    sources:
+    - https://github.com/GreenKubeCloud/GreenKube
+    type: application
+    urls:
+    - https://GreenKubeCloud.github.io/GreenKube/greenkube-0.4.0.tgz
+    version: 0.4.0
+  - annotations:
       artifacthub.io/category: monitoring-logging
       artifacthub.io/changes: |
         - kind: security
@@ -66,7 +268,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.3.1
-    created: "2026-10-25T08:54:14.213430841Z"
+    created: "2026-11-24T23:37:56.15128005Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, analyze, and optimize the estimated carbon footprint and cloud costs
       of your workloads. Provides estimated CO₂e metrics, energy estimation, cost
@@ -167,7 +369,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.3.0
-    created: "2026-10-25T08:54:14.211527885Z"
+    created: "2026-11-24T23:37:56.147872603Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -339,7 +541,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.12
-    created: "2026-10-25T08:54:14.206519691Z"
+    created: "2026-11-24T23:37:56.14076779Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -511,7 +713,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.11
-    created: "2026-10-25T08:54:14.20534683Z"
+    created: "2026-11-24T23:37:56.139191806Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -683,7 +885,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.10
-    created: "2026-10-25T08:54:14.203779361Z"
+    created: "2026-11-24T23:37:56.13768894Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -1114,7 +1316,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.9
-    created: "2026-10-25T08:54:14.210107103Z"
+    created: "2026-11-24T23:37:56.146295599Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -1539,7 +1741,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.8
-    created: "2026-10-25T08:54:14.208066558Z"
+    created: "2026-11-24T23:37:56.14401859Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -1577,4 +1779,4 @@ entries:
     urls:
     - https://GreenKubeCloud.github.io/GreenKube/greenkube-0.2.8.tgz
     version: 0.2.8
-generated: "2026-10-25T08:54:14.201594233Z"
+generated: "2026-11-24T23:37:56.135887283Z"

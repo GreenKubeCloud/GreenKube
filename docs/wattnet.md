@@ -52,7 +52,7 @@ the most representative sub-zone (largest demand area).
 
 | Electricity Maps | Wattnet | Notes |
 |------------------|---------|-------|
-| `AT`, `BE`, `BG`, `CH`, `CY`, `CZ`, `DE`, `EE`, `ES`, `FI`, `FR`, `GB`, `GE`, `GR`, `HR`, `HU`, `IE`, `LT`, `LU`, `LV`, `MD`, `ME`, `MK`, `NL`, `PL`, `PT`, `RO`, `RS`, `SI`, `SK`, `TR`, `XK` | same code | Identical country codes — pass through |
+| `AT`, `BA`, `BE`, `BG`, `CH`, `CY`, `CZ`, `DE`, `EE`, `ES`, `FI`, `FR`, `GB`, `GE`, `GR`, `HR`, `HU`, `IE`, `LT`, `LU`, `LV`, `MD`, `ME`, `MK`, `NL`, `PL`, `PT`, `RO`, `RS`, `SI`, `SK`, `TR`, `XK` | same code | Identical country codes — pass through |
 | `IT` | `IT_NORTH` | Country-level default (Milan area) |
 | `IT-NO` | `IT_NORTH` | Northern Italy |
 | `IT-CNO` | `IT_CNORTH` | Central-Northern Italy |
@@ -137,9 +137,9 @@ WATTNET_TOKEN_SERVICE_URL="https://api.wattnet.eu/token-request"
 
 - The health endpoint reports a `wattnet` service:
   `GET /api/v1/health/services/wattnet` should return `"healthy"`.
-- The credentials can also be updated at runtime from the Settings page
-  (`POST /api/v1/config/services` with `wattnet_email` / `wattnet_password`),
-  and are persisted to the Kubernetes Secret.
+- The credentials are configuration as code: set them in Helm values
+  (`secrets.wattnetEmail` / `secrets.wattnetPassword`) or in your
+  `secrets.existingSecret`. The Settings page shows the matching snippet.
 
 ## API endpoints used
 
@@ -170,16 +170,17 @@ GreenKube handles this in two steps:
 1. The **hourly intensity collection** refreshes the last 24 hours of history
    and **upserts** the revised values into `carbon_intensity_history`
    (same zone + timestamp, new value — both for Wattnet and Electricity Maps).
-2. It then **recomputes every combined metric in the last 24 hours** against
-   the refreshed history — updating rows that already had an intensity value,
-   not only those without one. Metrics calculated from provisional values are
+2. It then **recomputes every pod and container metric row of the last 24
+   hours** against the refreshed history — updating rows that already had an
+   intensity value, not only those without one. Only values younger than
+   `INTENSITY_MAX_AGE` are applied. Metrics calculated from provisional values are
    therefore corrected in place once the final data is available (on the next
    hourly cycle after consolidation).
 
 The recomputation reuses the same carbon calculator as the main pipeline, so
 the corrected `grid_intensity` and `co2e_grams` are identical to what a fresh
-calculation would produce. On PostgreSQL this runs as a single bulk `UPDATE`;
-other backends fall back to a per-row recompute.
+calculation would produce. It runs as one set-based `UPDATE` per table (pod and
+container rows), in one transaction on PostgreSQL.
 
 ## Roadmap: water footprint
 
