@@ -16,7 +16,7 @@ RUN npm run build && rm -rf node_modules
 # Builds the Python package and installs dependencies.
 # Uses bookworm-slim and upgrades all system packages to fix known CVEs
 # (openssl, zlib, ncurses, etc.) before installing Python deps.
-FROM python:3.14.3-slim-bookworm AS builder
+FROM python:3.15.2-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -86,7 +86,7 @@ RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
 # SECURITY: All system packages are upgraded, non-root user with high UID,
 # and no shell for the service account.
 ARG APT_CACHE_BUST=manual
-FROM python:3.14.3-slim-bookworm
+FROM python:3.15.2-slim-bookworm
 
 ARG APT_CACHE_BUST
 ARG TARGETARCH
